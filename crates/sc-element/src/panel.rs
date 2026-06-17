@@ -177,3 +177,237 @@ impl ElementBehavior for PanelZone {
         LocalMat::zeros(self.n_dof())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// パネルゾーンの検証:
+    /// 整合条件 pqc·db = pqb·dc は、節点のモーメント釣り合い ml_b + mr_b = ml_c + mu_c
+    /// が成立するとき自動的に満たされる（添付資料『パネルゾーンの力学』式(4)）。
+    /// 釣り合いを満たす入力を与え、正しい pQc/pQb/τ が計算されることを確認する。
+    #[test]
+    fn test_panel_zone_equilibrium_consistency() {
+        let dc = 500.0;
+        let db = 800.0;
+        let tp = 19.0;
+        let pz = PanelZone {
+            dc,
+            db,
+            tp,
+            g: 80_000.0,
+            kind: PanelStiffnessModel::RigidZoneApprox,
+            center_node: NodeId(0),
+            connected_nodes: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
+        };
+
+        // 節点モーメント釣り合い: ml_b + mr_b = ml_c + mu_c
+        let ml_b = 500_000.0;
+        let mr_b = 300_000.0;
+        let ml_c = 400_000.0;
+        let mu_c = 400_000.0; // 500+300 = 400+400 = 800 ✓
+
+        let conn = PanelConnection {
+            ml_b,
+            mr_b,
+            bql: 150.0,
+            bqr: 100.0,
+            bnl: 0.0,
+            bnr: 0.0,
+            ml_c,
+            mu_c,
+            cql: 120.0,
+            cqu: 130.0,
+        };
+
+        let res = pz.evaluate(&conn);
+
+        // 整合条件: pqc·db = pqb·dc
+        let lhs = res.pqc * db;
+        let rhs = res.pqb * dc;
+        assert!(
+            (lhs - rhs).abs() < 1e-9,
+            "pqc*db ({}) != pqb*dc ({})",
+            lhs,
+            rhs
+        );
+
+        // τ = pqc / (dc·tp)
+        assert!(
+            (res.tau - res.pqc / (dc * tp)).abs() < 1e-12,
+            "tau mismatch"
+        );
+
+        // フェースモーメントが正しく計算されていること
+        let dc2 = dc / 2.0;
+        let db2 = db / 2.0;
+        assert!((res.b_ml - (ml_b - conn.bql * dc2)).abs() < 1e-9);
+        assert!((res.b_mr - (mr_b - conn.bqr * dc2)).abs() < 1e-9);
+        assert!((res.c_ml - (ml_c - conn.cql * db2)).abs() < 1e-9);
+        assert!((res.c_mu - (mu_c - conn.cqu * db2)).abs() < 1e-9);
+    }
+
+    /// 方式A（剛域近似）は tangent_stiffness がゼロを返す（二重計上防止）
+    #[test]
+    fn test_panel_rigid_zone_approx_zero_stiffness() {
+        let pz = PanelZone {
+            dc: 500.0,
+            db: 700.0,
+            tp: 12.0,
+            g: 80_000.0,
+            kind: PanelStiffnessModel::RigidZoneApprox,
+            center_node: NodeId(0),
+            connected_nodes: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
+        };
+        let model = sc_core::model::Model::default();
+        let k = pz.tangent_stiffness(&ElemState {}, &Ctx { model: &model });
+        for v in k.data.as_slice() {
+            assert_eq!(*v, 0.0, "RigidZoneApprox must return zero stiffness");
+        }
+    }
+
+    /// 方式B（弾性せん断パネル）は非ゼロ剛性を返す
+    #[test]
+    fn test_panel_elastic_shear_panel_nonzero_stiffness() {
+        let pz = PanelZone {
+            dc: 500.0,
+            db: 700.0,
+            tp: 12.0,
+            g: 80_000.0,
+            kind: PanelStiffnessModel::ElasticShearPanel,
+            center_node: NodeId(0),
+            connected_nodes: vec![NodeId(1)],
+        };
+        let model = sc_core::model::Model::default();
+        let k = pz.tangent_stiffness(&ElemState {}, &Ctx { model: &model });
+        // Kp = G*tp*dc 相当の剛性が出ていること
+        let kp_expected = pz.g * pz.tp * pz.dc;
+        assert!(k.data.as_slice().iter().any(|&v| v > 0.0));
+        // 対角成分が Kp と一致
+        assert!((k.data[0] - kp_expected).abs() < 1e-6);
+    }
+
+    /// L型接合部（右梁欠落）のテスト: 欠落部材の項を 0 に
+    #[test]
+    fn test_panel_l_shape() {
+        let pz = PanelZone {
+            dc: 500.0,
+            db: 700.0,
+            tp: 12.0,
+            g: 80_000.0,
+            kind: PanelStiffnessModel::RigidZoneApprox,
+            center_node: NodeId(0),
+            connected_nodes: vec![NodeId(1), NodeId(2)],
+        };
+        // L型: 右梁(mr_b, bqr, bnr)と上柱(mu_c, cqu)が欠落 → すべて0
+        // 節点モーメント釣り合い条件: ml_b + 0 = ml_c + 0 → ml_b = ml_c
+        let conn = PanelConnection {
+            ml_b: 300_000.0,
+            mr_b: 0.0,
+            bql: 100.0,
+            bqr: 0.0,
+            bnl: 0.0,
+            bnr: 0.0,
+            ml_c: 300_000.0, // ml_b = ml_c に設定
+            mu_c: 0.0,
+            cql: 80.0,
+            cqu: 0.0,
+        };
+        let res = pz.evaluate(&conn);
+        assert!(
+            res.pqc.is_finite(),
+            "pqc should be finite for L-shape joint"
+        );
+        assert!(
+            res.pqb.is_finite(),
+            "pqb should be finite for L-shape joint"
+        );
+        // 整合条件（釣り合い条件 ml_b + 0 = ml_c + 0 より成立）
+        let lhs = res.pqc * pz.db;
+        let rhs = res.pqb * pz.dc;
+        assert!(
+            (lhs - rhs).abs() < 1e-9,
+            "pqc*db ({}) != pqb*dc ({}) for L-shape",
+            lhs,
+            rhs
+        );
+    }
+
+    /// ト型接合部（下柱欠落）のテスト
+    #[test]
+    fn test_panel_t_shape() {
+        let pz = PanelZone {
+            dc: 500.0,
+            db: 700.0,
+            tp: 12.0,
+            g: 80_000.0,
+            kind: PanelStiffnessModel::RigidZoneApprox,
+            center_node: NodeId(0),
+            connected_nodes: vec![NodeId(1), NodeId(2), NodeId(3)],
+        };
+        // ト型: 下柱(ml_c, cql)が欠落 → 0
+        // 釣り合い条件: ml_b + mr_b = 0 + mu_c
+        let conn = PanelConnection {
+            ml_b: 200_000.0,
+            mr_b: 100_000.0, // 200+100 = 300
+            bql: 80.0,
+            bqr: 60.0,
+            bnl: 0.0,
+            bnr: 0.0,
+            ml_c: 0.0,
+            mu_c: 300_000.0, // = 300
+            cql: 0.0,
+            cqu: 90.0,
+        };
+        let res = pz.evaluate(&conn);
+        assert!(
+            res.pqc.is_finite(),
+            "pqc should be finite for T-shape joint"
+        );
+        let lhs = res.pqc * pz.db;
+        let rhs = res.pqb * pz.dc;
+        assert!(
+            (lhs - rhs).abs() < 1e-9,
+            "pqc*db ({}) != pqb*dc ({}) for T-shape",
+            lhs,
+            rhs
+        );
+    }
+
+    /// 十字型接合部（全方向あり）の対称ケース
+    #[test]
+    fn test_panel_cross_symmetric() {
+        let pz = PanelZone {
+            dc: 600.0,
+            db: 800.0,
+            tp: 22.0,
+            g: 80_000.0,
+            kind: PanelStiffnessModel::RigidZoneApprox,
+            center_node: NodeId(0),
+            connected_nodes: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
+        };
+        // 左右対称 + 上下対称 → 釣り合い成立
+        let conn = PanelConnection {
+            ml_b: 450_000.0,
+            mr_b: 450_000.0,
+            bql: 120.0,
+            bqr: 120.0,
+            bnl: 0.0,
+            bnr: 0.0,
+            ml_c: 500_000.0,
+            mu_c: 400_000.0, // 450+450 = 500+400 = 900 ✓
+            cql: 100.0,
+            cqu: 100.0,
+        };
+        let res = pz.evaluate(&conn);
+        assert!(res.pqc.is_finite());
+        let lhs = res.pqc * pz.db;
+        let rhs = res.pqb * pz.dc;
+        assert!(
+            (lhs - rhs).abs() < 1e-9,
+            "pqc*db ({}) != pqb*dc ({}) for cross-shape",
+            lhs,
+            rhs
+        );
+    }
+}

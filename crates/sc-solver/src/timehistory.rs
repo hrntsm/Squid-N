@@ -62,4 +62,24 @@ mod tests {
         let h_actual = (d.alpha_m / omega1 + d.beta_k * omega1) / 2.0;
         assert!((h_actual - 0.05).abs() < 1e-6);
     }
+
+    /// 時刻歴ソルバの決定性は P6 実装後に追加予定（R28）。
+    /// 現状は Newmark/HHT 設定の決定性のみ確認。
+    #[test]
+    fn test_timehistory_config_deterministic() {
+        let cfg1 = NewmarkCfg::average_accel(0.01);
+        let cfg2 = NewmarkCfg::linear_accel(0.02);
+        let cfg3 = HhtCfg::new(0.005);
+        for _ in 0..10 {
+            let c1 = NewmarkCfg::average_accel(0.01);
+            assert_eq!(cfg1.beta.to_bits(), c1.beta.to_bits());
+            assert_eq!(cfg1.gamma.to_bits(), c1.gamma.to_bits());
+            assert_eq!(cfg1.dt.to_bits(), c1.dt.to_bits());
+            let c2 = NewmarkCfg::linear_accel(0.02);
+            assert_eq!(cfg2.beta.to_bits(), c2.beta.to_bits());
+            let c3 = HhtCfg::new(0.005);
+            assert_eq!(cfg3.alpha.to_bits(), c3.alpha.to_bits());
+            assert_eq!(cfg3.dt.to_bits(), c3.dt.to_bits());
+        }
+    }
 }

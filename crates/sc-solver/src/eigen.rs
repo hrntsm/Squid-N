@@ -516,4 +516,29 @@ mod tests {
             );
         }
     }
+
+    /// 決定性テスト: 固有値解析を10回実行しビット一致を確認
+    #[test]
+    fn test_eigen_deterministic() {
+        let model = make_1dof_spring_model();
+        let dofmap = DofMap::build(&model);
+        let reducer = Reducer::build(&model, &dofmap);
+        let first = solve_eigen(&model, &dofmap, &reducer, 1).unwrap();
+        for _ in 0..9 {
+            let cur = solve_eigen(&model, &dofmap, &reducer, 1).unwrap();
+            assert_eq!(first.omega2.len(), cur.omega2.len());
+            for (a, b) in first.omega2.iter().zip(cur.omega2.iter()) {
+                assert_eq!(a.to_bits(), b.to_bits());
+            }
+            for (a, b) in first.period.iter().zip(cur.period.iter()) {
+                assert_eq!(a.to_bits(), b.to_bits());
+            }
+            for (s_a, s_b) in first.shapes.iter().zip(cur.shapes.iter()) {
+                assert_eq!(s_a.len(), s_b.len());
+                for (va, vb) in s_a.iter().zip(s_b.iter()) {
+                    assert_eq!(va.to_bits(), vb.to_bits());
+                }
+            }
+        }
+    }
 }
