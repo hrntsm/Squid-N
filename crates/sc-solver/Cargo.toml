@@ -12,3 +12,4 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 approx = { workspace = true }
+smallvec = { workspace = true }

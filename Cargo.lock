@@ -1376,6 +1376,7 @@ dependencies = [
  "sc-core",
  "sc-element",
  "sc-math",
+ "smallvec",
  "thiserror 1.0.69",
 ]
 

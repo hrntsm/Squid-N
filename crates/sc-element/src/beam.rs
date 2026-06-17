@@ -281,102 +281,97 @@ impl BeamElement {
         kn
     }
 
-    #[allow(dead_code)]
-    fn condense_end_springs(&self, k_in: &LocalMat) -> LocalMat {
-        let mut k = LocalMat {
-            n: k_in.n,
-            data: k_in.data.clone(),
+    /// 端部回転ばねを「外部回転＋内部回転」の 18 自由度で表し、
+    /// 静縮約で 12×12（節点自由度のみ）に戻す。
+    /// 18 並び: [外部 0..11（節点 ux,uy,uz,rx,ry,rz ×2）, 内部 12..17（要素端 rx,ry,rz ×2）]
+    fn condense_end_springs(&self, k_elem: &LocalMat) -> LocalMat {
+        // 18×18 を組む
+        let n = 18;
+        let mut k = vec![0.0; n * n];
+
+        // 要素剛性: 並進は外部 DOF、回転は内部 DOF へ配置
+        let map18 = |i: usize| -> usize {
+            match i {
+                0..=2 => i,
+                3..=5 => i + 9,
+                6..=8 => i,
+                9..=11 => i + 6,
+                _ => i,
+            }
         };
-        // Pinned: free rx at that end → set relevant rows/cols to slave
-        // For simplicity, handle Fixed and Pinned via penalty/condensation.
-        // Pinned at i-end: Mz_i=0, My_i=0 → remove dofs 4,5 and condense
-        // Pinned at j-end: Mz_j=0, My_j=0 → remove dofs 10,11 and condense
-        // SemiRigid: add spring stiffness to diagonal and condense out internal dofs
-
-        let mut to_condense = Vec::new();
-        match self.end_cond[0] {
-            EndCondition::Fixed => {}
-            EndCondition::Pinned => {
-                to_condense.push(4);
-                to_condense.push(5);
-            }
-            EndCondition::SemiRigid { k_theta } => {
-                // Add spring at rotation dofs
-                k.set(4, 4, k.get(4, 4) + k_theta);
-                k.set(5, 5, k.get(5, 5) + k_theta);
-                to_condense.push(4);
-                to_condense.push(5);
-            }
-        }
-        match self.end_cond[1] {
-            EndCondition::Fixed => {}
-            EndCondition::Pinned => {
-                to_condense.push(10);
-                to_condense.push(11);
-            }
-            EndCondition::SemiRigid { k_theta } => {
-                k.set(10, 10, k.get(10, 10) + k_theta);
-                k.set(11, 11, k.get(11, 11) + k_theta);
-                to_condense.push(10);
-                to_condense.push(11);
+        for i in 0..12 {
+            for j in 0..12 {
+                k[map18(i) * n + map18(j)] = k_elem.get(i, j);
             }
         }
 
-        if to_condense.is_empty() {
-            return k;
+        // 回転ばね: 外部回転 ↔ 内部回転
+        let spring_stiffness = |cond: &EndCondition| -> f64 {
+            match cond {
+                EndCondition::Fixed => 1e12 * self.e * self.iz / self.length.max(1.0),
+                EndCondition::Pinned => 0.0,
+                EndCondition::SemiRigid { k_theta } => *k_theta,
+            }
+        };
+
+        let ext_rot = [3usize, 4, 5, 9, 10, 11];
+        let int_rot = [12usize, 13, 14, 15, 16, 17];
+        for (idx, &er) in ext_rot.iter().enumerate() {
+            let ir = int_rot[idx];
+            let kspring = if idx < 3 {
+                spring_stiffness(&self.end_cond[0])
+            } else {
+                spring_stiffness(&self.end_cond[1])
+            };
+            k[er * n + er] += kspring;
+            k[ir * n + ir] += kspring;
+            k[er * n + ir] -= kspring;
+            k[ir * n + er] -= kspring;
         }
 
-        // Static condensation: partition into keep (a) and remove (b)
-        let n = 12;
-        let keep: Vec<usize> = (0..n).filter(|i| !to_condense.contains(i)).collect();
-        let na = keep.len();
-        let nb = to_condense.len();
-
-        // Build Kaa, Kab, Kba, Kbb from k
-        let idx = |r: usize, c: usize, n: usize| r * n + c;
+        // 内部 DOF (12..17) を静縮約
+        let na = 12;
+        let nb = 6;
         let mut kaa = vec![0.0; na * na];
         let mut kab = vec![0.0; na * nb];
         let mut kba = vec![0.0; nb * na];
         let mut kbb = vec![0.0; nb * nb];
 
-        for (ai, &i) in keep.iter().enumerate() {
-            for (aj, &j) in keep.iter().enumerate() {
-                kaa[idx(ai, aj, na)] = k.get(i, j);
+        for i in 0..na {
+            for j in 0..na {
+                kaa[i * na + j] = k[i * n + j];
             }
-            for (bj, &j) in to_condense.iter().enumerate() {
-                kab[idx(ai, bj, na)] = k.get(i, j);
+            for j in 0..nb {
+                kab[i * nb + j] = k[i * n + (na + j)];
+                kba[j * na + i] = k[(na + j) * n + i];
             }
         }
-        for (bi, &i) in to_condense.iter().enumerate() {
-            for (aj, &j) in keep.iter().enumerate() {
-                kba[idx(bi, aj, nb)] = k.get(i, j);
-            }
-            for (bj, &j) in to_condense.iter().enumerate() {
-                kbb[idx(bi, bj, nb)] = k.get(i, j);
+        for i in 0..nb {
+            for j in 0..nb {
+                kbb[i * nb + j] = k[(na + i) * n + (na + j)];
             }
         }
 
-        // Invert Kbb (small, 2-4 dofs max) via Gaussian elimination
         let kbb_inv = invert_small(&kbb, nb);
 
-        // K* = Kaa - Kab * Kbb^{-1} * Kba
+        // kab_kbbinv = Kab * Kbb^-1
         let mut kab_kbbinv = vec![0.0; na * nb];
         for i in 0..na {
             for j in 0..nb {
                 let mut s = 0.0;
-                for k in 0..nb {
-                    s += kab[idx(i, k, na)] * kbb_inv[idx(k, j, nb)];
+                for l in 0..nb {
+                    s += kab[i * nb + l] * kbb_inv[l * nb + j];
                 }
-                kab_kbbinv[idx(i, j, na)] = s;
+                kab_kbbinv[i * nb + j] = s;
             }
         }
 
         let mut kstar = LocalMat::zeros(na);
         for i in 0..na {
             for j in 0..na {
-                let mut s = kaa[idx(i, j, na)];
-                for k in 0..nb {
-                    s -= kab_kbbinv[idx(i, k, na)] * kba[idx(k, j, nb)];
+                let mut s = kaa[i * na + j];
+                for l in 0..nb {
+                    s -= kab_kbbinv[i * nb + l] * kba[l * na + j];
                 }
                 kstar.set(i, j, s);
             }
@@ -394,22 +389,25 @@ impl BeamElement {
                     ..self.clone()
                 }
             };
-            // Temporarily use Fixed ends for raw stiffness
             beam.end_cond = [EndCondition::Fixed, EndCondition::Fixed];
             beam.local_stiffness_raw()
         } else {
             LocalMat::zeros(12)
         };
 
+        // 剛域を持たない可とう部で端部ばね静縮約 → 12×12
+        let k_end = self.condense_end_springs(&k_raw);
+
+        // 剛域変換で節点自由度へ
         let li = self.rigid.length_i;
         let lj = self.rigid.length_j;
-        self.apply_rigid_zone_transform(&k_raw, li, lj)
+        self.apply_rigid_zone_transform(&k_end, li, lj)
     }
 
     pub fn recover_forces(&self, u_elem_global: &[f64; 12]) -> MemberForces {
         let u_local = self.axis.rotate_to_local(u_elem_global);
-        let k_local = self.local_stiffness_raw();
-        // f_local = K_local * u_local (in local coords)
+        let k_local = self.local_stiffness();
+        // f_local = K_local * u_local (in local coords, at node ends)
         let mut f_local = [0.0; 12];
         for (i, fi) in f_local.iter_mut().enumerate() {
             let mut s = 0.0;
@@ -488,11 +486,127 @@ pub fn auto_rigid_zones(
     elem_id: sc_core::ids::ElemId,
     rule: &RigidZoneRule,
 ) -> RigidZone {
-    let _ = model;
-    let _ = elem_id;
+    let elem = match model.elements.iter().find(|e| e.id == elem_id) {
+        Some(e) => e,
+        None => {
+            return RigidZone {
+                reduction: rule.reduction,
+                ..Default::default()
+            }
+        }
+    };
+
+    let nodes = &elem.nodes;
+    if nodes.len() < 2 {
+        return RigidZone {
+            reduction: rule.reduction,
+            ..Default::default()
+        };
+    }
+
+    let self_sec = elem.section.and_then(|sid| model.sections.get(sid.index()));
+    let d_self = self_sec.map(|s| s.depth).unwrap_or(0.0);
+
+    // 節点 → 接続要素のマップ
+    let mut node_to_elems: std::collections::HashMap<usize, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (ei, e) in model.elements.iter().enumerate() {
+        if e.nodes.len() >= 2 {
+            for n in &e.nodes {
+                node_to_elems.entry(n.index()).or_default().push(ei);
+            }
+        }
+    }
+
+    fn elem_axis(model: &Model, e: &sc_core::model::ElementData) -> [f64; 3] {
+        if e.nodes.len() < 2 {
+            return [0.0, 0.0, 0.0];
+        }
+        let p0 = model.nodes[e.nodes[0].index()].coord;
+        let p1 = model.nodes[e.nodes[1].index()].coord;
+        let dx = p1[0] - p0[0];
+        let dy = p1[1] - p0[1];
+        let dz = p1[2] - p0[2];
+        let l = (dx * dx + dy * dy + dz * dz).sqrt();
+        if l < 1e-12 {
+            [0.0, 0.0, 0.0]
+        } else {
+            [dx / l, dy / l, dz / l]
+        }
+    }
+
+    fn max_orth_depth(
+        model: &Model,
+        node_idx: usize,
+        target_axis: [f64; 3],
+        target_elem_idx: usize,
+        node_to_elems: &std::collections::HashMap<usize, Vec<usize>>,
+    ) -> f64 {
+        let mut d_max = 0.0;
+        if let Some(elems) = node_to_elems.get(&node_idx) {
+            for &ei in elems {
+                if ei == target_elem_idx {
+                    continue;
+                }
+                let e = &model.elements[ei];
+                if e.nodes.len() < 2 {
+                    continue;
+                }
+                let axis = elem_axis(model, e);
+                let dot = (axis[0] * target_axis[0]
+                    + axis[1] * target_axis[1]
+                    + axis[2] * target_axis[2])
+                    .abs();
+                if dot < 0.707 {
+                    // 概ね直交（45°以上）
+                    if let Some(sec) = e.section.and_then(|sid| model.sections.get(sid.index())) {
+                        if sec.depth > d_max {
+                            d_max = sec.depth;
+                        }
+                    }
+                }
+            }
+        }
+        d_max
+    }
+
+    let target_axis = elem_axis(model, elem);
+    let target_elem_idx = model
+        .elements
+        .iter()
+        .position(|e| e.id == elem_id)
+        .unwrap_or(0);
+
+    let d_orth_i = max_orth_depth(
+        model,
+        nodes[0].index(),
+        target_axis,
+        target_elem_idx,
+        &node_to_elems,
+    );
+    let d_orth_j = max_orth_depth(
+        model,
+        nodes[nodes.len() - 1].index(),
+        target_axis,
+        target_elem_idx,
+        &node_to_elems,
+    );
+
+    let lambda = |d_orth: f64| -> f64 {
+        let v = rule.reduction * (d_orth / 2.0 - d_self / 4.0);
+        if v < 0.0 {
+            0.0
+        } else {
+            v
+        }
+    };
+
     RigidZone {
+        length_i: lambda(d_orth_i),
+        length_j: lambda(d_orth_j),
+        source_i: ZoneSource::Auto,
+        source_j: ZoneSource::Auto,
         reduction: rule.reduction,
-        ..Default::default()
     }
 }
 
@@ -553,6 +667,8 @@ impl ElementBehavior for BeamElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sc_core::ids::{ElemId, NodeId};
+    use sc_core::model::{ElementData, ElementKind, LocalAxis, Material, Node, Section};
 
     fn make_test_beam() -> BeamElement {
         BeamElement {
@@ -664,5 +780,116 @@ mod tests {
         assert!((k.get(3, 3) - gj_l).abs() < 1e-9);
         assert!((k.get(9, 9) - gj_l).abs() < 1e-9);
         assert!((k.get(3, 9) + gj_l).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_pinned_end_releases_moment() {
+        // i端をピンにすると、i端回転行/列がほぼゼロになり剛性が低下
+        let mut beam = make_test_beam();
+        beam.end_cond = [EndCondition::Pinned, EndCondition::Fixed];
+        let k = beam.local_stiffness();
+        // i端の My, Mz 対角成分が Fixed 時より大幅に小さい
+        let k_fixed = make_test_beam().local_stiffness();
+        assert!(k.get(4, 4) < k_fixed.get(4, 4) * 1e-6);
+        assert!(k.get(5, 5) < k_fixed.get(5, 5) * 1e-6);
+    }
+
+    #[test]
+    fn test_auto_rigid_zone_standard_formula() {
+        // 柱せい 600, 梁せい 700 の T 字接合
+        // 梁端 λ = 柱せい/2 - 梁せい/4 = 300 - 175 = 125
+        use sc_core::ids::{ElemId, MaterialId, NodeId, SectionId};
+        let col_sec = Section {
+            id: SectionId(0),
+            name: "col".to_string(),
+            area: 0.0,
+            iy: 0.0,
+            iz: 0.0,
+            j: 0.0,
+            depth: 600.0,
+            width: 0.0,
+            as_y: 0.0,
+            as_z: 0.0,
+            panel_thickness: None,
+        };
+        let beam_sec = Section {
+            id: SectionId(1),
+            name: "beam".to_string(),
+            area: 0.0,
+            iy: 0.0,
+            iz: 0.0,
+            j: 0.0,
+            depth: 700.0,
+            width: 0.0,
+            as_y: 0.0,
+            as_z: 0.0,
+            panel_thickness: None,
+        };
+        let mat = Material {
+            id: MaterialId(0),
+            name: "steel".to_string(),
+            young: 205000.0,
+            poisson: 0.3,
+            density: 0.0,
+            shear: None,
+        };
+
+        let model = Model {
+            nodes: vec![
+                Node {
+                    id: NodeId(0),
+                    coord: [0.0, 0.0, 0.0],
+                    restraint: Default::default(),
+                    mass: None,
+                    story: None,
+                },
+                Node {
+                    id: NodeId(1),
+                    coord: [0.0, 0.0, 3000.0],
+                    restraint: Default::default(),
+                    mass: None,
+                    story: None,
+                },
+                Node {
+                    id: NodeId(2),
+                    coord: [4000.0, 0.0, 3000.0],
+                    restraint: Default::default(),
+                    mass: None,
+                    story: None,
+                },
+            ],
+            elements: vec![
+                ElementData {
+                    id: ElemId(0),
+                    kind: ElementKind::Beam,
+                    nodes: smallvec::smallvec![NodeId(0), NodeId(1)],
+                    section: Some(SectionId(0)),
+                    material: Some(MaterialId(0)),
+                    local_axis: LocalAxis {
+                        ref_vector: [0.0, 0.0, 1.0],
+                    },
+                    end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+                    force_regime: sc_core::model::ForceRegime::Auto,
+                },
+                ElementData {
+                    id: ElemId(1),
+                    kind: ElementKind::Beam,
+                    nodes: smallvec::smallvec![NodeId(1), NodeId(2)],
+                    section: Some(SectionId(1)),
+                    material: Some(MaterialId(0)),
+                    local_axis: LocalAxis {
+                        ref_vector: [0.0, 0.0, 1.0],
+                    },
+                    end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+                    force_regime: sc_core::model::ForceRegime::Auto,
+                },
+            ],
+            sections: vec![col_sec, beam_sec],
+            materials: vec![mat],
+            ..Default::default()
+        };
+
+        let zone = auto_rigid_zones(&model, ElemId(1), &RigidZoneRule::default());
+        assert!((zone.length_i - 125.0).abs() < 1e-9);
     }
 }

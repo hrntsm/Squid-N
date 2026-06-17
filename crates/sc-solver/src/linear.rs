@@ -13,6 +13,7 @@ pub struct StaticOnce {
 }
 
 pub fn linear_static_once(model: &Model, lc: LoadCaseId) -> Result<StaticOnce, SolveError> {
+    faer::set_global_parallelism(faer::Par::Seq);
     let dofmap = DofMap::build(model);
     let n_active = dofmap.n_active();
 
@@ -85,5 +86,96 @@ pub fn linear_static_once(model: &Model, lc: LoadCaseId) -> Result<StaticOnce, S
             disp,
             member_forces: Vec::new(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sc_core::dof::Dof6Mask;
+    use sc_core::ids::{ElemId, LoadCaseId, MaterialId, NodeId, SectionId};
+    use sc_core::model::{
+        ElementData, ElementKind, EndCondition, ForceRegime, LoadCase, LocalAxis, Material, Model,
+        NodalLoad, Node, Section,
+    };
+
+    fn make_axial_cantilever() -> Model {
+        Model {
+            nodes: vec![
+                Node {
+                    id: NodeId(0),
+                    coord: [0.0, 0.0, 0.0],
+                    restraint: Dof6Mask::FIXED,
+                    mass: None,
+                    story: None,
+                },
+                Node {
+                    id: NodeId(1),
+                    coord: [1000.0, 0.0, 0.0],
+                    restraint: Dof6Mask::FREE,
+                    mass: None,
+                    story: None,
+                },
+            ],
+            elements: vec![ElementData {
+                id: ElemId(0),
+                kind: ElementKind::Beam,
+                nodes: smallvec::smallvec![NodeId(0), NodeId(1)],
+                section: Some(SectionId(0)),
+                material: Some(MaterialId(0)),
+                local_axis: LocalAxis {
+                    ref_vector: [0.0, 0.0, 1.0],
+                },
+                end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+                force_regime: ForceRegime::Auto,
+            }],
+            sections: vec![Section {
+                id: SectionId(0),
+                name: "sec".to_string(),
+                area: 100.0,
+                iy: 1000.0,
+                iz: 1000.0,
+                j: 100.0,
+                depth: 100.0,
+                width: 100.0,
+                as_y: 83.33,
+                as_z: 83.33,
+                panel_thickness: None,
+            }],
+            materials: vec![Material {
+                id: MaterialId(0),
+                name: "mat".to_string(),
+                young: 1000.0,
+                poisson: 0.3,
+                density: 0.0,
+                shear: None,
+            }],
+            load_cases: vec![LoadCase {
+                id: LoadCaseId(1),
+                name: "axial".to_string(),
+                nodal: vec![NodalLoad {
+                    node: NodeId(1),
+                    values: [1000.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                }],
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_linear_static_axial_cantilever() {
+        let model = make_axial_cantilever();
+        let result = linear_static_once(&model, LoadCaseId(1)).unwrap();
+        // u = F L / (E A) = 1000 * 1000 / (1000 * 100) = 10
+        assert!(
+            (result.disp[1][0] - 10.0).abs() < 1e-6,
+            "ux={}",
+            result.disp[1][0]
+        );
+        assert!(result.member_forces.len() == 1);
+        let forces = &result.member_forces[0].1;
+        // 部材力: i端反力 ≈ -1000
+        let fx_i = forces.at[0].1[0];
+        assert!((fx_i + 1000.0).abs() < 1e-6, "fx_i={}", fx_i);
     }
 }

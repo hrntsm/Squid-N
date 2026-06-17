@@ -46,12 +46,56 @@ impl PanelZone {
     pub fn new(data: &ElementData, model: &Model) -> Self {
         let center = data.nodes[0];
         let connected: Vec<NodeId> = data.nodes.iter().skip(1).copied().collect();
-        let _ = model;
+
+        let mut dc = 0.0;
+        let mut db = 0.0;
+        let mut tp = 0.0;
+        let mut g = 0.0;
+
+        // 接合部中心を含む梁・柱をモデルから探し、寸法を推定
+        for elem in &model.elements {
+            if elem.nodes.len() < 2 || !elem.nodes.contains(&center) {
+                continue;
+            }
+            let p0 = model.nodes[elem.nodes[0].index()].coord;
+            let p1 = model.nodes[elem.nodes[1].index()].coord;
+            let dx = p1[0] - p0[0];
+            let dy = p1[1] - p0[1];
+            let dz = p1[2] - p0[2];
+            let l = (dx * dx + dy * dy + dz * dz).sqrt();
+            if l < 1e-12 {
+                continue;
+            }
+            let axis = [dx / l, dy / l, dz / l];
+            let is_horizontal = axis[2].abs() < 0.707;
+
+            if let Some(sec) = elem.section.and_then(|sid| model.sections.get(sid.index())) {
+                if is_horizontal {
+                    if sec.depth > dc {
+                        dc = sec.depth;
+                    }
+                } else if sec.depth > db {
+                    db = sec.depth;
+                }
+                if tp == 0.0 {
+                    tp = sec.panel_thickness.unwrap_or(0.0);
+                }
+            }
+            if let Some(mat) = elem
+                .material
+                .and_then(|mid| model.materials.get(mid.index()))
+            {
+                if g == 0.0 {
+                    g = mat.shear_modulus();
+                }
+            }
+        }
+
         Self {
-            dc: 0.0,
-            db: 0.0,
-            tp: 0.0,
-            g: 0.0,
+            dc,
+            db,
+            tp,
+            g,
             kind: PanelStiffnessModel::RigidZoneApprox,
             center_node: center,
             connected_nodes: connected,

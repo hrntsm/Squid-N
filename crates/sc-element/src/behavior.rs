@@ -43,7 +43,13 @@ impl LocalMat {
         let mut out = Vec::with_capacity(self.n * self.n);
         for i in 0..self.n {
             let gi = gdofs[i];
+            if gi == usize::MAX {
+                continue;
+            }
             for (j, &gj) in gdofs.iter().enumerate().take(self.n) {
+                if gj == usize::MAX {
+                    continue;
+                }
                 let v = self.get(i, j);
                 if v != 0.0 {
                     out.push(sc_math::sparse::Triplet {
