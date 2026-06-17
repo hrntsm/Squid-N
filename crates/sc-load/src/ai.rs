@@ -61,11 +61,7 @@ pub fn ai_distribution(
         .collect();
     let mut pi = Vec::with_capacity(n);
     for i in 0..n {
-        let p = if i < n - 1 {
-            qi[i] - qi[i + 1]
-        } else {
-            qi[i]
-        };
+        let p = if i < n - 1 { qi[i] - qi[i + 1] } else { qi[i] };
         pi.push(p.max(0.0));
     }
 

@@ -19,11 +19,17 @@ pub fn pushover_analysis(
     _max_disp: f64,
 ) -> Result<PushoverResult, SolveError> {
     let result = analysis.seismic_static(dir, AiMode::Approx)?;
-    let top_disp = result.disp.last().map(|d| match dir {
-        SeismicDir::X => d[0],
-        SeismicDir::Y => d[1],
-    }).unwrap_or(0.0);
-    let base_shear = result.member_forces.iter()
+    let top_disp = result
+        .disp
+        .last()
+        .map(|d| match dir {
+            SeismicDir::X => d[0],
+            SeismicDir::Y => d[1],
+        })
+        .unwrap_or(0.0);
+    let base_shear = result
+        .member_forces
+        .iter()
         .flat_map(|(_, f)| f.at.first())
         .map(|(_, f)| f[0].abs())
         .sum();

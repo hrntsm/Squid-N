@@ -14,7 +14,13 @@ pub struct ElasticSteel {
 
 impl ElasticSteel {
     pub fn new(e: f64, fy: f64) -> Self {
-        Self { e, fy, strain: 0.0, stress: 0.0, tangent: e }
+        Self {
+            e,
+            fy,
+            strain: 0.0,
+            stress: 0.0,
+            tangent: e,
+        }
     }
 }
 
@@ -48,7 +54,14 @@ pub struct ElasticConcrete {
 
 impl ElasticConcrete {
     pub fn new(e: f64, fc: f64) -> Self {
-        Self { e, fc, ecu: -0.0035, strain: 0.0, stress: 0.0, tangent: e }
+        Self {
+            e,
+            fc,
+            ecu: -0.0035,
+            strain: 0.0,
+            stress: 0.0,
+            tangent: e,
+        }
     }
 }
 

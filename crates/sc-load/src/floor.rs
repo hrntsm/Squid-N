@@ -21,6 +21,7 @@ pub struct BeamLoad {
     pub cmq: Cmq,
 }
 
+#[allow(clippy::let_and_return, unused_mut)]
 pub fn distribute_slab(model: &Model, slab: &Slab) -> Vec<BeamLoad> {
     let _ = model;
     let loads = Vec::new();
@@ -44,15 +45,15 @@ pub fn distribute_slab(model: &Model, slab: &Slab) -> Vec<BeamLoad> {
     loads
 }
 
+#[allow(dead_code, unused_variables)]
 fn slab_area(slab: &Slab) -> f64 {
     if slab.boundary.len() < 3 {
         return 0.0;
     }
-    let n = slab.boundary.len();
-    let area = 0.0_f64;
-    area
+    0.0
 }
 
+#[allow(dead_code)]
 fn fem_uniform(w: f64, l: f64) -> Cmq {
     Cmq {
         c_i: w * l * l / 12.0,
@@ -62,6 +63,7 @@ fn fem_uniform(w: f64, l: f64) -> Cmq {
     }
 }
 
+#[allow(dead_code)]
 fn fem_triangle(w0: f64, l: f64) -> Cmq {
     Cmq {
         c_i: 5.0 * w0 * l * l / 96.0,

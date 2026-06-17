@@ -5,7 +5,6 @@ use sc_core::model::Model;
 use sc_element::behavior::MassOption;
 use sc_math::solver::{make_solver, SolveError, SolverBackend};
 
-
 const EIGEN_TOL: f64 = 1e-10;
 const EIGEN_MAX_ITER: usize = 100;
 

@@ -15,12 +15,20 @@ pub fn allowable_steel_stress(grade: &str, long_term: bool) -> f64 {
         "SN490" => 325.0,
         _ => 235.0,
     };
-    if long_term { base / 1.5 } else { base }
+    if long_term {
+        base / 1.5
+    } else {
+        base
+    }
 }
 
 pub fn allowable_concrete_stress(fc: f64, long_term: bool) -> f64 {
     let fc_n = fc / 1.0;
-    if long_term { fc_n / 3.0 } else { fc_n / 1.5 }
+    if long_term {
+        fc_n / 3.0
+    } else {
+        fc_n / 1.5
+    }
 }
 
 /// Combined stress ratio: (axial/allowable_axial) + (bending/allowable_bending) ≤ 1.0
@@ -30,8 +38,16 @@ pub fn combined_stress_ratio(
     allowable_axial: f64,
     allowable_bending: f64,
 ) -> f64 {
-    let axial_ratio = if allowable_axial != 0.0 { axial_stress / allowable_axial } else { 0.0 };
-    let bend_ratio = if allowable_bending != 0.0 { bending_stress / allowable_bending } else { 0.0 };
+    let axial_ratio = if allowable_axial != 0.0 {
+        axial_stress / allowable_axial
+    } else {
+        0.0
+    };
+    let bend_ratio = if allowable_bending != 0.0 {
+        bending_stress / allowable_bending
+    } else {
+        0.0
+    };
     axial_ratio + bend_ratio
 }
 

@@ -6,10 +6,18 @@ pub struct NewmarkCfg {
 
 impl NewmarkCfg {
     pub fn average_accel(dt: f64) -> Self {
-        Self { beta: 0.25, gamma: 0.5, dt }
+        Self {
+            beta: 0.25,
+            gamma: 0.5,
+            dt,
+        }
     }
     pub fn linear_accel(dt: f64) -> Self {
-        Self { beta: 1.0 / 6.0, gamma: 0.5, dt }
+        Self {
+            beta: 1.0 / 6.0,
+            gamma: 0.5,
+            dt,
+        }
     }
 }
 
@@ -36,12 +44,7 @@ pub struct RayleighDamping {
 }
 
 impl RayleighDamping {
-    pub fn from_ratios(
-        omega1: f64,
-        omega2: f64,
-        h1: f64,
-        h2: f64,
-    ) -> Self {
+    pub fn from_ratios(omega1: f64, omega2: f64, h1: f64, h2: f64) -> Self {
         let d = omega2 * omega2 - omega1 * omega1;
         let beta_k = 2.0 * (h2 * omega2 - h1 * omega1) / d;
         let alpha_m = 2.0 * omega1 * omega2 * (h1 * omega2 - h2 * omega1) / d;

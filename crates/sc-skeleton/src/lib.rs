@@ -20,8 +20,14 @@ pub fn generate_flexural_skeleton(
 ) -> SkeletonCurve {
     SkeletonCurve {
         points: vec![
-            SkeletonPoint { deformation: 0.0, force: 0.0 },
-            SkeletonPoint { deformation: 1.0, force: 100.0 },
+            SkeletonPoint {
+                deformation: 0.0,
+                force: 0.0,
+            },
+            SkeletonPoint {
+                deformation: 1.0,
+                force: 100.0,
+            },
         ],
         yield_deformation: 1.0,
         yield_force: 100.0,
@@ -30,14 +36,17 @@ pub fn generate_flexural_skeleton(
     }
 }
 
-pub fn generate_shear_skeleton(
-    _shape: &SectionShape,
-    _axial_force: f64,
-) -> SkeletonCurve {
+pub fn generate_shear_skeleton(_shape: &SectionShape, _axial_force: f64) -> SkeletonCurve {
     SkeletonCurve {
         points: vec![
-            SkeletonPoint { deformation: 0.0, force: 0.0 },
-            SkeletonPoint { deformation: 1.0, force: 200.0 },
+            SkeletonPoint {
+                deformation: 0.0,
+                force: 0.0,
+            },
+            SkeletonPoint {
+                deformation: 1.0,
+                force: 200.0,
+            },
         ],
         yield_deformation: 1.0,
         yield_force: 200.0,

@@ -28,7 +28,8 @@ pub fn to_equivalent_sdof(
 
     let mef = 0.75;
     let equiv_mass = total_mass * mef;
-    let points: Vec<(f64, f64)> = base_shear.iter()
+    let points: Vec<(f64, f64)> = base_shear
+        .iter()
         .zip(top_disp.iter())
         .map(|(&v, &d)| {
             let sa = v / equiv_mass / G_MM_S2;
@@ -42,12 +43,20 @@ pub fn to_equivalent_sdof(
 
 pub fn demand_spectrum(rt_val: f64, _tc: f64) -> ResponseSpectrum {
     let periods: Vec<f64> = (1..50).map(|i| i as f64 * 0.05).collect();
-    let accelerations: Vec<f64> = periods.iter()
+    let accelerations: Vec<f64> = periods
+        .iter()
         .map(|&t| {
-            if t < 0.1 { 0.1 / t.max(0.02) } else { rt_val / t }
+            if t < 0.1 {
+                0.1 / t.max(0.02)
+            } else {
+                rt_val / t
+            }
         })
         .collect();
-    ResponseSpectrum { periods, accelerations }
+    ResponseSpectrum {
+        periods,
+        accelerations,
+    }
 }
 
 #[cfg(test)]

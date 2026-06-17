@@ -45,7 +45,13 @@ mod tests {
 
     #[test]
     fn test_auto_combos() {
-        let combos = auto_combinations(LoadCaseId(1), LoadCaseId(2), Some(LoadCaseId(3)), Some(LoadCaseId(4)), None);
+        let combos = auto_combinations(
+            LoadCaseId(1),
+            LoadCaseId(2),
+            Some(LoadCaseId(3)),
+            Some(LoadCaseId(4)),
+            None,
+        );
         assert!(combos.len() >= 3);
         assert_eq!(combos[0].name, "G + P");
         assert_eq!(combos[1].name, "G + P + Kx");

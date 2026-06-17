@@ -20,7 +20,11 @@ pub fn assemble_global_k(model: &Model, dofmap: &DofMap) -> SparseColMat<usize, 
     assemble_csc(dofmap.n_active(), all_triplets)
 }
 
-pub fn assemble_global_m(model: &Model, dofmap: &DofMap, opt: sc_element::behavior::MassOption) -> SparseColMat<usize, f64> {
+pub fn assemble_global_m(
+    model: &Model,
+    dofmap: &DofMap,
+    opt: sc_element::behavior::MassOption,
+) -> SparseColMat<usize, f64> {
     let mut all_triplets = Vec::new();
     for elem in &model.elements {
         let (behavior, _state) = build_behavior(elem, model);

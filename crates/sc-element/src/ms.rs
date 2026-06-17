@@ -27,9 +27,7 @@ impl MsElement {
         let n_springs = 10;
         let spring_areas = vec![data.section.map(|_| 10.0).unwrap_or(0.0); n_springs];
         let half = (n_springs - 1) as f64 / 2.0;
-        let spring_coords: Vec<f64> = (0..n_springs)
-            .map(|i| (i as f64 - half) / half)
-            .collect();
+        let spring_coords: Vec<f64> = (0..n_springs).map(|i| (i as f64 - half) / half).collect();
 
         MsElement {
             nodes: [n0, n1],
@@ -43,7 +41,9 @@ impl MsElement {
 }
 
 impl crate::behavior::ElementBehavior for MsElement {
-    fn n_dof(&self) -> usize { 12 }
+    fn n_dof(&self) -> usize {
+        12
+    }
     fn global_dofs(&self, dof: &DofMap) -> SmallVec<[usize; 24]> {
         let mut gdofs = SmallVec::new();
         for &nid in &self.nodes {
@@ -65,7 +65,11 @@ impl crate::behavior::ElementBehavior for MsElement {
         k
     }
     fn internal_force(&self, _state: &ElemState, _ctx: &crate::behavior::Ctx) -> LocalVec {
-        LocalVec { data: smallvec::smallvec![0.0; 12] }
+        LocalVec {
+            data: smallvec::smallvec![0.0; 12],
+        }
     }
-    fn mass_matrix(&self, _opt: MassOption) -> LocalMat { LocalMat::zeros(12) }
+    fn mass_matrix(&self, _opt: MassOption) -> LocalMat {
+        LocalMat::zeros(12)
+    }
 }

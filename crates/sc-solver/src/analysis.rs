@@ -9,9 +9,15 @@ use sc_element::factory::build_behavior;
 use sc_math::solver::{make_solver, LinearSolver, SolveError, SolverBackend};
 
 #[derive(Debug, Clone, Copy)]
-pub enum SeismicDir { X, Y }
+pub enum SeismicDir {
+    X,
+    Y,
+}
 #[derive(Debug, Clone, Copy)]
-pub enum AiMode { Approx, SemiPrecise }
+pub enum AiMode {
+    Approx,
+    SemiPrecise,
+}
 
 pub struct Analysis<'m> {
     model: &'m Model,
@@ -112,7 +118,10 @@ impl<'m> Analysis<'m> {
             }
         }
 
-        Ok(StaticOnce { disp, member_forces })
+        Ok(StaticOnce {
+            disp,
+            member_forces,
+        })
     }
 
     /// Solve eigenvalue problem (subspace iteration) for n_modes lowest modes.
@@ -177,7 +186,10 @@ impl<'m> Analysis<'m> {
             }
         }
 
-        Ok(StaticOnce { disp, member_forces })
+        Ok(StaticOnce {
+            disp,
+            member_forces,
+        })
     }
 
     /// Run seismic static analysis: approx or semi-precise Ai distribution.
@@ -186,7 +198,10 @@ impl<'m> Analysis<'m> {
         let stories = &self.model.stories;
         if stories.is_empty() {
             let disp = vec![[0.0; 6]; self.model.nodes.len()];
-            return Ok(StaticOnce { disp, member_forces: Vec::new() });
+            return Ok(StaticOnce {
+                disp,
+                member_forces: Vec::new(),
+            });
         }
 
         let (t, _) = match mode {
@@ -214,7 +229,10 @@ impl<'m> Analysis<'m> {
 
         if story_weights.is_empty() || story_weights.iter().all(|&w| w == 0.0) {
             let disp = vec![[0.0; 6]; self.model.nodes.len()];
-            return Ok(StaticOnce { disp, member_forces: Vec::new() });
+            return Ok(StaticOnce {
+                disp,
+                member_forces: Vec::new(),
+            });
         }
 
         let ai = sc_load::ai::ai_distribution(&story_weights, z, rt_val, c0, t);
@@ -235,13 +253,11 @@ impl<'m> Analysis<'m> {
 
         for (i, story) in stories.iter().enumerate() {
             let pi = ai.pi.get(i).copied().unwrap_or(0.0);
-            if pi == 0.0 { continue; }
+            if pi == 0.0 {
+                continue;
+            }
             for dia in &story.diaphragms {
-                let f = [
-                    dir_vec[0] * pi,
-                    dir_vec[1] * pi,
-                    0.0, 0.0, 0.0, 0.0,
-                ];
+                let f = [dir_vec[0] * pi, dir_vec[1] * pi, 0.0, 0.0, 0.0, 0.0];
                 lc.nodal.push(sc_core::model::NodalLoad {
                     node: dia.master,
                     values: f,
@@ -254,7 +270,10 @@ impl<'m> Analysis<'m> {
         // Use a workaround: directly build and solve.
         if self.n_indep == 0 {
             let disp = vec![[0.0; 6]; self.model.nodes.len()];
-            return Ok(StaticOnce { disp, member_forces: Vec::new() });
+            return Ok(StaticOnce {
+                disp,
+                member_forces: Vec::new(),
+            });
         }
 
         let n_active = self.dofmap.n_active();
@@ -307,7 +326,10 @@ impl<'m> Analysis<'m> {
             }
         }
 
-        Ok(StaticOnce { disp, member_forces })
+        Ok(StaticOnce {
+            disp,
+            member_forces,
+        })
     }
 }
 
@@ -406,7 +428,12 @@ mod tests {
         let result = analysis.linear_static(LoadCaseId(1)).unwrap();
         let ux = result.disp[1][0];
         let expected = 1000.0 * 1000.0 / (20000.0 * 100.0);
-        assert!((ux - expected).abs() < 1e-6, "ux={} expected={}", ux, expected);
+        assert!(
+            (ux - expected).abs() < 1e-6,
+            "ux={} expected={}",
+            ux,
+            expected
+        );
     }
 
     #[test]
@@ -422,7 +449,12 @@ mod tests {
         let uy_expected = 500.0 * l.powi(3) / (3.0 * 20000.0 * 833.33);
         // Timoshenko beam includes shear deflection ≈ 0.1% — use relaxed tolerance
         assert!((ux - ux_expected).abs() < 1.0, "ux={}", ux);
-        assert!((uy - uy_expected).abs() < 20.0, "uy={} approx={}", uy, uy_expected);
+        assert!(
+            (uy - uy_expected).abs() < 20.0,
+            "uy={} approx={}",
+            uy,
+            uy_expected
+        );
     }
 
     #[test]
@@ -438,6 +470,11 @@ mod tests {
         let uy_expected = 1.5 * (500.0 * l.powi(3) / (3.0 * 20000.0 * 833.33));
         assert!((ux - ux_expected).abs() < 1.0, "ux={}", ux);
         // Timoshenko shear adds slight deflection — relaxed tolerance
-        assert!((uy - uy_expected).abs() < 20.0, "uy={} approx={}", uy, uy_expected);
+        assert!(
+            (uy - uy_expected).abs() < 20.0,
+            "uy={} approx={}",
+            uy,
+            uy_expected
+        );
     }
 }
