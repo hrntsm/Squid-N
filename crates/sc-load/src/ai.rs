@@ -103,4 +103,28 @@ mod tests {
         assert!((result.ai[2] - result.ai[1]) > 0.0);
         assert!(result.pi.iter().all(|&p| p >= 0.0));
     }
+
+    #[test]
+    fn test_ai_spec_values() {
+        let weights = vec![1.0, 1.0, 1.0];
+        let result = ai_distribution(&weights, 1.0, 1.0, 0.2, 0.24);
+        assert!(
+            (result.alpha[0] - 1.0).abs() < 1e-3,
+            "alpha[0]={}",
+            result.alpha[0]
+        );
+        assert!(
+            (result.alpha[1] - 0.6667).abs() < 1e-3,
+            "alpha[1]={}",
+            result.alpha[1]
+        );
+        assert!(
+            (result.alpha[2] - 0.3333).abs() < 1e-3,
+            "alpha[2]={}",
+            result.alpha[2]
+        );
+        assert!((result.ai[0] - 1.000).abs() < 1e-2, "A0={}", result.ai[0]);
+        assert!((result.ai[1] - 1.156).abs() < 1e-2, "A1={}", result.ai[1]);
+        assert!((result.ai[2] - 1.390).abs() < 1e-2, "A2={}", result.ai[2]);
+    }
 }

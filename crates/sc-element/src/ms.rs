@@ -1,41 +1,50 @@
+use crate::beam::BeamElement;
 use crate::behavior::{ElemState, LocalMat, LocalVec, MassOption};
+use crate::shear_spring::ShearSpring;
 use sc_core::dof::{DofMap, DOF_PER_NODE};
-use sc_core::ids::NodeId;
+use sc_core::ids::MaterialId;
 use sc_core::model::Model;
 use smallvec::SmallVec;
 
+/// 軸ばね1本：断面内の位置と材料を保持（P5.5 §3）
+pub struct AxialSpring {
+    pub y: f64,
+    pub z: f64,
+    pub material: MaterialId,
+}
+
+/// MS（マルチスプリング）要素（P5.5 §3）
+/// 部材端の断面を軸方向ばね群で置換し、中央は弾性材で連結。
 pub struct MsElement {
-    pub nodes: [NodeId; 2],
-    pub n_springs: usize,
-    pub spring_areas: Vec<f64>,
-    pub spring_coords: Vec<f64>,
-    pub e: f64,
-    pub length: f64,
+    pub springs: Vec<AxialSpring>,
+    pub elastic_mid: BeamElement,
+    pub shear: ShearSpring,
 }
 
 impl MsElement {
     pub fn new(data: &sc_core::model::ElementData, model: &Model) -> Self {
-        let n0 = data.nodes[0];
-        let n1 = data.nodes[1];
-        let p0 = model.nodes[n0.index()].coord;
-        let p1 = model.nodes[n1.index()].coord;
-        let dx = p1[0] - p0[0];
-        let dy = p1[1] - p0[1];
-        let dz = p1[2] - p0[2];
-        let len = (dx * dx + dy * dy + dz * dz).sqrt();
-
         let n_springs = 10;
-        let spring_areas = vec![data.section.map(|_| 10.0).unwrap_or(0.0); n_springs];
         let half = (n_springs - 1) as f64 / 2.0;
-        let spring_coords: Vec<f64> = (0..n_springs).map(|i| (i as f64 - half) / half).collect();
+
+        // 軸ばねを等間隔に配置（断面内 y 座標）
+        let springs: Vec<AxialSpring> = (0..n_springs)
+            .map(|i| {
+                let y = (i as f64 - half) / half;
+                AxialSpring {
+                    y,
+                    z: 0.0,
+                    material: data.material.unwrap_or(MaterialId(0)),
+                }
+            })
+            .collect();
+
+        let elastic_mid = BeamElement::new(data, model);
+        let shear = ShearSpring::new(data, model);
 
         MsElement {
-            nodes: [n0, n1],
-            n_springs,
-            spring_areas,
-            spring_coords,
-            e: model.materials.first().map(|m| m.young).unwrap_or(0.0),
-            length: len,
+            springs,
+            elastic_mid,
+            shear,
         }
     }
 }
@@ -44,9 +53,10 @@ impl crate::behavior::ElementBehavior for MsElement {
     fn n_dof(&self) -> usize {
         12
     }
+
     fn global_dofs(&self, dof: &DofMap) -> SmallVec<[usize; 24]> {
         let mut gdofs = SmallVec::new();
-        for &nid in &self.nodes {
+        for &nid in &self.elastic_mid.nodes {
             let ni = nid.index();
             for d in 0..DOF_PER_NODE {
                 let g = ni * DOF_PER_NODE + d;
@@ -55,21 +65,26 @@ impl crate::behavior::ElementBehavior for MsElement {
         }
         gdofs
     }
-    fn tangent_stiffness(&self, _state: &ElemState, _ctx: &crate::behavior::Ctx) -> LocalMat {
+
+    fn tangent_stiffness(&self, state: &ElemState, ctx: &crate::behavior::Ctx) -> LocalMat {
+        // 中央弾性部の剛性 + せん断ばね剛性（軸ばね群の寄与は将来）
+        let k_elastic = self.elastic_mid.tangent_stiffness(state, ctx);
+        let k_shear = self.shear.stiffness_12x12();
         let mut k = LocalMat::zeros(12);
-        let ka = self.e * self.spring_areas.iter().sum::<f64>() / self.length;
-        k.set(0, 0, ka);
-        k.set(6, 6, ka);
-        k.set(0, 6, -ka);
-        k.set(6, 0, -ka);
+        for i in 0..12 {
+            for j in 0..12 {
+                let v = k_elastic.get(i, j) + k_shear.get(i, j);
+                k.set(i, j, v);
+            }
+        }
         k
     }
-    fn internal_force(&self, _state: &ElemState, _ctx: &crate::behavior::Ctx) -> LocalVec {
-        LocalVec {
-            data: smallvec::smallvec![0.0; 12],
-        }
+
+    fn internal_force(&self, state: &ElemState, ctx: &crate::behavior::Ctx) -> LocalVec {
+        self.elastic_mid.internal_force(state, ctx)
     }
-    fn mass_matrix(&self, _opt: MassOption) -> LocalMat {
-        LocalMat::zeros(12)
+
+    fn mass_matrix(&self, opt: MassOption) -> LocalMat {
+        self.elastic_mid.mass_matrix(opt)
     }
 }

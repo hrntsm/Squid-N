@@ -5,4 +5,14 @@ edition = "2021"
 
 [features]
 default = []
-gpu = []
+gpu = ["dep:wgpu", "dep:cubecl"]
+
+[dependencies]
+sc-math = { path = "../sc-math" }
+faer    = { workspace = true }
+
+wgpu   = { version = "29", optional = true }
+cubecl = { version = "0.3", optional = true, default-features = false, features = ["wgpu"] }
+
+[dev-dependencies]
+approx = { workspace = true }

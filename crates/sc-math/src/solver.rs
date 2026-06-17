@@ -27,6 +27,9 @@ pub enum SolverBackend {
 pub fn make_solver(backend: SolverBackend) -> Box<dyn LinearSolver> {
     match backend {
         SolverBackend::DirectSparseCholesky => Box::new(crate::cholesky::CholeskySolver::default()),
-        _ => unimplemented!("P0 supports DirectSparseCholesky only"),
+        SolverBackend::IterativePcg { tol, max_iter } => {
+            Box::new(crate::pcg::PcgSolver::new(tol, max_iter))
+        }
+        SolverBackend::DirectSparseLu => todo!("DirectSparseLu not yet implemented"),
     }
 }

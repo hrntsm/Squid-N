@@ -67,6 +67,8 @@ pub struct BeamElement {
     pub eval_sections: Vec<f64>,
     pub section: Option<sc_core::ids::SectionId>,
     pub material: Option<sc_core::ids::MaterialId>,
+    /// 確定変位（線形要素の内力計算用。非線形では ElemState が保持）
+    pub committed_disp: [f64; 12],
 }
 
 fn get_section(model: &Model, sid: Option<sc_core::ids::SectionId>) -> Section {
@@ -175,6 +177,7 @@ impl BeamElement {
             eval_sections: vec![0.0, 0.5, 1.0],
             section: data.section,
             material: data.material,
+            committed_disp: [0.0; 12],
         }
     }
 
@@ -648,8 +651,25 @@ impl ElementBehavior for BeamElement {
     }
 
     fn internal_force(&self, _state: &ElemState, _ctx: &Ctx) -> LocalVec {
-        LocalVec {
+        let k = self.local_stiffness();
+        let mut f = LocalVec {
             data: SmallVec::from_elem(0.0, 12),
+        };
+        for i in 0..12 {
+            let mut s = 0.0;
+            for j in 0..12 {
+                s += k.get(i, j) * self.committed_disp[j];
+            }
+            f.data[i] = s;
+        }
+        f
+    }
+
+    fn update_state(&mut self, du: &LocalVec, commit: bool, _ctx: &Ctx) {
+        for i in 0..12 {
+            if commit {
+                self.committed_disp[i] += du.data[i];
+            }
         }
     }
 
@@ -750,6 +770,7 @@ mod tests {
             eval_sections: vec![0.0, 0.5, 1.0],
             section: None,
             material: None,
+            committed_disp: [0.0; 12],
         }
     }
 

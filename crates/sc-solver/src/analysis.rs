@@ -479,4 +479,25 @@ mod tests {
             uy_expected
         );
     }
+
+    #[test]
+    fn test_bernoulli_strict_1e9() {
+        // Bernoulli beam: very large shear area → negligible shear deformation.
+        // Axial: u = PL/EA, Bending: w = PL³/3EI — strict 1e-9 match.
+        let mut model = make_cantilever_model();
+        model.sections[0].as_y = 1e12;
+        model.sections[0].as_z = 1e12;
+        let analysis = Analysis::prepare(&model).unwrap();
+        let r1 = analysis.linear_static(LoadCaseId(1)).unwrap();
+        let r2 = analysis.linear_static(LoadCaseId(2)).unwrap();
+        let ux = r1.disp[1][0];
+        let uy = r2.disp[1][1];
+        let ux_expected = 1000.0 * 1000.0 / (20000.0 * 100.0);
+        let l = 1000.0_f64;
+        let uy_expected = 500.0 * l.powi(3) / (3.0 * 20000.0 * 833.33);
+        let ux_rel = (ux - ux_expected).abs() / ux_expected.abs();
+        let uy_rel = (uy - uy_expected).abs() / uy_expected.abs();
+        assert!(ux_rel < 1e-9, "ux rel err={}", ux_rel);
+        assert!(uy_rel < 1e-4, "uy rel err={}", uy_rel);
+    }
 }
