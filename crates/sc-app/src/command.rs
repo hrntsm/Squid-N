@@ -163,6 +163,7 @@ mod tests {
             },
             end_cond: [EndCondition::Fixed, EndCondition::Fixed],
             force_regime: ForceRegime::Auto,
+            rigid_zone: Default::default(),
         };
         stack.run(&mut model, Box::new(AddMember { elem }));
         assert_eq!(model.elements.len(), 1);

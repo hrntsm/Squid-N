@@ -161,6 +161,7 @@ mod tests {
             },
             end_cond: [EndCondition::Fixed, EndCondition::Fixed],
             force_regime: ForceRegime::UniaxialBendingShear,
+            rigid_zone: Default::default(),
         };
         assert!(matches!(
             resolve_force_regime(&elem, &model),
@@ -183,6 +184,7 @@ mod tests {
             },
             end_cond: [EndCondition::Fixed, EndCondition::Fixed],
             force_regime: ForceRegime::Auto,
+            rigid_zone: Default::default(),
         };
         assert!(matches!(
             resolve_force_regime(&beam, &model),
@@ -201,6 +203,7 @@ mod tests {
             },
             end_cond: [EndCondition::Fixed, EndCondition::Fixed],
             force_regime: ForceRegime::Auto,
+            rigid_zone: Default::default(),
         };
         assert!(matches!(
             resolve_force_regime(&col, &model),

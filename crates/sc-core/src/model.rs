@@ -40,6 +40,36 @@ pub enum EndCondition {
     SemiRigid { k_theta: f64 },
 }
 
+/// 剛域長の出所。Auto は再算定で上書きされる、Manual は保護される（設計書 §6.2.1）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ZoneSource {
+    Auto,
+    Manual,
+}
+
+/// 部材端の剛域（接合部の有限寸法）。可とう長 L' = L − length_i − length_j。
+/// 力学計算は sc-element 側。ここではモデルに保持・永続化するデータ。
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RigidZone {
+    pub length_i: f64,
+    pub length_j: f64,
+    pub source_i: ZoneSource,
+    pub source_j: ZoneSource,
+    pub reduction: f64,
+}
+
+impl Default for RigidZone {
+    fn default() -> Self {
+        Self {
+            length_i: 0.0,
+            length_j: 0.0,
+            source_i: ZoneSource::Auto,
+            source_j: ZoneSource::Auto,
+            reduction: 1.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ElementData {
     pub id: ElemId,
@@ -50,6 +80,9 @@ pub struct ElementData {
     pub local_axis: LocalAxis,
     pub end_cond: [EndCondition; 2],
     pub force_regime: ForceRegime,
+    /// 部材端の剛域。旧スキーマ（無し）は既定値（剛域長 0）で補完される。
+    #[serde(default)]
+    pub rigid_zone: RigidZone,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -421,6 +454,7 @@ mod tests {
                 },
                 end_cond: [EndCondition::Fixed, EndCondition::Fixed],
                 force_regime: ForceRegime::Auto,
+                rigid_zone: Default::default(),
             }],
             ..Default::default()
         };

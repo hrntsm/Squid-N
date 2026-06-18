@@ -293,6 +293,7 @@ mod tests {
                     sc_core::model::EndCondition::Fixed,
                 ],
                 force_regime: sc_core::model::ForceRegime::Auto,
+                rigid_zone: Default::default(),
             }],
             sections: vec![Section {
                 id: SectionId(0),

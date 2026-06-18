@@ -128,6 +128,7 @@ mod tests {
                 },
                 end_cond: [EndCondition::Fixed, EndCondition::Fixed],
                 force_regime: ForceRegime::Auto,
+                rigid_zone: Default::default(),
             }],
             sections: vec![Section {
                 id: SectionId(0),
@@ -213,6 +214,42 @@ mod tests {
         );
     }
 
+    /// 剛域がモデル→解析へ接続され、結果に効くことのエンドツーエンド確認。
+    /// 同一片持ち梁で、基部に大きな剛域（可とう長を短縮）を入れると、
+    /// 先端たわみが明確に小さく（剛く）なる。
+    #[test]
+    fn test_rigid_zone_affects_analysis() {
+        let mut base = make_axial_cantilever();
+        base.sections[0].iy = 1.0e7;
+        base.sections[0].iz = 1.0e7;
+        base.sections[0].as_y = 1.0e8;
+        base.sections[0].as_z = 1.0e8;
+        base.load_cases[0].nodal[0].values = [0.0, 0.0, 1000.0, 0.0, 0.0, 0.0]; // global Z 載荷
+
+        // 剛域なし
+        let r0 = linear_static_once(&base, LoadCaseId(1)).unwrap();
+        let uz0 = r0.disp[1][2];
+
+        // 基部に剛域 λ_i=800（可とう長 200）
+        let mut rigid = base.clone();
+        rigid.elements[0].rigid_zone.length_i = 800.0;
+        let r1 = linear_static_once(&rigid, LoadCaseId(1)).unwrap();
+        let uz1 = r1.disp[1][2];
+
+        assert!(
+            uz0.abs() > 0.0 && uz1.abs() > 0.0,
+            "uz0={} uz1={}",
+            uz0,
+            uz1
+        );
+        assert!(
+            uz1.abs() < 0.5 * uz0.abs(),
+            "剛域で剛くなるはず: uz_norigid={} uz_rigid={}",
+            uz0,
+            uz1
+        );
+    }
+
     #[test]
     fn test_linear_static_shell_element() {
         // Cantilever plate: bottom edge fixed (nodes 0,1), top edge free (nodes 2,3)
@@ -258,6 +295,7 @@ mod tests {
                 },
                 end_cond: [EndCondition::Fixed, EndCondition::Fixed],
                 force_regime: ForceRegime::Auto,
+                rigid_zone: Default::default(),
             }],
             sections: vec![Section {
                 id: SectionId(0),
@@ -429,6 +467,7 @@ mod tests {
                     },
                     end_cond: [EndCondition::Fixed, EndCondition::Fixed],
                     force_regime: ForceRegime::Auto,
+                    rigid_zone: Default::default(),
                 },
                 ElementData {
                     id: ElemId(1),
@@ -441,6 +480,7 @@ mod tests {
                     },
                     end_cond: [EndCondition::Fixed, EndCondition::Fixed],
                     force_regime: ForceRegime::Auto,
+                    rigid_zone: Default::default(),
                 },
                 ElementData {
                     id: ElemId(2),
@@ -453,6 +493,7 @@ mod tests {
                     },
                     end_cond: [EndCondition::Fixed, EndCondition::Fixed],
                     force_regime: ForceRegime::Auto,
+                    rigid_zone: Default::default(),
                 },
                 ElementData {
                     id: ElemId(3),
@@ -465,6 +506,7 @@ mod tests {
                     },
                     end_cond: [EndCondition::Fixed, EndCondition::Fixed],
                     force_regime: ForceRegime::Auto,
+                    rigid_zone: Default::default(),
                 },
             ],
             sections: vec![Section {
@@ -549,6 +591,7 @@ mod tests {
                 },
                 end_cond: [EndCondition::Fixed, EndCondition::Fixed],
                 force_regime: ForceRegime::Auto,
+                rigid_zone: Default::default(),
             }],
             sections: vec![Section {
                 id: SectionId(0),
@@ -649,6 +692,7 @@ mod tests {
                 },
                 end_cond: [EndCondition::Fixed, EndCondition::Fixed],
                 force_regime: ForceRegime::Auto,
+                rigid_zone: Default::default(),
             }],
             sections: vec![Section {
                 id: SectionId(0),
