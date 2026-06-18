@@ -63,6 +63,7 @@ fn assemble_k(
     dofmap: &DofMap,
     behaviors: &[Box<dyn ElementBehavior>],
     use_kg: bool,
+    prescribed: Option<(usize, f64)>,
 ) -> faer::sparse::SparseColMat<usize, f64> {
     use sc_math::sparse::assemble_csc;
     let ctx = Ctx { model };
@@ -83,6 +84,14 @@ fn assemble_k(
             }
         }
         triplets.extend(k.to_triplets(&gdofs));
+    }
+    if let Some((d, _u_val)) = prescribed {
+        let penalty = 1e16;
+        triplets.push(sc_math::sparse::Triplet {
+            row: d,
+            col: d,
+            val: penalty,
+        });
     }
     assemble_csc(dofmap.n_active(), triplets)
 }
@@ -191,6 +200,8 @@ pub fn pushover_analysis(
         }
     }
 
+    let thresholds = compute_hinge_thresholds(model);
+    let mut hinges = Vec::new();
     let mut capacity_curve = Vec::new();
     let mut total_disp = vec![0.0; n_active];
     let n_steps = max_steps.clamp(1, 100);
@@ -207,7 +218,7 @@ pub fn pushover_analysis(
             let mut last_du_free: Vec<f64> = Vec::new();
 
             for _iter in 0..20 {
-                let k_free = assemble_k(model, dofmap, &behaviors, use_kg);
+                let k_free = assemble_k(model, dofmap, &behaviors, use_kg, None);
                 let k_red = reducer.reduce_k(&k_free);
                 let f_int = compute_f_int(model, dofmap, &behaviors);
                 let r_free: Vec<f64> = f_ext.iter().zip(f_int.iter()).map(|(e, i)| e - i).collect();
@@ -265,6 +276,14 @@ pub fn pushover_analysis(
                     story_shear: vec![],
                     story_drift: vec![],
                 });
+                track_hinges(
+                    model,
+                    dofmap,
+                    &behaviors,
+                    &thresholds,
+                    step as u32,
+                    &mut hinges,
+                );
                 step_ok = true;
                 if max_disp > 0.0 && roof >= max_disp {
                     break;
@@ -280,6 +299,117 @@ pub fn pushover_analysis(
         }
     }
 
+    // 変位制御フェーズ（P5 §7.1）
+    if max_disp > 0.0 {
+        if let Some(roof_active) = get_roof_dof(model, dofmap, dir) {
+            let initial_disp = total_disp[roof_active];
+            let n_disp_steps = 10usize;
+            let du_target = (max_disp - initial_disp) / n_disp_steps as f64;
+
+            for step in 0..n_disp_steps {
+                let target = initial_disp + du_target * (step + 1) as f64;
+                let mut step_ok = false;
+
+                for _attempt in 0..5 {
+                    let snap = StateSnapshot::capture(&behaviors);
+                    let mut converged = false;
+                    let mut last_du_free = Vec::new();
+
+                    for _iter in 0..20 {
+                        let k_free = assemble_k(
+                            model,
+                            dofmap,
+                            &behaviors,
+                            use_kg,
+                            Some((roof_active, target)),
+                        );
+                        let k_red = reducer.reduce_k(&k_free);
+                        let f_int = compute_f_int(model, dofmap, &behaviors);
+
+                        let penalty = 1e16;
+                        let f_ext: Vec<f64> = (0..n_active)
+                            .map(|i| {
+                                if i == roof_active {
+                                    target * penalty
+                                } else {
+                                    0.0
+                                }
+                            })
+                            .collect();
+                        let r_free: Vec<f64> =
+                            f_ext.iter().zip(f_int.iter()).map(|(e, i)| e - i).collect();
+                        let r_red = reducer.reduce_f(&r_free);
+
+                        let r_norm: f64 = r_red.iter().map(|x| x * x).sum::<f64>().sqrt();
+                        if r_norm < 1e-6 * target.abs().max(1.0) {
+                            converged = true;
+                            break;
+                        }
+
+                        let mut solver = make_solver(SolverBackend::DirectSparseCholesky);
+                        solver.factorize(&k_red).map_err(|e| format!("{:?}", e))?;
+                        let du_red = solver.solve(&r_red).map_err(|e| format!("{:?}", e))?;
+                        let du_free = reducer.expand_u(&du_red);
+                        last_du_free = du_free.clone();
+
+                        let model_ptr = std::ptr::addr_of_mut!(*model) as *const Model;
+                        for (_elem, b) in model.elements.iter_mut().zip(behaviors.iter_mut()) {
+                            let gdofs = b.global_dofs(dofmap);
+                            let mut du_elem = LocalVec {
+                                data: SmallVec::from_elem(0.0, 12),
+                            };
+                            for (i, &g) in gdofs.iter().enumerate() {
+                                if g != usize::MAX {
+                                    du_elem.data[i] = du_free[g];
+                                }
+                            }
+                            let dummy_ctx = Ctx {
+                                model: unsafe { &*model_ptr },
+                            };
+                            b.update_state(&du_elem, false, &dummy_ctx);
+                        }
+                    }
+
+                    if converged {
+                        for b in behaviors.iter_mut() {
+                            b.commit_state();
+                        }
+                        for (&du, td) in last_du_free.iter().zip(total_disp.iter_mut()) {
+                            *td += du;
+                        }
+                        let roof = get_roof_disp(&total_disp, model, dofmap, dir);
+                        let base_shear: f64 = compute_f_int(model, dofmap, &behaviors)
+                            .iter()
+                            .take(roof_active)
+                            .sum();
+                        capacity_curve.push(CapacityPoint {
+                            step: (n_steps + 1 + step) as u32,
+                            roof_disp: roof,
+                            base_shear,
+                            story_shear: vec![],
+                            story_drift: vec![],
+                        });
+                        track_hinges(
+                            model,
+                            dofmap,
+                            &behaviors,
+                            &thresholds,
+                            (n_steps + step) as u32,
+                            &mut hinges,
+                        );
+                        step_ok = true;
+                        break;
+                    } else {
+                        model.restore(&snap, &mut behaviors);
+                    }
+                }
+                if !step_ok {
+                    break;
+                }
+            }
+        }
+    }
+
     if use_arc_length {
         let arc_solver = ArcLengthSolver::new(arc_length_dl);
         let mut prev_du: Vec<f64> = Vec::new();
@@ -287,7 +417,7 @@ pub fn pushover_analysis(
 
         for _step in 0..20 {
             let snap = StateSnapshot::capture(&behaviors);
-            let k_free = assemble_k(model, dofmap, &behaviors, use_kg);
+            let k_free = assemble_k(model, dofmap, &behaviors, use_kg, None);
             let k_red = reducer.reduce_k(&k_free);
             let f_int = compute_f_int(model, dofmap, &behaviors);
 
@@ -353,12 +483,112 @@ pub fn pushover_analysis(
         }
     }
 
+    let mechanism = determine_mechanism(&hinges, model);
     let qu = capacity_curve.last().map(|c| c.base_shear).unwrap_or(0.0);
     Ok(PushoverResult {
         steps: vec![],
         capacity_curve,
-        hinges: vec![],
-        mechanism: MechanismType::Partial,
+        hinges,
+        mechanism,
         qu,
     })
+}
+
+struct HingeThreshold {
+    mc: f64,
+    my: f64,
+    mu: f64,
+}
+
+fn compute_hinge_thresholds(model: &Model) -> Vec<HingeThreshold> {
+    model
+        .elements
+        .iter()
+        .map(|elem| {
+            let (my, mu) = if let Some(sid) = elem.section {
+                if let Some(sec) = model.sections.get(sid.index()) {
+                    let depth = sec.depth.max(sec.width);
+                    let i = sec.iz.max(sec.iy);
+                    let z = if depth > 0.0 { i / (depth / 2.0) } else { 0.0 };
+                    let sigma_y = 235.0;
+                    let my = sigma_y * z;
+                    (my, my * 1.2)
+                } else {
+                    (0.0, 0.0)
+                }
+            } else {
+                (0.0, 0.0)
+            };
+            HingeThreshold {
+                mc: my / 3.0,
+                my,
+                mu,
+            }
+        })
+        .collect()
+}
+
+fn track_hinges(
+    model: &Model,
+    _dofmap: &DofMap,
+    behaviors: &[Box<dyn ElementBehavior>],
+    thresholds: &[HingeThreshold],
+    step: u32,
+    hinges: &mut Vec<HingeEvent>,
+) {
+    let state = ElemState::default();
+    let ctx = Ctx { model };
+    for (i, (elem, b)) in model.elements.iter().zip(behaviors).enumerate() {
+        let f = b.internal_force(&state, &ctx);
+        let m_i = f.data[4].abs().max(f.data[5].abs());
+        let m_j = f.data[10].abs().max(f.data[11].abs());
+        let m_max = m_i.max(m_j);
+        let th = &thresholds[i];
+        if m_max < th.mc {
+            continue;
+        }
+        let level = if m_max >= th.mu {
+            HingeLevel::Ultimate
+        } else if m_max >= th.my {
+            HingeLevel::Yield
+        } else {
+            HingeLevel::Crack
+        };
+        let pos = if m_i >= m_j { 0.0 } else { 1.0 };
+        hinges.push(HingeEvent {
+            step,
+            elem: elem.id,
+            pos,
+            level,
+            ductility: if th.my > 0.0 { m_max / th.my } else { 0.0 },
+        });
+    }
+}
+
+fn determine_mechanism(hinges: &[HingeEvent], _model: &Model) -> MechanismType {
+    if hinges.is_empty() {
+        return MechanismType::Partial;
+    }
+    let last_step = hinges.iter().map(|h| h.step).max().unwrap_or(0);
+    let final_hinges: Vec<&HingeEvent> = hinges.iter().filter(|h| h.step == last_step).collect();
+    if final_hinges.len() >= 3 {
+        MechanismType::Overall
+    } else {
+        MechanismType::Partial
+    }
+}
+
+fn get_roof_dof(model: &Model, dofmap: &DofMap, dir: SeismicDir) -> Option<usize> {
+    let dir_idx = match dir {
+        SeismicDir::X => 0,
+        SeismicDir::Y => 1,
+    };
+    if let Some(story) = model.stories.last() {
+        if let Some(dia) = story.diaphragms.first() {
+            let ni = dia.master.index();
+            let g = ni * 6 + dir_idx;
+            return dofmap.active(g).map(|a| a as usize);
+        }
+    }
+    None
 }
