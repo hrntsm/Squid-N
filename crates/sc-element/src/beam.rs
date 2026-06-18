@@ -647,7 +647,11 @@ impl ElementBehavior for BeamElement {
     }
 
     fn tangent_stiffness(&self, _state: &ElemState, _ctx: &Ctx) -> LocalMat {
-        self.local_stiffness()
+        // 要素ローカルの 12×12 を全体系へ回す（K_global = Rᵀ K_local R）。
+        // ElementBehavior::tangent_stiffness は全体系を返す契約（シェルと同じ）。
+        // これを欠くと、ローカル系とグローバル系が一致しない部材（鉛直柱・
+        // 任意方向材・非対称断面 iy≠iz）で組立 K が誤る。
+        self.axis.to_global(&self.local_stiffness())
     }
 
     fn internal_force(&self, _state: &ElemState, _ctx: &Ctx) -> LocalVec {

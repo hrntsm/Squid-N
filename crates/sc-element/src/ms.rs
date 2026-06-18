@@ -66,9 +66,12 @@ impl crate::behavior::ElementBehavior for MsElement {
         gdofs
     }
 
-    fn tangent_stiffness(&self, state: &ElemState, ctx: &crate::behavior::Ctx) -> LocalMat {
-        // 中央弾性部の剛性 + せん断ばね剛性（軸ばね群の寄与は将来）
-        let k_elastic = self.elastic_mid.tangent_stiffness(state, ctx);
+    fn tangent_stiffness(&self, _state: &ElemState, _ctx: &crate::behavior::Ctx) -> LocalMat {
+        // 中央弾性部の剛性 + せん断ばね剛性（軸ばね群の寄与は将来）。
+        // 双方ともローカル系で合成してから全体系へ回す（tangent_stiffness は
+        // 全体系を返す契約。BeamElement::tangent_stiffness は内部で回すため、
+        // ここではローカル剛性 local_stiffness() を使って合成→回転する）。
+        let k_elastic = self.elastic_mid.local_stiffness();
         let k_shear = self.shear.stiffness_12x12();
         let mut k = LocalMat::zeros(12);
         for i in 0..12 {
@@ -77,7 +80,7 @@ impl crate::behavior::ElementBehavior for MsElement {
                 k.set(i, j, v);
             }
         }
-        k
+        self.elastic_mid.axis.to_global(&k)
     }
 
     fn internal_force(&self, state: &ElemState, ctx: &crate::behavior::Ctx) -> LocalVec {

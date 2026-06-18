@@ -178,6 +178,38 @@ mod tests {
         assert!((fx_i + 1000.0).abs() < 1e-6, "fx_i={}", fx_i);
     }
 
+    /// X 軸上の片持ち梁に「グローバル Y 方向」の先端荷重をかける。
+    /// 参照ベクトル [0,0,1] では local z = global −y となるので、たわみは
+    /// **iy** で決まる（iz ではない）。to_global を欠くと iz を使ってしまい誤る。
+    /// よって iy≠iz の断面で、δ = PL³/(3E·iy) に一致することを確認する。
+    #[test]
+    fn test_beam_to_global_transverse_uses_correct_inertia() {
+        let e = 1000.0_f64;
+        let l = 1000.0_f64;
+        let iy = 2000.0_f64;
+        let iz = 1000.0_f64; // iy≠iz：取り違えが顕在化する
+        let p = 100.0_f64;
+        let mut model = make_axial_cantilever();
+        model.sections[0].iy = iy;
+        model.sections[0].iz = iz;
+        model.sections[0].as_y = 1.0e5; // せん断たわみを十分小さく
+        model.sections[0].as_z = 1.0e5;
+        model.load_cases[0].nodal[0].values = [0.0, p, 0.0, 0.0, 0.0, 0.0];
+
+        let result = linear_static_once(&model, LoadCaseId(1)).unwrap();
+        let uy = result.disp[1][1];
+        let expected = p * l.powi(3) / (3.0 * e * iy); // = 1.6667 mm（曲げ支配）
+        let buggy = p * l.powi(3) / (3.0 * e * iz); // = 3.333 mm（誤った値=iz使用）
+                                                    // iy ベースの値に一致し、iz ベース(2倍)を明確に排除する。
+        assert!(
+            (uy - expected).abs() / expected < 1e-3,
+            "uy={} expected(iy)={} buggy(iz)={}",
+            uy,
+            expected,
+            buggy
+        );
+    }
+
     #[test]
     fn test_linear_static_shell_element() {
         // Cantilever plate: bottom edge fixed (nodes 0,1), top edge free (nodes 2,3)
