@@ -61,8 +61,14 @@
 | 16 | 壁（TVLEM） | sc-element | — | — | P5.5 | ❌ |
 | 17 | 時刻歴 | sc-solver | timehistory.rs | — | P6 | ❌ |
 | 18 | 限界耐力 | sc-design-jp | capacity_spectrum.rs | `test_capacity_spectrum` | P12 | ❌ |
+| 19 | 一軸履歴則（Concrete/Bilinear/MP） | sc-material | uniaxial.rs | — | P4 | ❌ |
+| 20 | 部材履歴則（武田・原点指向・スリップ） | sc-material | hysteresis.rs | — | P4 | ❌ |
+| 21 | ファイバ断面（M–φ 積分） | sc-section | fiber.rs | `test_section_*` | P4 | 🔶 |
+| 22 | スケルトン自動算定（M–φ→M–θ） | sc-skeleton | lib.rs | `test_member_skeleton_basic` | P4 | ❌ |
 
 凡例: ✅ 実装済み・🔶 一部実装（要拡張）・❌ 未実装
+
+> P4（材料・断面）の監査結果は `docs/v_and_v/p4_review.md` を参照。索引 #19〜#22 は P4 DoD §8.4 の 3 項目に対応し、現状は全て未達（#21 は弾性域のみ一部実装）。
 
 ## 1 次参照: 手計算／理論解
 
