@@ -7,6 +7,11 @@ edition = "2021"
 default = []
 gui = ["egui", "eframe", "egui_extras"]
 
+[[bin]]
+name = "structcalc"
+path = "src/main.rs"
+required-features = ["gui"]
+
 [dependencies]
 sc-core = { path = "../sc-core" }
 sc-element = { path = "../sc-element" }

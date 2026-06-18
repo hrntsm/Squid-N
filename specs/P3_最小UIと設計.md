@@ -137,13 +137,13 @@ impl eframe::App for App {
 }
 ```
 
-**eframe 0.34 の実 API（確認済み・そのまま使える）。** 起動は `eframe::run_native`:
+**eframe 0.34.3 の実 API（確認済み・そのまま使える）。** 起動は `eframe::run_native`:
 
 ```rust
 // sc-app/src/main.rs
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions::default();
-    // 0.34: 第3引数のクロージャは Result<Box<dyn App>, _> を返す
+    // 0.34.3: 第3引数のクロージャは Result<Box<dyn App>, DynError> を返す
     eframe::run_native(
         "structcalc",
         options,
@@ -152,8 +152,32 @@ fn main() -> eframe::Result<()> {
 }
 ```
 
+> **★eframe 0.34.3 の `App` trait変更（重要）:** `update` は deprecated になり、
+> **`ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame)` が必須メソッド**になった。
+> `ui` メソッドは `&mut egui::Ui` を受け取るため、パネルは `show_inside(ui, ...)` を使う
+> （従来の `show(ctx, ...)` は deprecated）。タブ切替・Undo/Redo ボタン・解析実行ボタンは
+> `ui.horizontal(|ui| { ... })` で配置し、各タブの内容は `egui::ScrollArea::vertical().show(ui, ...)` で描く。
+
+```rust
+// sc-app/src/app.rs（eframe::App impl の要点）
+#[cfg(feature = "gui")]
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // 上部ツールバー: タブ + Undo/Redo + 解析実行 + 荷重継続性
+        ui.horizontal(|ui| { /* selectable_label / Button */ });
+        ui.separator();
+        // 各タブの内容
+        egui::ScrollArea::vertical().show(ui, |ui| match self.active_tab {
+            Tab::Nodes => crate::tables::nodes::nodes_table(ui, self),
+            /* ... */
+        });
+    }
+}
+```
+
 **DoD（T0）:** `cargo run -p sc-app --features gui` でウィンドウが開き、タブ切替できる。
 （feature `gui` は P0 §2.4 の opt-in。コア解析は GUI 無しでビルド可能を維持。）
+**バイナリ:** `[[bin]] name = "structcalc" required-features = ["gui"]` を `sc-app/Cargo.toml` に設定。
 
 ---
 
