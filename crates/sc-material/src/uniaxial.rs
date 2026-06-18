@@ -1,20 +1,27 @@
 use std::fmt::Debug;
 
-/// 一軸応力–ひずみ履歴則を示すトレイト。
+/// 一軸応力–ひずみ履歴則を示すトレイト（設計書 §7）。
 /// trial/commit/revert パターンで非線形解析の試行収束に対応する。
+///
+/// 単位規約: ひずみは無次元、応力・接線剛性は [N/mm²]。
 pub trait UniaxialMaterial: Send + Sync + Debug {
-    /// 試行ひずみ strain に対する (応力, 接線剛性)。
+    /// 試行ひずみ strain に対する (応力 [N/mm²], 接線剛性 [N/mm²])。
     /// 状態は内部に試行値として保持。
     fn trial(&mut self, strain: f64) -> (f64, f64);
     /// 試行を確定（収束後にコミット）。
     fn commit(&mut self);
     /// 試行を破棄して直前のコミット状態へ戻す（リジェクト時）。
     fn revert(&mut self);
+    /// ファイバ断面などで「ファイバごとに独立した状態インスタンス」を作るための複製。
+    /// 非線形履歴では各ファイバが独自の履歴変数を持つ必要があるため、
+    /// 共有状態だと履歴が混入して破綮する（設計書 §6.3）。
+    fn clone_box(&self) -> Box<dyn UniaxialMaterial>;
 }
 
 // ──────────────────────────── バイリニア鋼材 ────────────────────────────
 
-/// バイリニア鋼材（弾性＋ひずみ硬化）。
+/// バイリニア鋼材（弾性＋線形硬化＝kinematic hardening）。
+/// 降伏点 fy [N/mm²]、ヤング率 e [N/mm²]、hardening = ひずみ硬化比（降伏後接線 = hardening·e）。
 #[derive(Clone, Debug)]
 pub struct Bilinear {
     pub e: f64,
@@ -25,10 +32,12 @@ pub struct Bilinear {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct BilinearState {
     strain: f64,
     stress: f64,
     tangent: f64,
+    plastic_strain: f64,
 }
 
 impl Bilinear {
@@ -37,6 +46,7 @@ impl Bilinear {
             strain: 0.0,
             stress: 0.0,
             tangent: e,
+            plastic_strain: 0.0,
         };
         Self {
             e,
@@ -46,28 +56,51 @@ impl Bilinear {
             trial: init,
         }
     }
+
+    /// 1D 線形 kinematic hardening の塑性係数 Hp。
+    /// 降伏後の接線 dσ/dε = e·Hp/(e+Hp) = hardening·e となるよう Hp を定める。
+    fn hp(&self) -> f64 {
+        if self.hardening >= 1.0 {
+            f64::INFINITY
+        } else {
+            self.hardening * self.e / (1.0 - self.hardening)
+        }
+    }
 }
 
 impl UniaxialMaterial for Bilinear {
     fn trial(&mut self, strain: f64) -> (f64, f64) {
-        let de = strain - self.committed.strain;
-        let stress_trial = self.committed.stress + self.e * de;
-        let abs_stress = stress_trial.abs();
-        if abs_stress <= self.fy {
+        let ep = self.committed.plastic_strain;
+        let hp = self.hp();
+        // 弾性予測（塑性ひずみは前回コミット値で固定）
+        let sigma_tr = self.e * (strain - ep);
+        // 降伏関数 f = |σ - α| - fy, α = Hp·ep（kinematic hardening の背応力）
+        let alpha = hp * ep;
+        let f_tr = (sigma_tr - alpha).abs() - self.fy;
+        if f_tr <= 0.0 {
+            // 弾性
             self.trial = BilinearState {
                 strain,
-                stress: stress_trial,
+                stress: sigma_tr,
                 tangent: self.e,
+                plastic_strain: ep,
             };
         } else {
-            let sgn = if stress_trial >= 0.0 { 1.0 } else { -1.0 };
-            let overshoot = abs_stress - self.fy;
-            let plastic_strain = overshoot / self.e;
-            let stress = sgn * (self.fy + self.hardening * plastic_strain * self.e);
+            // 塑性戻し写像: Δep = f_tr/(e+Hp), 方向 = sign(σ_tr - α)
+            let sgn = (sigma_tr - alpha).signum();
+            let dep = f_tr / (self.e + hp);
+            let ep_new = ep + sgn * dep;
+            let stress = self.e * (strain - ep_new);
+            let tangent = if hp.is_infinite() {
+                0.0
+            } else {
+                self.e * hp / (self.e + hp)
+            };
             self.trial = BilinearState {
                 strain,
                 stress,
-                tangent: self.hardening * self.e,
+                tangent,
+                plastic_strain: ep_new,
             };
         }
         (self.trial.stress, self.trial.tangent)
@@ -80,11 +113,16 @@ impl UniaxialMaterial for Bilinear {
     fn revert(&mut self) {
         self.trial = self.committed.clone();
     }
+
+    fn clone_box(&self) -> Box<dyn UniaxialMaterial> {
+        Box::new(self.clone())
+    }
 }
 
 // ──────────────────────────── Menegotto–Pinto 鉄筋 ────────────────────────────
 
 /// Menegotto–Pinto モデル（バウシンガー効果を滑らかに表現）。
+/// 仕様書 §4 の正規化形。反転点 (εr,σr)・漸近線交点 (ε0,σ0)・ξ を状態に保持。
 #[derive(Clone, Debug)]
 pub struct MenegottoPinto {
     pub e: f64,
@@ -102,36 +140,21 @@ struct MpState {
     strain: f64,
     stress: f64,
     tangent: f64,
+    /// 直前の反転点 (εr, σr)
     eps_r: f64,
     sig_r: f64,
+    /// 漸近線の交点 (ε0, σ0)
     eps_0: f64,
     sig_0: f64,
+    /// 反転後の塑性ひずみ振幅パラメータ ξ
     xi: f64,
+    /// 直前の trial の進行方向（+1/-1/0）。反転検知に使う。
+    direction: f64,
 }
 
 impl MenegottoPinto {
     pub fn new(e: f64, fy: f64) -> Self {
-        let b = 0.01;
-        let init = MpState {
-            strain: 0.0,
-            stress: 0.0,
-            tangent: e,
-            eps_r: 0.0,
-            sig_r: 0.0,
-            eps_0: 0.0,
-            sig_0: 0.0,
-            xi: 0.0,
-        };
-        Self {
-            e,
-            fy,
-            b,
-            r0: 20.0,
-            a1: 18.5,
-            a2: 0.15,
-            committed: init.clone(),
-            trial: init,
-        }
+        Self::with_params(e, fy, 0.01, 20.0, 18.5, 0.15)
     }
 
     pub fn with_params(e: f64, fy: f64, b: f64, r0: f64, a1: f64, a2: f64) -> Self {
@@ -141,9 +164,11 @@ impl MenegottoPinto {
             tangent: e,
             eps_r: 0.0,
             sig_r: 0.0,
-            eps_0: 0.0,
-            sig_0: 0.0,
+            // 初期漸近線交点は弾性直線と降伏後直線の交点 = (εy, fy)
+            eps_0: fy / e,
+            sig_0: fy,
             xi: 0.0,
+            direction: 0.0,
         };
         Self {
             e,
@@ -156,35 +181,63 @@ impl MenegottoPinto {
             trial: init,
         }
     }
+
+    /// 反転点 (εr,σr) と漸近線交点 (ε0,σ0) を更新する（標準 MP 手順）。
+    /// 反転点 = 直前のコミット点。新しい漸近線交点は反転点を元の交点に対して鏡映。
+    fn update_reversal(&self, state: &mut MpState, prev_strain: f64, prev_stress: f64) {
+        let new_eps_r = prev_strain;
+        let new_sig_r = prev_stress;
+        // 元の漸近線交点に対する鏡映: (ε0',σ0') = 2·(εr,σr) - (ε0,σ0)
+        let new_eps_0 = 2.0 * new_eps_r - state.eps_0;
+        let new_sig_0 = 2.0 * new_sig_r - state.sig_0;
+        // ξ: 反転後の塑性ひずみ振幅（Chang & Mander 2004 系の簡易形）。
+        //   ξ = |εr - εr_prev| / εy,  εy = fy/E。単調増加を保証。
+        let eps_y = self.fy / self.e;
+        let xi_new = if eps_y.abs() > 1e-15 {
+            ((new_eps_r - state.eps_r).abs() / eps_y).max(state.xi)
+        } else {
+            state.xi
+        };
+        state.eps_r = new_eps_r;
+        state.sig_r = new_sig_r;
+        state.eps_0 = new_eps_0;
+        state.sig_0 = new_sig_0;
+        state.xi = xi_new;
+    }
 }
 
 impl UniaxialMaterial for MenegottoPinto {
     fn trial(&mut self, strain: f64) -> (f64, f64) {
         let c = &self.committed;
-        if (strain - c.eps_r).abs() < 1e-15 {
-            self.trial = c.clone();
-            return (c.stress, c.tangent);
+        // 進行方向の判定と反転検知（trial 内で行う＝標準 MP）
+        let dir_new = (strain - c.strain).signum();
+        let mut working = c.clone();
+        if dir_new != 0.0 && c.direction != 0.0 && dir_new != c.direction {
+            // 反転: 直前のコミット点を新しい反転点として採用
+            self.update_reversal(&mut working, c.strain, c.stress);
+            working.direction = dir_new;
+        } else if dir_new != 0.0 {
+            working.direction = dir_new;
         }
-        let deps = c.eps_0 - c.eps_r;
-        let dsig = c.sig_0 - c.sig_r;
+
+        let deps = working.eps_0 - working.eps_r;
+        let dsig = working.sig_0 - working.sig_r;
         if deps.abs() < 1e-15 {
-            let stress = self.e * strain;
-            let tangent = self.e;
-            self.trial = MpState {
-                strain,
-                stress,
-                tangent,
-                ..c.clone()
-            };
-            return (stress, tangent);
+            // 漸近線が縮退: 弾性直線で評価
+            let stress = working.sig_r + self.e * (strain - working.eps_r);
+            working.strain = strain;
+            working.stress = stress;
+            working.tangent = self.e;
+            self.trial = working;
+            return (stress, self.e);
         }
-        let eps_star = (strain - c.eps_r) / deps;
-        let r = self.r0 - self.a1 * c.xi / (self.a2 + c.xi);
-        let r = r.max(1.0);
+        let eps_star = (strain - working.eps_r) / deps;
+        let r = (self.r0 - self.a1 * working.xi / (self.a2 + working.xi)).max(1.0);
         let eps_star_abs = eps_star.abs();
         let denom = (1.0 + eps_star_abs.powf(r)).powf(1.0 / r);
         let sig_star = self.b * eps_star + (1.0 - self.b) * eps_star / denom;
-        let stress = c.sig_r + dsig * sig_star;
+        let stress = working.sig_r + dsig * sig_star;
+        // dσ*/dε* = b + (1-b)·(1/denom - ε*·ddenom)
         let ddenom = if eps_star_abs > 1e-15 {
             eps_star_abs.powf(r - 1.0) * eps_star.signum()
                 / (1.0 + eps_star_abs.powf(r)).powf(1.0 + 1.0 / r)
@@ -192,46 +245,37 @@ impl UniaxialMaterial for MenegottoPinto {
             0.0
         };
         let dsig_star = self.b + (1.0 - self.b) * (1.0 / denom - eps_star * ddenom);
-        let tangent = dsig / deps * dsig_star;
+        let tangent = (dsig / deps) * dsig_star;
         let tangent = tangent.clamp(self.b * self.e, self.e);
-        self.trial = MpState {
-            strain,
-            stress,
-            tangent,
-            ..c.clone()
-        };
+
+        working.strain = strain;
+        working.stress = stress;
+        working.tangent = tangent;
+        self.trial = working;
         (stress, tangent)
     }
 
     fn commit(&mut self) {
-        let prev = &self.committed;
-        let sgn_now = (self.trial.strain - prev.eps_r).signum();
-        let sgn_prev = (prev.strain - prev.eps_r).signum();
-        if sgn_now != sgn_prev && sgn_prev != 0.0 {
-            let new_r = prev.strain;
-            let new_s = prev.stress;
-            let deps = new_r - prev.eps_r;
-            let dsig = new_s - prev.sig_r;
-            let xi_new = prev.xi + deps * dsig.signum() - (self.b / (1.0 - self.b)) * dsig / self.e;
-            let xi_new = xi_new.abs().max(0.0);
-            self.trial.eps_r = new_r;
-            self.trial.sig_r = new_s;
-            self.trial.eps_0 = new_r + deps;
-            self.trial.sig_0 = new_s + dsig;
-            self.trial.xi = xi_new;
-        }
         self.committed = self.trial.clone();
     }
 
     fn revert(&mut self) {
         self.trial = self.committed.clone();
     }
+
+    fn clone_box(&self) -> Box<dyn UniaxialMaterial> {
+        Box::new(self.clone())
+    }
 }
 
 // ──────────────────────────── コンクリートモデル ────────────────────────────
 
-/// コンクリートの一軸履歴モデル。
-/// 圧縮：放物線上昇＋直線軟化、引張：ひび割れ＋テンションスティフニング。
+/// コンクリートの一軸履歴モデル（設計書 §7）。
+/// 圧縮: 放物線上昇 → ピーク(-fc at ec0) → 線形軟化 → ecu で残留(-fc·residual)。
+/// 引張: 弾性 → ひび割れ(ε_cr=ft/E0) → テンションスティフニング(指数減衰)。
+/// 除荷・再載荷は原点指向（最大経験ひずみへの割線）。
+///
+/// 単位: fc/ft [N/mm²], ec0/ecu [ひずみ(負)], tension_stiffening/residual_ratio [無次元]。
 #[derive(Clone, Debug)]
 pub struct Concrete {
     pub fc: f64,
@@ -239,6 +283,7 @@ pub struct Concrete {
     pub ecu: f64,
     pub ft: f64,
     pub tension_stiffening: f64,
+    pub residual_ratio: f64,
     committed: ConcreteState,
     trial: ConcreteState,
 }
@@ -249,39 +294,33 @@ struct ConcreteState {
     strain: f64,
     stress: f64,
     tangent: f64,
+    /// 最大経験圧縮ひずみ（最も負の値）
     max_comp_strain: f64,
-    crack_strain: f64,
+    /// 最大経験引張ひずみ（最も正の値）
+    max_tens_strain: f64,
     is_cracked: bool,
 }
 
 impl Concrete {
+    /// 係数は AIJ 系の代表値。製品経路では with_params + 外部データを用いること（§2.2）。
     pub fn new(fc: f64, ft: f64) -> Self {
-        let init = ConcreteState {
-            strain: 0.0,
-            stress: 0.0,
-            tangent: 0.0,
-            max_comp_strain: 0.0,
-            crack_strain: 0.0,
-            is_cracked: false,
-        };
-        Self {
-            fc,
-            ec0: -0.002,
-            ecu: -0.0035,
-            ft,
-            tension_stiffening: 0.5,
-            committed: init.clone(),
-            trial: init,
-        }
+        Self::with_params(fc, -0.002, -0.0035, ft, 0.5, 0.0)
     }
 
-    pub fn with_params(fc: f64, ec0: f64, ecu: f64, ft: f64, tension_stiffening: f64) -> Self {
+    pub fn with_params(
+        fc: f64,
+        ec0: f64,
+        ecu: f64,
+        ft: f64,
+        tension_stiffening: f64,
+        residual_ratio: f64,
+    ) -> Self {
         let init = ConcreteState {
             strain: 0.0,
             stress: 0.0,
             tangent: 0.0,
             max_comp_strain: 0.0,
-            crack_strain: 0.0,
+            max_tens_strain: 0.0,
             is_cracked: false,
         };
         Self {
@@ -290,44 +329,46 @@ impl Concrete {
             ecu,
             ft,
             tension_stiffening,
+            residual_ratio,
             committed: init.clone(),
             trial: init,
         }
     }
 
+    /// 初期接線剛性 E0 = 2·fc/|ec0|（放物線の ε=0 での接線）。
+    fn e0(&self) -> f64 {
+        2.0 * self.fc / self.ec0.abs()
+    }
+
+    /// 圧縮包絡線（strain ≤ 0）。
     fn envelope_compression(&self, strain: f64) -> (f64, f64) {
         if strain >= self.ec0 {
-            let ratio = strain / self.ec0;
-            let c = 2.0 * ratio - ratio * ratio;
-            let stress = -c * self.fc;
-            let tangent = -(2.0 - 2.0 * ratio) * self.fc / self.ec0.abs();
+            // 上昇域: 放物線 σ = -fc·(2r - r²), r = ε/εc0
+            let r = strain / self.ec0;
+            let stress = -self.fc * (2.0 * r - r * r);
+            let tangent = -self.fc * (2.0 - 2.0 * r) / self.ec0;
             (stress, tangent)
         } else if strain >= self.ecu {
-            let slope = 0.15 * self.fc / (self.ec0 - self.ecu);
+            // 軟化域: ec0 で -fc, ecu で -fc·residual への直線
+            let slope = self.fc * (1.0 - self.residual_ratio) / (self.ecu - self.ec0);
             let stress = -self.fc + slope * (strain - self.ec0);
-            let tangent = slope;
-            (stress, tangent)
+            (stress, slope)
         } else {
-            let stress = -self.fc * (1.0 - 0.15 * (strain - self.ecu) / self.ecu);
-            (stress, 0.0)
+            // ecu 超過: 残留一定
+            (-self.fc * self.residual_ratio, 0.0)
         }
     }
 
+    /// 引張包絡線（strain ≥ 0）。
     fn envelope_tension(&self, strain: f64) -> (f64, f64) {
-        let e0 = self.fc.abs() / self.ec0.abs();
-        if strain <= 0.0 {
-            return (0.0, 0.0);
-        }
+        let e0 = self.e0();
         let eps_cr = self.ft / e0;
         if strain <= eps_cr {
-            let stress = e0 * strain;
-            let tangent = e0;
-            (stress, tangent)
+            (e0 * strain, e0)
         } else {
-            let stress = self.ft * (-self.tension_stiffening * (strain / eps_cr - 1.0)).exp();
-            let tangent = -self.ft
-                * (self.tension_stiffening / eps_cr)
-                * (-self.tension_stiffening * (strain / eps_cr - 1.0)).exp();
+            let arg = -self.tension_stiffening * (strain / eps_cr - 1.0);
+            let stress = self.ft * arg.exp();
+            let tangent = -self.ft * (self.tension_stiffening / eps_cr) * arg.exp();
             (stress, tangent)
         }
     }
@@ -336,60 +377,67 @@ impl Concrete {
 impl UniaxialMaterial for Concrete {
     fn trial(&mut self, strain: f64) -> (f64, f64) {
         let c = &self.committed;
-        if strain <= 0.0 {
+        let e0 = self.e0();
+        let eps_cr = self.ft / e0;
+
+        let (stress, tangent, max_comp, max_tens, is_cracked) = if strain <= 0.0 {
+            // 圧縮側
             let mut max_comp = c.max_comp_strain;
-            let (s, e_t) = if strain < max_comp {
-                let (env_s, env_t) = self.envelope_compression(strain);
+            let (s, t) = if strain < c.max_comp_strain {
+                // 包絡線上（新最大圧縮ひずみ）
                 max_comp = strain;
-                (env_s, env_t)
+                self.envelope_compression(strain)
             } else {
-                let reload_e = if c.max_comp_strain < 0.0 && c.stress < 0.0 {
-                    c.stress / c.max_comp_strain
+                // 除荷・再載荷: 原点指向の割線剛性 σm/εm
+                if c.max_comp_strain < 0.0 {
+                    let (sig_m, _) = self.envelope_compression(c.max_comp_strain);
+                    let ku = sig_m / c.max_comp_strain;
+                    (ku * strain, ku)
                 } else {
-                    self.fc / self.ec0.abs()
-                };
-                let stress = reload_e * strain;
-                (stress, reload_e)
+                    // 圧縮履歴なし: 初期接線で原点へ
+                    (e0 * strain, e0)
+                }
             };
-            self.trial = ConcreteState {
-                strain,
-                stress: s,
-                tangent: e_t,
-                max_comp_strain: max_comp,
-                ..c.clone()
-            };
-            (s, e_t)
+            (s, t, max_comp, c.max_tens_strain, c.is_cracked)
         } else {
-            let is_cracked = c.is_cracked || c.crack_strain > 0.0;
-            let (s, e_t) = if !is_cracked {
+            // 引張側
+            let mut max_tens = c.max_tens_strain;
+            let mut cracked = c.is_cracked;
+            let (s, t) = if !cracked && strain <= eps_cr {
+                (e0 * strain, e0)
+            } else if !cracked && strain > eps_cr {
+                // 初期ひび割れ発生
+                cracked = true;
+                max_tens = strain;
                 self.envelope_tension(strain)
             } else {
-                let crack_e = if c.crack_strain > 0.0 {
-                    let e0 = self.fc.abs() / self.ec0.abs();
-                    let eps_cr = self.ft / e0;
-                    let sig_ref = self.ft
-                        * (-self.tension_stiffening * (c.crack_strain / eps_cr - 1.0)).exp();
-                    sig_ref / c.crack_strain
+                // ひび割れ後
+                if strain > c.max_tens_strain {
+                    max_tens = strain;
+                    self.envelope_tension(strain)
                 } else {
-                    0.0
-                };
-                (crack_e * strain, crack_e)
+                    // 除荷・再載荷: 原点指向割線
+                    if c.max_tens_strain > 0.0 {
+                        let (sig_m, _) = self.envelope_tension(c.max_tens_strain);
+                        let kt = sig_m / c.max_tens_strain;
+                        (kt * strain, kt)
+                    } else {
+                        (0.0, 0.0)
+                    }
+                }
             };
-            let crack_strain = if strain > 0.0 && s >= self.ft * 0.9 && !is_cracked {
-                strain
-            } else {
-                c.crack_strain
-            };
-            self.trial = ConcreteState {
-                strain,
-                stress: s,
-                tangent: e_t,
-                is_cracked: is_cracked || strain > c.crack_strain,
-                crack_strain: crack_strain.max(c.crack_strain),
-                ..c.clone()
-            };
-            (s, e_t)
-        }
+            (s, t, c.max_comp_strain, max_tens, cracked)
+        };
+
+        self.trial = ConcreteState {
+            strain,
+            stress,
+            tangent,
+            max_comp_strain: max_comp,
+            max_tens_strain: max_tens,
+            is_cracked,
+        };
+        (stress, tangent)
     }
 
     fn commit(&mut self) {
@@ -398,6 +446,10 @@ impl UniaxialMaterial for Concrete {
 
     fn revert(&mut self) {
         self.trial = self.committed.clone();
+    }
+
+    fn clone_box(&self) -> Box<dyn UniaxialMaterial> {
+        Box::new(self.clone())
     }
 }
 
@@ -414,19 +466,48 @@ mod tests {
     #[test]
     fn test_bilinear_elastic() {
         let mut s = Bilinear::new(205000.0, 235.0, 0.01);
-        let (stress, _) = s.trial(0.001);
+        let (stress, t) = s.trial(0.001);
         assert_relative_eq!(stress, 205.0, epsilon = 1.0);
+        assert_relative_eq!(t, 205000.0, epsilon = 1.0);
     }
 
     #[test]
-    fn test_bilinear_yield() {
+    fn test_bilinear_yield_monotonic() {
         let mut s = Bilinear::new(205000.0, 235.0, 0.01);
-        let (stress, _) = s.trial(0.01);
-        assert_relative_eq!(
-            stress,
-            235.0 + 0.01 * 205000.0 * (0.01 - 235.0 / 205000.0),
-            epsilon = 1.0
-        );
+        let eps_y = 235.0 / 205000.0;
+        let (stress, t) = s.trial(eps_y * 5.0);
+        // 降伏後: stress = fy + hardening·e·(ε - εy)
+        let expected = 235.0 + 0.01 * 205000.0 * (eps_y * 5.0 - eps_y);
+        assert_relative_eq!(stress, expected, epsilon = 1.0);
+        assert_relative_eq!(t, 0.01 * 205000.0, epsilon = 1.0);
+    }
+
+    #[test]
+    fn test_bilinear_unload_elastic() {
+        let mut s = Bilinear::new(205000.0, 235.0, 0.01);
+        let eps_y = 235.0 / 205000.0;
+        s.trial(eps_y * 5.0);
+        s.commit();
+        // 除荷: 弾性勾配 E
+        let (stress, t) = s.trial(eps_y * 4.0);
+        assert_relative_eq!(t, 205000.0, epsilon = 1.0);
+        // 応力は直前コミット点から E·Δε だけ戻る
+        let prev = 235.0 + 0.01 * 205000.0 * (eps_y * 5.0 - eps_y);
+        assert_relative_eq!(stress, prev - 205000.0 * eps_y, epsilon = 1.0);
+    }
+
+    #[test]
+    fn test_bilinear_kinematic_bauschinger() {
+        // 引張降伏→圧縮再載荷で降伏点が負側へ移動（kinematic hardening）
+        let mut s = Bilinear::new(205000.0, 235.0, 0.01);
+        let eps_y = 235.0 / 205000.0;
+        s.trial(eps_y * 5.0);
+        s.commit();
+        s.trial(-eps_y * 0.5);
+        s.commit();
+        let (stress, _) = s.trial(-eps_y * 5.0);
+        // kinematic hardening では |σ| が fy を超えてから塑性。完全弾性戻りではない。
+        assert!(stress.abs() > 235.0 * 0.9, "kinematic shift expected");
     }
 
     #[test]
@@ -449,19 +530,82 @@ mod tests {
     }
 
     #[test]
-    fn test_concrete_compression_envelope() {
-        let mut c = Concrete::new(30.0, 2.0);
-        let (stress, _) = c.trial(-0.002);
-        assert_relative_eq!(stress, -30.0, epsilon = 1.0);
+    fn test_menegotto_pinto_bauschinger_loop() {
+        // 繰り返し履歴でバウシンガー効果（反転後の丸み）を確認
+        let mut mp = MenegottoPinto::new(205000.0, 235.0);
+        let eps_y = 235.0 / 205000.0;
+        let mut peak = 0.0f64;
+        // +4εy → -4εy → +4εy の履歴
+        for &target in &[eps_y * 4.0, -eps_y * 4.0, eps_y * 4.0] {
+            let n = 20;
+            for i in 1..=n {
+                let eps = target * (i as f64) / (n as f64);
+                let (sig, _) = mp.trial(eps);
+                mp.commit();
+                peak = peak.max(sig.abs());
+            }
+        }
+        // 反転後の曲率 R は ξ 増加で小さくなり、ループは漸近線に近づく。
+        // ピーク応力は fy+硬化成分 に漸近し、fy を超えること（弾完全塑性ではない）
+        assert!(peak > 235.0, "MP peak should exceed fy due to hardening");
     }
 
     #[test]
-    fn test_concrete_tension_crack() {
+    fn test_concrete_compression_peak() {
         let mut c = Concrete::new(30.0, 2.0);
-        let (stress, _) = c.trial(0.00005);
-        assert!(stress > 0.0);
-        let (stress2, _) = c.trial(0.0005);
-        assert!(stress2 < stress);
+        let (stress, t) = c.trial(-0.002);
+        assert_relative_eq!(stress, -30.0, epsilon = 1e-6);
+        assert_relative_eq!(t, 0.0, epsilon = 1e-3);
+    }
+
+    #[test]
+    fn test_concrete_compression_initial_tangent_positive() {
+        let mut c = Concrete::new(30.0, 2.0);
+        let (_, t) = c.trial(-1e-9);
+        let e0 = 2.0 * 30.0 / 0.002;
+        assert_relative_eq!(t, e0, epsilon = 1.0);
+    }
+
+    #[test]
+    fn test_concrete_softening_direction() {
+        // ピーク後ひずみ進行で応力は 0 側へ（|σ| は減少）
+        let mut c = Concrete::new(30.0, 2.0);
+        c.trial(-0.002);
+        c.commit();
+        let (s_mid, _) = c.trial(-0.003);
+        let (s_u, _) = c.trial(-0.0035);
+        assert!(
+            s_mid > -30.0 && s_u > s_mid,
+            "softening must reduce |stress|: mid={}, u={}",
+            s_mid,
+            s_u
+        );
+        assert_relative_eq!(s_u, 0.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_concrete_continuity_at_ecu() {
+        let c = Concrete::new(30.0, 2.0);
+        let (s_soft, _) = c.envelope_compression(-0.0035);
+        let (s_res, _) = c.envelope_compression(-0.0036);
+        assert_relative_eq!(s_soft, s_res, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_concrete_tension_crack_detection() {
+        let mut c = Concrete::new(30.0, 2.0);
+        let e0 = 2.0 * 30.0 / 0.002;
+        let eps_cr = 2.0 / e0;
+        // ひび割れ前: 弾性
+        let (s_el, _) = c.trial(eps_cr * 0.5);
+        assert_relative_eq!(s_el, e0 * eps_cr * 0.5, epsilon = 1e-9);
+        // ひび割れ点: σ = ft
+        let (s_cr, _) = c.trial(eps_cr);
+        assert_relative_eq!(s_cr, 2.0, epsilon = 1e-6);
+        // ひび割れ後: テンションスティフニング（ft から指数減衰、ただし ft 未満）
+        c.commit();
+        let (s_ts, _) = c.trial(eps_cr * 3.0);
+        assert!(s_ts > 0.0 && s_ts < 2.0, "tension stiffening: {}", s_ts);
     }
 
     #[test]

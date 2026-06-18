@@ -61,14 +61,18 @@
 | 16 | 壁（TVLEM） | sc-element | — | — | P5.5 | ❌ |
 | 17 | 時刻歴 | sc-solver | timehistory.rs | — | P6 | ❌ |
 | 18 | 限界耐力 | sc-design-jp | capacity_spectrum.rs | `test_capacity_spectrum` | P12 | ❌ |
-| 19 | 一軸履歴則（Concrete/Bilinear/MP） | sc-material | uniaxial.rs | — | P4 | ❌ |
-| 20 | 部材履歴則（武田・原点指向・スリップ） | sc-material | hysteresis.rs | — | P4 | ❌ |
-| 21 | ファイバ断面（M–φ 積分） | sc-section | fiber.rs | `test_section_*` | P4 | 🔶 |
-| 22 | スケルトン自動算定（M–φ→M–θ） | sc-skeleton | lib.rs | `test_member_skeleton_basic` | P4 | ❌ |
+| 19 | 一軸履歴則（Concrete/Bilinear/MP） | sc-material | uniaxial.rs | `test_concrete_*`/`test_bilinear_*`/`test_menegotto_pinto_*` | P4 | 🔶 |
+| 20 | 部材履歴則（武田・原点指向・スリップ） | sc-material | hysteresis.rs | `tests/hysteresis_snapshots.rs` | P4 | 🔶 |
+| 21 | ファイバ断面（M–φ 積分） | sc-section | fiber.rs | `test_section_*` | P4 | ✅ |
+| 22 | スケルトン自動算定（M–φ→M–θ） | sc-skeleton | lib.rs | `test_rc_skeleton_*` | P4 | 🔶 |
 
 凡例: ✅ 実装済み・🔶 一部実装（要拡張）・❌ 未実装
 
-> P4（材料・断面）の監査結果は `docs/v_and_v/p4_review.md` を参照。索引 #19〜#22 は P4 DoD §8.4 の 3 項目に対応し、現状は全て未達（#21 は弾性域のみ一部実装）。
+> P4（材料・断面）の監査結果は `docs/v_and_v/p4_review.md` を参照。
+> #19: 包絡線・接線符号・MP 反転検知を修正し単体テスト追加（insta スナップショットは #20 のみ）。
+> #20: 武田・原点指向・スリップに `UniaxialMaterial`(trial/commit/revert) を実装し insta スナップショットで固定（内側ルールは簡易版）。
+> #21: ファイバごとの独立状態化・弾性域厳密(1e-9)・降伏進展テスト追加で ✅。
+> #22: RC ファイバ（鉄筋点）組込み・ひずみイベント抽出・塑性ヒンジ M-θ 変換・手計算 My=at·σy·j 照合追加（せん断/抜出し加算は未実装）。
 
 ## 1 次参照: 手計算／理論解
 

@@ -7,3 +7,6 @@ edition = "2021"
 sc-core = { path = "../sc-core" }
 sc-section = { path = "../sc-section" }
 sc-material = { path = "../sc-material" }
+
+[dev-dependencies]
+approx = { workspace = true }
