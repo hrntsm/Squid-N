@@ -4965,11 +4965,13 @@ name = "sc-solver"
 version = "0.0.1"
 dependencies = [
  "approx",
+ "bincode",
  "faer",
  "sc-core",
  "sc-element",
  "sc-load",
  "sc-math",
+ "serde",
  "smallvec",
  "thiserror 1.0.69",
 ]
