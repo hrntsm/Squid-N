@@ -6,6 +6,8 @@ edition = "2021"
 [features]
 default = []
 p7 = []
+# P12 限界耐力計算（容量スペクトル法）。P7 とは別フェーズ。
+p12 = []
 
 [dependencies]
 sc-core = { path = "../sc-core" }
