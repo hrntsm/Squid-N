@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+# 同一ブランチ/PRへの新しい push 時に、進行中の古い実行をキャンセルする。
+# main への push は通常 1 件のため実害なく、PR の待ち時間とランナー消費を削減する。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
