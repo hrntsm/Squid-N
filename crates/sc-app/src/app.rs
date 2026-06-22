@@ -167,6 +167,57 @@ impl Default for App {
     }
 }
 
+/// 日本語フォントを egui に登録する（UI のラベルが豆腐□にならないように）。
+///
+/// egui の既定フォント（Ubuntu/Hack）は日本語グリフを持たないため、
+/// OS のシステムフォントから日本語対応フォントを探して読み込む。
+/// 見つからない場合は何もしない（英数字は既定フォントで表示される）。
+pub fn install_japanese_fonts(ctx: &egui::Context) {
+    // OS ごとの代表的な日本語フォント候補（先に見つかったものを使用）。
+    const CANDIDATES: &[&str] = &[
+        // Windows
+        "C:/Windows/Fonts/meiryo.ttc",
+        "C:/Windows/Fonts/YuGothR.ttc",
+        "C:/Windows/Fonts/YuGothM.ttc",
+        "C:/Windows/Fonts/msgothic.ttc",
+        // macOS
+        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/Library/Fonts/Osaka.ttf",
+        // Linux (Noto / IPA / VL)
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+        "/usr/share/fonts/truetype/vlgothic/VL-Gothic-Regular.ttf",
+    ];
+
+    let Some((path, bytes)) = CANDIDATES
+        .iter()
+        .find_map(|p| std::fs::read(p).ok().map(|b| (*p, b)))
+    else {
+        eprintln!(
+            "[warn] 日本語フォントが見つかりませんでした。UI が文字化けする可能性があります。"
+        );
+        return;
+    };
+
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "jp".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+    );
+    // プロポーショナル・等幅の両ファミリーで日本語フォントを最優先にする。
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        family.insert(0, "jp".to_owned());
+    }
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        family.push("jp".to_owned());
+    }
+    ctx.set_fonts(fonts);
+    eprintln!("[info] 日本語フォントを読み込みました: {path}");
+}
+
 impl App {
     /// 節点編集バッファを model.nodes に同期する。
     /// 編集中でない（フォーカス外）セルのみ model 値で更新する。

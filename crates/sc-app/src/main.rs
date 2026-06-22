@@ -3,6 +3,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "structcalc",
         options,
-        Box::new(|_cc| Ok(Box::new(sc_app::app::App::default()))),
+        Box::new(|cc| {
+            sc_app::app::install_japanese_fonts(&cc.egui_ctx);
+            Ok(Box::new(sc_app::app::App::default()))
+        }),
     )
 }
