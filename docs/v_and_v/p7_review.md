@@ -68,13 +68,33 @@ Xs を求めるには Y 方向に効く構面（X 位置に並ぶ）の剛性が
 
 ---
 
-## 4. 残作業（本ブランチで実施）
+## 4. 本ブランチでの是正結果
 
-1. 仕様 §5.1/§5.2 の修正（§3.1/§3.2）。
-2. T2 偏心率：`eccentricity.rs` に D値法剛心・重心・KR・rex/rey・Re を実装。
-3. T4：`ds.rs` に `member_rank`（RC耐力比／S幅厚比）・`story_ds`（機構×ランク分布）を実装。
-4. T5：`panel_shear.rs` にパネルせん断検定を実装。
-5. T6：`check_holding_capacity` に Rs/Re/Qud（Ai・C0=1.0）を統合。
-6. テスト・DoD チェックリストを実数値で確認し、V&V を正直に更新。
+| # | 作業 | 結果 |
+|---|------|------|
+| 1 | 仕様 §5.1/§5.2 の修正 | 完了（剛心を方向別D値に、計算例を方向整合に） |
+| 2 | T2 偏心率 `eccentricity.rs` | 完了。`d_value`／`center_of_rigidity`／`eccentricity`（KR・rex/rey・Re）／`center_of_mass`。DoD §8.1 数値例・手計算 1e-9 照合 |
+| 3 | T4 `ds.rs` | 完了。`rc_member_rank`／`s_member_rank`／`story_ds`（機構補正含む）。しきい値は `RankCriteria` で外部化 |
+| 4 | T5 `panel_shear.rs` | 完了。`check_panel_shear`（F/√3 短期・F/(1.5√3) 長期、割増 factor 外部化） |
+| 5 | T6 `check_holding_capacity` 統合 | 完了。**Qu を P5 `capacity_curve` 最終点から取得**、Rs/Re/部材ランクを出力に反映、境界（Qu=Qun）試験追加 |
+
+**テスト:** `cargo test -p sc-design-jp --features p7` → 60 passed / 0 failed。`cargo build --workspace` 緑、clippy 警告なし。
+
+## 5. 監査時点で残る限界・申し送り（虚偽完了を繰り返さないための明記）
+
+- **`p7` は依然として非デフォルト機能。** 通常 CI で検証されない構造リスクは未解消。P8/P9 で
+  `--features p7` を CI に組み込むか、安定後に default 化すべき（さもなくば再び腐る）。
+- **モデル全体からの自動算定は未実装（API レベルは完成）。** `eccentricity.rs` は柱 D 値・剛心・偏心率の
+  計算コアと重心抽出を持つが、実モデルから柱を拾って Dx/Dy を組む `story_centers(model)` は未提供
+  （仕様も略算→精算を将来送り）。`ds.rs` も `member_rank`/`story_ds` のロジックのみで、実部材から
+  Qsu/Qmu・幅厚比を集める配線は呼び出し側／後続。
+- **`qud_by_story` は呼び出し側入力のまま。** C0=1.0 の Ai 層せん断を渡す契約は doc 明記したが、
+  `sc-load::ai::ai_distribution` の `qi`（= ci·単層重量。累積重量でない）に別途検証が必要で、本フェーズでは
+  P2 のスコープとして触れていない（要・別途確認）。
+- **`RankCriteria` 既定値・パネル割増 factor は仮値。** 原典照合リストでのサインオフが必要。
+
+> 結論: P7 の力学コア（Rs・偏心率・Fes・Ds 分類・パネルせん断・Qun 判定）は実装・テスト済みで
+> 手計算と一致する。ただし「モデル → 自動算定」の最終配線と CI 常時検証は未了であり、
+> V&V #14 は **🔶（一部実装）** が正しい。✅ にするのは上記申し送りの解消後。
 </content>
 </invoke>

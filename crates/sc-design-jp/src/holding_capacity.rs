@@ -126,41 +126,65 @@ pub fn ds_value(frame: FrameType, rank: MemberRank) -> f64 {
     }
 }
 
-// ===== T6: Qun 比較・判定 (§3) =====
+// ===== T6: Qun 比較・判定・統合 (§3) =====
 
 use sc_solver::pushover::PushoverResult;
 
-/// 層ごとに Qun = Ds * Fes * Qud を計算し、Qu ≥ Qun を判定する。
+/// 二次設計（保有水平耐力）の層チェックを統合する。
+///
+/// **Qu（保有水平耐力）は P5 プッシュオーバーから取得する**（DoD §0.2-1）。
+/// `pushover.capacity_curve` の最終点（崩壊機構形成時）の層せん断 `story_shear[i]` を
+/// 層 i の Qu、`story_drift[i]` を層間変位とする。capacity_curve が空なら Qu=0。
+///
+/// 他の量は各タスクで算定した層別配列を渡す:
+/// - `qud_by_story`: 二次設計用の地震時層せん断（**Ai 分布・C0=1.0** で算定したもの。§2）。
+/// - `ds_by_story`: 層 Ds（[`crate::ds::story_ds`]）。
+/// - `fes_by_story`: 形状係数 Fes（[`fes`]）。
+/// - `rs_by_story` / `re_by_story`: 剛性率（[`stiffness_ratios`]）・偏心率（[`crate::eccentricity`]）。
+/// - `story_heights`: 階高（層間変形角＝層間変位/階高 の算定に使用）。
+/// - `member_ranks`: 部材ランク一覧（出力にそのまま格納）。
+///
+/// 層数 n は `qud_by_story.len()`。判定は `ok = (Qu ≥ Qun)`, `Qun = Ds·Fes·Qud`。
+#[allow(clippy::too_many_arguments)]
 pub fn check_holding_capacity(
     pushover: &PushoverResult,
-    qu_by_story: &[f64],
     qud_by_story: &[f64],
     ds_by_story: &[f64],
     fes_by_story: &[f64],
+    rs_by_story: &[f64],
+    re_by_story: &[f64],
     story_heights: &[f64],
+    member_ranks: Vec<(ElemId, MemberRank)>,
 ) -> HoldingCapacityResult {
-    let last_step = pushover.steps.last();
-    let n = qu_by_story.len();
+    let last_point = pushover.capacity_curve.last();
+    let n = qud_by_story.len();
 
     let stories: Vec<StoryCheck> = (0..n)
         .map(|i| {
             let story = StoryId(i as u32);
-            let drift = last_step
-                .and_then(|s| s.story_drifts.get(i))
+            // Qu・層間変位は P5 プッシュオーバー最終点から。
+            let qu = last_point
+                .and_then(|p| p.story_shear.get(i))
+                .copied()
+                .unwrap_or(0.0);
+            let drift = last_point
+                .and_then(|p| p.story_drift.get(i))
                 .copied()
                 .unwrap_or(0.0);
             let height = *story_heights.get(i).unwrap_or(&1.0);
             let drift_angle = if height == 0.0 { 0.0 } else { drift / height };
-            let qu = qu_by_story[i];
-            let qud = qud_by_story[i];
-            let ds = ds_by_story[i];
-            let f = fes_by_story[i];
+
+            let qud = *qud_by_story.get(i).unwrap_or(&0.0);
+            let ds = *ds_by_story.get(i).unwrap_or(&0.0);
+            let f = *fes_by_story.get(i).unwrap_or(&1.0);
+            let rs = *rs_by_story.get(i).unwrap_or(&0.0);
+            let re = *re_by_story.get(i).unwrap_or(&0.0);
             let qun = ds * f * qud;
             let ok = qu >= qun;
             StoryCheck {
                 story,
-                rs: 0.0,
-                re: 0.0,
+                rs,
+                re,
                 ds,
                 fes: f,
                 qu,
@@ -174,13 +198,9 @@ pub fn check_holding_capacity(
 
     HoldingCapacityResult {
         stories,
-        member_ranks: vec![],
+        member_ranks,
     }
 }
-
-// ===== T2: 剛心（D値法）stub (§5.1) =====
-// ===== T4: 部材ランク・層Ds判定 stub (§7) =====
-// ===== T5: パネルせん断検定 stub (§6) =====
 
 #[cfg(test)]
 mod tests {
@@ -297,11 +317,18 @@ mod tests {
     }
 
     // ---- T6 ----
-    fn empty_pushover() -> PushoverResult {
-        use sc_solver::pushover::MechanismType;
+    /// Qu を持つ capacity_curve 1点だけの PushoverResult を作る。
+    fn pushover_with_qu(story_shear: Vec<f64>, story_drift: Vec<f64>) -> PushoverResult {
+        use sc_solver::pushover::{CapacityPoint, MechanismType};
         PushoverResult {
             steps: vec![],
-            capacity_curve: vec![],
+            capacity_curve: vec![CapacityPoint {
+                step: 0,
+                roof_disp: 0.0,
+                base_shear: story_shear.first().copied().unwrap_or(0.0),
+                story_shear,
+                story_drift,
+            }],
             hinges: vec![],
             mechanism: MechanismType::Overall,
             qu: 0.0,
@@ -310,30 +337,77 @@ mod tests {
 
     #[test]
     fn test_check_holding_capacity_basic() {
-        let pushover = empty_pushover();
-        let qu = vec![100.0, 200.0];
+        // Qu は pushover 最終点から取得（[100,200]）。
+        let pushover = pushover_with_qu(vec![100.0, 200.0], vec![15.0, 12.0]);
         let qud = vec![80.0, 180.0];
         let ds = vec![0.30, 0.35];
         let fes = vec![1.0, 1.0];
-        let heights = vec![3.0, 3.0];
-        let result = check_holding_capacity(&pushover, &qu, &qud, &ds, &fes, &heights);
+        let rs = vec![1.0, 0.75];
+        let re = vec![0.05, 0.10];
+        let heights = vec![3000.0, 3000.0];
+        let result =
+            check_holding_capacity(&pushover, &qud, &ds, &fes, &rs, &re, &heights, vec![]);
         assert_eq!(result.stories.len(), 2);
-        assert!(result.stories[0].ok);
-        assert!(result.stories[1].ok);
+        assert!(result.stories[0].ok); // Qu=100 ≥ Qun=24
+        assert!(result.stories[1].ok); // Qu=200 ≥ Qun=63
+        assert!((result.stories[0].qu - 100.0).abs() < 1e-9);
         assert!((result.stories[0].qun - 24.0).abs() < 1e-9);
         assert!((result.stories[1].qun - 63.0).abs() < 1e-9);
+        // Rs/Re が出力に反映されている（旧実装は 0.0 固定だった）。
+        assert!((result.stories[1].rs - 0.75).abs() < 1e-9);
+        assert!((result.stories[0].re - 0.05).abs() < 1e-9);
+        // 層間変形角 = drift/height = 15/3000 = 1/200。
+        assert!((result.stories[0].drift_angle - 15.0 / 3000.0).abs() < 1e-9);
     }
 
     #[test]
     fn test_check_holding_capacity_ng() {
-        let pushover = empty_pushover();
-        let qu = vec![20.0, 50.0];
+        let pushover = pushover_with_qu(vec![20.0, 50.0], vec![10.0, 10.0]);
         let qud = vec![80.0, 180.0];
         let ds = vec![0.30, 0.35];
         let fes = vec![1.0, 1.0];
-        let heights = vec![3.0, 3.0];
-        let result = check_holding_capacity(&pushover, &qu, &qud, &ds, &fes, &heights);
-        assert!(!result.stories[0].ok);
-        assert!(!result.stories[1].ok);
+        let rs = vec![1.0, 1.0];
+        let re = vec![0.0, 0.0];
+        let heights = vec![3000.0, 3000.0];
+        let result =
+            check_holding_capacity(&pushover, &qud, &ds, &fes, &rs, &re, &heights, vec![]);
+        assert!(!result.stories[0].ok); // Qu=20 < Qun=24
+        assert!(!result.stories[1].ok); // Qu=50 < Qun=63
+    }
+
+    /// 境界（Qu = Qun ちょうど）→ ok=true（DoD §3）。
+    #[test]
+    fn test_check_holding_capacity_boundary() {
+        // Qun = Ds·Fes·Qud = 0.5·1.0·100 = 50。Qu = 50 ちょうど。
+        let pushover = pushover_with_qu(vec![50.0], vec![5.0]);
+        let qud = vec![100.0];
+        let ds = vec![0.5];
+        let fes = vec![1.0];
+        let rs = vec![1.0];
+        let re = vec![0.0];
+        let heights = vec![3000.0];
+        let result =
+            check_holding_capacity(&pushover, &qud, &ds, &fes, &rs, &re, &heights, vec![]);
+        assert!((result.stories[0].qun - 50.0).abs() < 1e-9);
+        assert!(result.stories[0].ok, "Qu=Qun は ok（≥）であるべき");
+    }
+
+    /// 部材ランクが出力に格納される。
+    #[test]
+    fn test_check_holding_capacity_member_ranks() {
+        let pushover = pushover_with_qu(vec![100.0], vec![5.0]);
+        let ranks = vec![(ElemId(0), MemberRank::FA), (ElemId(1), MemberRank::FC)];
+        let result = check_holding_capacity(
+            &pushover,
+            &[80.0],
+            &[0.3],
+            &[1.0],
+            &[1.0],
+            &[0.0],
+            &[3000.0],
+            ranks,
+        );
+        assert_eq!(result.member_ranks.len(), 2);
+        assert_eq!(result.member_ranks[1].1, MemberRank::FC);
     }
 }
