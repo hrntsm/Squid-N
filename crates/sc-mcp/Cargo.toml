@@ -17,3 +17,6 @@ serde_json = { workspace = true }
 schemars = { workspace = true }
 tokio = { workspace = true, optional = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+smallvec = { workspace = true }
