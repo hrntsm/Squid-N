@@ -2,37 +2,24 @@
 
 > 読み: スクイッダン
 
-日本の建築構造計算一貫プログラム。Rust で実装。
-
-## 免責事項
-
-本ソフトウェアは建築構造設計の補助ツールであり、算定結果の最終確認・判断は
-**構造設計を担当する技術者**の責任において行ってください。本ソフトウェアの
-利用により生じたいかなる損害についても、作者は責任を負いません。
-
-**本ソフトウェアは v1.0 開発中であり、検証段階のコードを含みます。**
-設計実務での使用には十分な検証と技術者の判断が必要です。
-
-## 準拠規準
-
-本ソフトウェアが準拠する日本建築学会規準・国土交通省告示の版は以下を参照:
-`docs/v_and_v/README.md`
+日本の建築構造計算一貫プログラム。
+Rust で実装。
 
 ## アーキテクチャ
 
-14 のクレートから成る階層型アーキテクチャ:
+15 のクレートから成る階層型アーキテクチャ:
 
 ```
-Layer 0: sc-core（基本データ構造・DOF管理）, sc-math（疎行列・ソルバ）
-Layer 1: sc-material（一軸材料履歴則）
-Layer 2: sc-section（断面性能算定）
-Layer 3: sc-element（梁・板・パネルゾーン要素）
-Layer 4: sc-skeleton（スケルトン曲線）, sc-load（Ai分布・床荷重）, sc-solver（各種解析）
-Layer 5: sc-design-jp（日本仕様設計計算）, sc-io（結果I/O）
-Layer 6: sc-mcp（MCP サーバ）, sc-app（GUI アプリケーション）
+Layer 0: squid-n-core（基本データ構造・DOF管理）、squid-n-math（疎行列・ソルバ）
+Layer 1: squid-n-material（一軸材料履歴則）
+Layer 2: squid-n-section（断面性能算定）
+Layer 3: squid-n-element（梁・板・パネルゾーン要素）
+Layer 4: squid-n-skeleton（スケルトン曲線）、squid-n-load（Ai分布、床荷重、荷重組合せ）、squid-n-solver（各種解析）
+Layer 5: squid-n-design-jp（日本仕様設計計算）、squid-n-io（結果I/O）、squid-n-edit（編集トランザクション）
+Layer 6: squid-n-mcp（MCP サーバ）、squid-n-app（GUI アプリケーション）
 ```
 
-依存方向は上層→下層のみ。循環依存は `xtask check-deps` でチェック。
+依存方向は上層から下層のみ。循環依存は `cargo run -p xtask -- check-deps` で検出する。
 
 ## ビルド
 
@@ -68,12 +55,14 @@ cargo fmt --all -- --check
 
 | フラグ | 対象クレート | 内容 |
 |--------|-------------|------|
-| `gui` | sc-app | GUI（egui/eframe） |
-| `mcp` | sc-mcp | MCP サーバ |
-| `gpu` | sc-gpu | GPU 高速化（v2.0） |
-| `ml` | sc-ml | ML 断面提案（v2.0） |
+| `gui` | squid-n-app | GUI（egui/eframe） |
+| `mcp` | squid-n-mcp | MCP サーバ |
+| `gpu` | squid-n-gpu | GPU 行列演算（P10、実装中） |
+| `ml` | squid-n-ml | ML 断面提案（P11、未実装） |
+| `p7` | squid-n-design-jp | 二次設計（Ds、偏心率、保有耐力、パネルせん断）。既定で有効 |
+| `p12` | squid-n-design-jp | 限界耐力計算（容量スペクトル法）。未実装・opt-in |
 
-GPU/ML 機能が無くても全解析機能は動作する（CPU フォールバック）。
+GPU や ML を無効化しても解析機能は CPU で動作する。
 
 ## V&V
 
