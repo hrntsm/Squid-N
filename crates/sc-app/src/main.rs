@@ -5,6 +5,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             sc_app::app::install_japanese_fonts(&cc.egui_ctx);
+            sc_app::theme::apply_theme(&cc.egui_ctx);
             Ok(Box::new(sc_app::app::App::default()))
         }),
     )

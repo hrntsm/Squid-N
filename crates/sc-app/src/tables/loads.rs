@@ -164,7 +164,7 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
                             ui.painter().rect_filled(
                                 resp.rect,
                                 0.0,
-                                egui::Color32::from_rgba_unmultiplied(200, 50, 50, 60),
+                                crate::theme::translucent(crate::theme::ERROR_RED, 60),
                             );
                         }
                     });

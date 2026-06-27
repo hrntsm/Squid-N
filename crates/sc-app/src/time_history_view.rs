@@ -84,12 +84,11 @@ pub fn time_history_panel(ui: &mut egui::Ui, app: &mut App) {
             .collect(),
     };
 
+    // §3 データビジュアライゼーション配色（系列ごとに弁別可能な 3 色）
     let (ylabel, line_color) = match source {
-        TimeHistorySource::NodeDisp => ("変位 [mm]", egui::Color32::from_rgb(100, 200, 255)),
-        TimeHistorySource::StoryShear => ("層せん断 [N]", egui::Color32::from_rgb(255, 200, 80)),
-        TimeHistorySource::StoryDriftAngle => {
-            ("層間変形角 [rad]", egui::Color32::from_rgb(255, 120, 120))
-        }
+        TimeHistorySource::NodeDisp => ("変位 [mm]", crate::theme::DATA_BLUE),
+        TimeHistorySource::StoryShear => ("層せん断 [N]", crate::theme::PARETO_RED),
+        TimeHistorySource::StoryDriftAngle => ("層間変形角 [rad]", crate::theme::GOOD_GREEN),
     };
 
     let plot = egui_plot::Plot::new("time_history_plot")

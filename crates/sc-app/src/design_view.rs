@@ -34,13 +34,7 @@ pub fn design_table(ui: &mut egui::Ui, app: &mut App) {
                 row.col(|ui| {
                     ui.label(format!("{:.3}", pos));
                 });
-                let ratio_color = if cr.ratio <= 0.8 {
-                    egui::Color32::GREEN
-                } else if cr.ratio <= 1.0 {
-                    egui::Color32::YELLOW
-                } else {
-                    egui::Color32::RED
-                };
+                let ratio_color = crate::theme::status_color(cr.ratio);
                 row.col(|ui| {
                     ui.colored_label(ratio_color, format!("{:.4}", cr.ratio));
                 });

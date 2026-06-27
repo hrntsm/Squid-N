@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::theme;
 use sc_core::ids::SectionId;
 
 /// ビューアの表示モード。
@@ -21,40 +22,95 @@ pub enum ViewMode {
     Cmq,
 }
 
-/// 3D→2D 投影（簡易: 等角投影 + スケール + パン）。
+// ===== クォータニオン（アークボール回転用, [w, x, y, z]）=====
+type Quat = [f32; 4];
+
+/// 軸 `axis`（正規化済み想定）まわり `ang` ラジアンの回転クォータニオン。
+fn q_axis_angle(axis: [f32; 3], ang: f32) -> Quat {
+    let h = ang * 0.5;
+    let s = h.sin();
+    [h.cos(), axis[0] * s, axis[1] * s, axis[2] * s]
+}
+
+/// クォータニオン積 a⊗b。
+fn q_mul(a: Quat, b: Quat) -> Quat {
+    [
+        a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+        a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+        a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+        a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
+    ]
+}
+
+/// 正規化（数値誤差の累積を抑える）。
+fn q_norm(q: Quat) -> Quat {
+    let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    if n < 1e-9 {
+        [1.0, 0.0, 0.0, 0.0]
+    } else {
+        [q[0] / n, q[1] / n, q[2] / n, q[3] / n]
+    }
+}
+
+/// ベクトル v をクォータニオン q で回転する。
+fn q_rotate(q: Quat, v: [f32; 3]) -> [f32; 3] {
+    let qv = [q[1], q[2], q[3]];
+    let t = [
+        2.0 * (qv[1] * v[2] - qv[2] * v[1]),
+        2.0 * (qv[2] * v[0] - qv[0] * v[2]),
+        2.0 * (qv[0] * v[1] - qv[1] * v[0]),
+    ];
+    [
+        v[0] + q[0] * t[0] + (qv[1] * t[2] - qv[2] * t[1]),
+        v[1] + q[0] * t[1] + (qv[2] * t[0] - qv[0] * t[2]),
+        v[2] + q[0] * t[2] + (qv[0] * t[1] - qv[1] * t[0]),
+    ]
+}
+
+/// 3D→2D 投影（§3-2: アークボール回転 + 正射影）。
+///
+/// 構造モデルは実寸比が意味を持つため、§3-2 の「各軸を [-1,1] に正規化」は採らず、
+/// 全軸一様スケールで投影してプロポーションを保持する。
+/// ビュー軸は X=右・Y=上・Z=手前。既定回転（[`CameraState::default`]）で正面（Z 上）を向く。
 #[derive(Clone)]
 pub struct CameraState {
-    scale: f32,
+    /// 回転（クォータニオン）
+    rot: Quat,
+    /// 画面パン（px）
     pan: [f32; 2],
-    yaw: f32,
-    pitch: f32,
+    /// ズーム倍率（§3-2: 既定 3.0、範囲 0.5–10.0）
+    zoom: f32,
 }
 
 impl Default for CameraState {
     fn default() -> Self {
         Self {
-            scale: 1.0,
+            // 既定は正面（X 右・Z 上）。ワールド Z をビュー上方向へ向けるため X 軸まわり -90°。
+            rot: q_axis_angle([1.0, 0.0, 0.0], -std::f32::consts::FRAC_PI_2),
             pan: [0.0, 0.0],
-            yaw: 30.0_f32.to_radians(),
-            pitch: -20.0_f32.to_radians(),
+            zoom: 3.0,
         }
     }
 }
 
-fn project(p: [f64; 3], cam: &CameraState, center: [f32; 2]) -> [f32; 2] {
-    let cy = cam.yaw.cos();
-    let sy = cam.yaw.sin();
-    let cp = cam.pitch.cos();
-    let sp = cam.pitch.sin();
-    // Yaw 回転 → Pitch 回転
-    let x1 = p[0] as f32 * cy + p[1] as f32 * sy;
-    let y1 = -p[0] as f32 * sy + p[1] as f32 * cy;
-    let z1 = p[2] as f32;
-    let y2 = y1 * cp - z1 * sp;
-    let _z2 = y1 * sp + z1 * cp;
+/// ワールド座標 `p` を投影する。`center3` はモデル中心（回転中心）、`scale` は px/世界長、
+/// `screen_center` は描画領域中心（px）。
+fn project(
+    p: [f64; 3],
+    center3: [f64; 3],
+    cam: &CameraState,
+    scale: f32,
+    screen_center: [f32; 2],
+) -> [f32; 2] {
+    let v = [
+        (p[0] - center3[0]) as f32,
+        (p[1] - center3[1]) as f32,
+        (p[2] - center3[2]) as f32,
+    ];
+    let r = q_rotate(cam.rot, v);
     [
-        center[0] + cam.pan[0] + x1 * cam.scale,
-        center[1] + cam.pan[1] - y2 * cam.scale,
+        screen_center[0] + cam.pan[0] + r[0] * scale,
+        screen_center[1] + cam.pan[1] - r[1] * scale,
     ]
 }
 
@@ -73,6 +129,15 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
         ui.selectable_value(&mut mode, ViewMode::Q, "Q図");
         ui.selectable_value(&mut mode, ViewMode::M, "M図");
         ui.selectable_value(&mut mode, ViewMode::Cmq, "CMQ図");
+        ui.separator();
+        // §3-2 の操作規約をヒント表示（左ドラッグ=回転／スクロール=ズーム）
+        ui.add_enabled(
+            false,
+            egui::Label::new(
+                egui::RichText::new("左ドラッグ:回転 / 右ドラッグ:移動 / スクロール:ズーム")
+                    .size(11.0),
+            ),
+        );
     });
     if matches!(mode, ViewMode::Deformed | ViewMode::Mode) {
         ui.horizontal(|ui| {
@@ -237,27 +302,38 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
         egui::Sense::click_and_drag(),
     );
 
-    // カメラ操作（ドラッグ=パン/回転、ズーム）
+    // カメラ操作（§3-2: 左ドラッグ=回転 / スクロール=ズーム）。
+    // パンは規約外の補助操作として右ドラッグに割り当てる。
     let mut cam = app.camera.clone();
     if response.dragged_by(egui::PointerButton::Primary) {
+        // アークボール: 画面 X(右)/Y(上) 軸まわりの微小回転を前から合成（感度 0.005 /px）。
+        let d = response.drag_delta();
+        const ROT_SENS: f32 = 0.005;
+        let dq = q_mul(
+            q_axis_angle([0.0, 1.0, 0.0], d.x * ROT_SENS),
+            q_axis_angle([1.0, 0.0, 0.0], d.y * ROT_SENS),
+        );
+        cam.rot = q_norm(q_mul(dq, cam.rot));
+    }
+    if response.dragged_by(egui::PointerButton::Secondary) {
         let d = response.drag_delta();
         cam.pan[0] += d.x;
         cam.pan[1] += d.y;
     }
-    if response.dragged_by(egui::PointerButton::Secondary) {
-        let d = response.drag_delta();
-        cam.yaw += d.x * 0.01;
-        cam.pitch += d.y * 0.01;
-        cam.pitch = cam.pitch.clamp(-1.4, 1.4);
+    // スクロールズーム（係数 0.01、0.5–10.0 にクランプ）。トラックパッドのピンチも反映。
+    let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
+    if scroll_y != 0.0 {
+        cam.zoom *= 1.0 + scroll_y * 0.01;
     }
-    let zoom_factor = ui.input(|i| i.zoom_delta());
-    if zoom_factor != 1.0 {
-        cam.scale *= zoom_factor;
+    let pinch = ui.input(|i| i.zoom_delta());
+    if pinch != 1.0 {
+        cam.zoom *= pinch;
     }
-    cam.scale = cam.scale.clamp(0.001, 100000.0);
+    cam.zoom = cam.zoom.clamp(0.5, 10.0);
 
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
+    // §3-2: 3D 背景は白を避け淡いグレー（立体感・奥行きのため）
+    painter.rect_filled(rect, 0.0, theme::VIEW_BG);
 
     let center = [rect.center().x, rect.center().y];
 
@@ -268,10 +344,30 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
             egui::Align2::CENTER_CENTER,
             "モデルが空です",
             egui::FontId::default(),
-            egui::Color32::from_gray(120),
+            theme::GRAY_600,
         );
         return;
     }
+
+    // 投影スケールとモデル中心（回転中心）。一様スケールで実寸比を保持する。
+    let (bmin, bmax) = model_bbox(&app.model);
+    let center3 = [
+        (bmin[0] + bmax[0]) * 0.5,
+        (bmin[1] + bmax[1]) * 0.5,
+        (bmin[2] + bmax[2]) * 0.5,
+    ];
+    let model_size = model_bbox_size(&app.model);
+    let min_dim = rect.width().min(rect.height());
+    let fit = if model_size > 1e-9 {
+        0.8 * min_dim / model_size as f32
+    } else {
+        1.0
+    };
+    // 既定ズーム 3.0 でモデル対角が描画領域の約 80% に収まるよう基準化。
+    let scale = fit * (cam.zoom / 3.0);
+
+    // グリッド・軸（§3-2: 赤=X / 緑=Y / 青=Z）。モデルの背後に先に描く。
+    draw_grid_and_axes(&painter, bmin, bmax, center3, &cam, scale, center);
 
     // 節点座標（変形・モード時は変位を加味）
     let disp = match mode {
@@ -304,7 +400,6 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
 
     // 変形スケール: 最大変位をモデルサイズの 10% に正規化
     let deform_scale_actual = if disp.is_some() {
-        let model_size = model_bbox_size(&app.model);
         let max_disp = disp
             .as_ref()
             .map(|d| {
@@ -334,7 +429,7 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
                 p[1] += d[i][1] * deform_scale_actual;
                 p[2] += d[i][2] * deform_scale_actual;
             }
-            project(p, &cam, center)
+            project(p, center3, &cam, scale, center)
         })
         .collect();
 
@@ -478,18 +573,22 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
         let is_first = app.beam_draw_first == Some(node_id);
         let is_wall_pick = app.wall_draw_nodes.contains(&node_id);
         let (radius, color) = if is_first || is_wall_pick {
-            (5.0, egui::Color32::from_rgb(255, 120, 120))
+            // 作成モードで選択中の節点 = 重要（赤）
+            (5.0, theme::PARETO_RED)
         } else {
-            (3.0, egui::Color32::from_rgb(100, 200, 255))
+            // 通常の節点 = データ点（青）
+            (3.0, theme::DATA_BLUE)
         };
         painter.circle_filled(egui::pos2(p[0], p[1]), radius, color);
     }
 
     // 部材（線）
     let line_color = if matches!(mode, ViewMode::Deformed | ViewMode::Mode) {
-        egui::Color32::from_rgb(255, 200, 80)
+        // 変形図・モード形 = 結果の強調（ハイライト紫）
+        theme::HILITE_PURPLE
     } else {
-        egui::Color32::from_gray(200)
+        // 通常の部材 = 沈めたニュートラル（gray-700）
+        theme::GRAY_700
     };
     for elem in &app.model.elements {
         // 壁（面要素）は半透明ポリゴンで描画
@@ -505,8 +604,8 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
             if poly.len() == elem.nodes.len() {
                 painter.add(egui::Shape::convex_polygon(
                     poly,
-                    egui::Color32::from_rgba_unmultiplied(120, 180, 255, 50),
-                    egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 180, 255)),
+                    theme::translucent(theme::DATA_BLUE, 50),
+                    egui::Stroke::new(1.5, theme::DATA_BLUE),
                 ));
             }
             continue;
@@ -547,7 +646,7 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
                             egui::pos2(pts[n0][0], pts[n0][1]),
                             egui::pos2(pts[n1][0], pts[n1][1]),
                         ],
-                        egui::Stroke::new(4.0, egui::Color32::from_rgb(255, 100, 100)),
+                        egui::Stroke::new(4.0, theme::PARETO_RED),
                     );
                 }
             }
@@ -632,8 +731,8 @@ fn draw_force_diagram(
             poly.push(p1);
             painter.add(egui::Shape::convex_polygon(
                 poly,
-                egui::Color32::from_rgba_unmultiplied(100, 200, 100, 60),
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(100, 220, 100)),
+                theme::translucent(theme::DATA_BLUE, 60),
+                egui::Stroke::new(1.5, theme::DATA_BLUE),
             ));
         }
     }
@@ -647,7 +746,7 @@ fn draw_force_diagram(
         egui::Align2::LEFT_TOP,
         format!("{}図 (max={:.2})", label, max_abs),
         egui::FontId::proportional(14.0),
-        egui::Color32::from_gray(220),
+        theme::GRAY_700,
     );
 }
 
@@ -662,7 +761,7 @@ fn draw_cmq_diagram(painter: &egui::Painter, app: &App, pts: &[[f32; 2]]) {
             egui::Align2::LEFT_TOP,
             "CMQ データがありません（床荷重分配を実行してください）",
             egui::FontId::proportional(13.0),
-            egui::Color32::from_gray(160),
+            theme::GRAY_600,
         );
         return;
     }
@@ -717,10 +816,11 @@ fn draw_cmq_diagram(painter: &egui::Painter, app: &App, pts: &[[f32; 2]]) {
             ),
             p1,
         ];
+        // C 図（モーメント）= 通常データ（青）
         painter.add(egui::Shape::convex_polygon(
             c_poly,
-            egui::Color32::from_rgba_unmultiplied(80, 140, 255, 60),
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(100, 160, 255)),
+            theme::translucent(theme::DATA_BLUE, 60),
+            egui::Stroke::new(1.5, theme::DATA_BLUE),
         ));
 
         // Q 図（せん断）: 両端の q_i, q_j を結ぶ折れ線ポリゴン（反対側に描画）
@@ -736,10 +836,11 @@ fn draw_cmq_diagram(painter: &egui::Painter, app: &App, pts: &[[f32; 2]]) {
             ),
             p1,
         ];
+        // Q 図（せん断）= 良好系（緑）。C（青）と弁別する
         painter.add(egui::Shape::convex_polygon(
             q_poly,
-            egui::Color32::from_rgba_unmultiplied(255, 140, 80, 60),
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 160, 100)),
+            theme::translucent(theme::GOOD_GREEN, 60),
+            egui::Stroke::new(1.5, theme::GOOD_GREEN),
         ));
     }
 
@@ -750,9 +851,9 @@ fn draw_cmq_diagram(painter: &egui::Painter, app: &App, pts: &[[f32; 2]]) {
             painter.clip_rect().min.y + 10.0,
         ),
         egui::Align2::LEFT_TOP,
-        format!("CMQ図 C(max={:.2}) 青／Q(max={:.2}) 橙", max_c, max_q),
+        format!("CMQ図 C(max={:.2}) 青／Q(max={:.2}) 緑", max_c, max_q),
         egui::FontId::proportional(14.0),
-        egui::Color32::from_gray(220),
+        theme::GRAY_700,
     );
 }
 
@@ -855,10 +956,10 @@ fn dist_point_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
     (p - proj).length()
 }
 
-/// モデルのバウンディングボックス対角線長。
-fn model_bbox_size(model: &sc_core::model::Model) -> f64 {
+/// モデルのバウンディングボックス（min, max）。空なら単位ボックスを返す。
+fn model_bbox(model: &sc_core::model::Model) -> ([f64; 3], [f64; 3]) {
     if model.nodes.is_empty() {
-        return 1.0;
+        return ([0.0; 3], [1.0; 3]);
     }
     let mut min = [f64::MAX; 3];
     let mut max = [f64::MIN; 3];
@@ -868,5 +969,95 @@ fn model_bbox_size(model: &sc_core::model::Model) -> f64 {
             max[k] = max[k].max(n.coord[k]);
         }
     }
+    (min, max)
+}
+
+/// モデルのバウンディングボックス対角線長。
+fn model_bbox_size(model: &sc_core::model::Model) -> f64 {
+    if model.nodes.is_empty() {
+        return 1.0;
+    }
+    let (min, max) = model_bbox(model);
     ((max[0] - min[0]).powi(2) + (max[1] - min[1]).powi(2) + (max[2] - min[2]).powi(2)).sqrt()
+}
+
+/// §3-2 の 3D 規約に沿ってグリッド（XY/XZ/YZ の 3 面・各 4 分割）と
+/// 座標軸（赤=X / 緑=Y / 青=Z）・軸ラベルを描く。
+///
+/// 構造モデルは実寸比を保つため軸の正規化は行わず、ラベルの最大/最小はワールド座標を表示する。
+fn draw_grid_and_axes(
+    painter: &egui::Painter,
+    bmin: [f64; 3],
+    bmax: [f64; 3],
+    center3: [f64; 3],
+    cam: &CameraState,
+    scale: f32,
+    screen_center: [f32; 2],
+) {
+    let proj = |p: [f64; 3]| {
+        let s = project(p, center3, cam, scale, screen_center);
+        egui::pos2(s[0], s[1])
+    };
+
+    const DIV: usize = 4;
+    // ダーク半透明・線幅 0.5（淡グレー背景の上で奥行きを示す）
+    let grid_stroke = egui::Stroke::new(0.5, egui::Color32::from_black_alpha(36));
+
+    // 1 面を DIV×DIV のグリッドで描く（fixed 軸を固定し a,b 軸方向に格子線）。
+    let plane = |fixed: usize, fixed_val: f64, a: usize, b: usize| {
+        for i in 0..=DIV {
+            let f = i as f64 / DIV as f64;
+            // a を固定して b 方向へ伸びる線
+            let av = bmin[a] + (bmax[a] - bmin[a]) * f;
+            let mut p0 = [0.0; 3];
+            p0[fixed] = fixed_val;
+            p0[a] = av;
+            p0[b] = bmin[b];
+            let mut p1 = p0;
+            p1[b] = bmax[b];
+            painter.line_segment([proj(p0), proj(p1)], grid_stroke);
+            // b を固定して a 方向へ伸びる線
+            let bv = bmin[b] + (bmax[b] - bmin[b]) * f;
+            let mut q0 = [0.0; 3];
+            q0[fixed] = fixed_val;
+            q0[b] = bv;
+            q0[a] = bmin[a];
+            let mut q1 = q0;
+            q1[a] = bmax[a];
+            painter.line_segment([proj(q0), proj(q1)], grid_stroke);
+        }
+    };
+    plane(2, bmin[2], 0, 1); // XY 面（z=min）
+    plane(1, bmin[1], 0, 2); // XZ 面（y=min）
+    plane(0, bmin[0], 1, 2); // YZ 面（x=min）
+
+    // 座標軸（min 角から正方向へ）。赤=X / 緑=Y / 青=Z を全 3D ビューで固定。
+    let origin = bmin;
+    for (axis, col, name) in [
+        (0usize, theme::AXIS_X, "X"),
+        (1, theme::AXIS_Y, "Y"),
+        (2, theme::AXIS_Z, "Z"),
+    ] {
+        let mut pe = origin;
+        pe[axis] = bmax[axis];
+        painter.line_segment([proj(origin), proj(pe)], egui::Stroke::new(1.5, col));
+        // 正方向端: 軸名 (最大値) 11px・軸色
+        painter.text(
+            proj(pe),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{} ({:.1})", name, bmax[axis]),
+            egui::FontId::proportional(11.0),
+            col,
+        );
+        // 負方向端: 最小値 10px・軸色の淡色（3 軸ラベルの重なりを避け少し内側へ）
+        let mut pn = origin;
+        pn[axis] = bmin[axis] + (bmax[axis] - bmin[axis]) * 0.06;
+        painter.text(
+            proj(pn),
+            egui::Align2::RIGHT_TOP,
+            format!("{:.1}", bmin[axis]),
+            egui::FontId::proportional(10.0),
+            theme::lighten(col, 0.45),
+        );
+    }
 }

@@ -7,6 +7,8 @@ pub mod section_editor;
 #[cfg(feature = "gui")]
 pub mod tables;
 #[cfg(feature = "gui")]
+pub mod theme;
+#[cfg(feature = "gui")]
 pub mod time_history_view;
 #[cfg(feature = "gui")]
 pub mod viewer;

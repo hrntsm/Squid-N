@@ -687,7 +687,7 @@ impl App {
         }
         if self.staleness.results_stale {
             ui.colored_label(
-                egui::Color32::from_rgb(220, 140, 0),
+                crate::theme::BEST_YELLOW,
                 "⚠ モデルが編集されました。結果は再計算が必要です。",
             );
         }
@@ -730,7 +730,7 @@ impl App {
                 }
                 ui.label(format!("検定結果数: {}", r.checks.len()));
             } else {
-                ui.colored_label(egui::Color32::from_rgb(150, 150, 150), "▷ 未実行");
+                ui.colored_label(crate::theme::GRAY_600, "▷ 未実行");
             }
         });
         ui.separator();
@@ -782,7 +782,7 @@ impl App {
                                 .filter(|o| o.section == Some(sec_id))
                                 .count();
                             ui.colored_label(
-                                egui::Color32::from_rgb(70, 110, 200),
+                                crate::theme::BLUE_500,
                                 format!("この断面を使う {} 部材に影響", n_used),
                             );
                             // UI-4: 複製ボタン（UI設計 §3）。同断面を新規IDで複製し、
@@ -820,13 +820,7 @@ impl App {
                         ui.label(format!("検定結果（{} 位置）", my_checks.len()));
                         for (_, pos, cr) in my_checks.iter().take(8) {
                             let ratio = cr.ratio;
-                            let color = if ratio <= 0.8 {
-                                egui::Color32::from_rgb(60, 160, 60)
-                            } else if ratio <= 1.0 {
-                                egui::Color32::from_rgb(200, 180, 40)
-                            } else {
-                                egui::Color32::from_rgb(220, 60, 60)
-                            };
+                            let color = crate::theme::status_color(ratio);
                             ui.colored_label(
                                 color,
                                 format!("  pos={:.2} 検定比={:.3}", pos, ratio),
@@ -837,10 +831,7 @@ impl App {
                         }
                     }
                 } else {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(150, 150, 150),
-                        "部材を選択してください",
-                    );
+                    ui.colored_label(crate::theme::GRAY_600, "部材を選択してください");
                 }
             } else {
                 ui.colored_label(
@@ -885,15 +876,15 @@ impl App {
         ui.horizontal(|ui| {
             // stale アイコン
             if self.staleness.results_stale {
-                ui.colored_label(egui::Color32::from_rgb(220, 140, 0), "⚠ stale");
+                ui.colored_label(crate::theme::BEST_YELLOW, "⚠ stale");
             } else if self.results.is_some() {
-                ui.colored_label(egui::Color32::from_rgb(60, 160, 60), "✓ 最新");
+                ui.colored_label(crate::theme::GOOD_GREEN, "✓ 最新");
             } else {
-                ui.colored_label(egui::Color32::from_rgb(150, 150, 150), "▷ 未実行");
+                ui.colored_label(crate::theme::GRAY_600, "▷ 未実行");
             }
             ui.separator();
             if let Some(err) = &self.last_error {
-                ui.colored_label(egui::Color32::RED, format!("⚠ {}", err));
+                ui.colored_label(crate::theme::ERROR_RED, format!("⚠ {}", err));
             }
             ui.separator();
             ui.label(format!(

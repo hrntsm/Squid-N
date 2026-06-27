@@ -50,8 +50,9 @@ pub fn nodes_table(ui: &mut egui::Ui, app: &mut App) {
                 let is_focus = app.nav.focus_node == Some(node.id);
                 row.col(|ui| {
                     let text = node.id.0.to_string();
+                    // 選択行は blue-500 背景になるため文字は白、非選択は既定色
                     let rich = egui::RichText::new(text).color(if is_focus {
-                        egui::Color32::from_rgb(40, 80, 200)
+                        crate::theme::WHITE
                     } else {
                         egui::Color32::PLACEHOLDER
                     });
@@ -78,7 +79,7 @@ pub fn nodes_table(ui: &mut egui::Ui, app: &mut App) {
                             ui.painter().rect_filled(
                                 resp.rect,
                                 0.0,
-                                egui::Color32::from_rgba_unmultiplied(200, 50, 50, 60),
+                                crate::theme::translucent(crate::theme::ERROR_RED, 60),
                             );
                         }
                     });

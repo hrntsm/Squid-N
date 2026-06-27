@@ -126,8 +126,9 @@ pub fn members_table(ui: &mut egui::Ui, app: &mut App) {
                 let is_focus = app.nav.focus_member == Some(elem.id);
                 row.col(|ui| {
                     let text = elem.id.0.to_string();
+                    // 選択行は blue-500 背景になるため文字は白、非選択は既定色
                     let rich = egui::RichText::new(text).color(if is_focus {
-                        egui::Color32::from_rgb(40, 80, 200)
+                        crate::theme::WHITE
                     } else {
                         egui::Color32::PLACEHOLDER
                     });
