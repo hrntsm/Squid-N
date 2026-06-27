@@ -1,4 +1,4 @@
-# ikkan
+# Squidcan
 
 日本の建築構造計算一貫プログラム。Rust で実装。
 

@@ -1,6 +1,6 @@
 # V&V レポート（検証・妥当性確認）
 
-本ディレクトリは、ikkann の各要素・各設計式に対する V&V（Verification & Validation）レポートを格納する。
+本ディレクトリは、Squidcan の各要素・各設計式に対する V&V（Verification & Validation）レポートを格納する。
 
 ## V&V の定義
 
