@@ -1,7 +1,7 @@
 use crate::app::App;
-use squid_n_core::ids::{ElemId, NodeId, SectionId};
+use squid_n_core::ids::{ElemId, MaterialId, NodeId, SectionId};
 use squid_n_core::model::{ElementData, ElementKind, EndCondition, ForceRegime, LocalAxis};
-use squid_n_edit::{AddMember, SetElementSection};
+use squid_n_edit::{AddMember, DeleteMember, SetElementMaterial, SetElementSection};
 
 pub fn members_table(ui: &mut egui::Ui, app: &mut App) {
     use egui_extras::{Column, TableBuilder};
@@ -105,15 +105,19 @@ pub fn members_table(ui: &mut egui::Ui, app: &mut App) {
 
     let n = app.model.elements.len();
     let mut pending_section: Vec<(usize, u32)> = Vec::new();
+    let mut pending_material: Vec<(usize, u32)> = Vec::new();
+    let mut pending_delete: Option<ElemId> = None;
 
     TableBuilder::new(ui)
         .striped(true)
         .column(Column::auto())
         .column(Column::auto())
+        .column(Column::initial(70.0))
+        .column(Column::initial(80.0))
         .column(Column::initial(90.0))
-        .column(Column::initial(60.0))
+        .column(Column::auto())
         .header(20.0, |mut h| {
-            for t in &["ID", "種別", "節点", "断面"] {
+            for t in &["ID", "種別", "節点", "断面", "材料", ""] {
                 h.col(|ui| {
                     ui.strong(*t);
                 });
@@ -144,8 +148,7 @@ pub fn members_table(ui: &mut egui::Ui, app: &mut App) {
                     ui.label(ids.join(","));
                 });
                 row.col(|ui| {
-                    let current = elem.section.map(|s| s.0).unwrap_or(u32::MAX);
-                    let selected = current;
+                    let selected = elem.section.map(|s| s.0).unwrap_or(u32::MAX);
                     let combo = egui::ComboBox::from_id_salt(format!("elem_sec_{}", i))
                         .selected_text(
                             elem.section
@@ -158,7 +161,10 @@ pub fn members_table(ui: &mut egui::Ui, app: &mut App) {
                         }
                         for sec in &app.model.sections {
                             if ui
-                                .selectable_label(selected == sec.id.0, format!("S{}", sec.id.0))
+                                .selectable_label(
+                                    selected == sec.id.0,
+                                    format!("S{} {}", sec.id.0, sec.name),
+                                )
                                 .clicked()
                             {
                                 pending_section.push((i, sec.id.0));
@@ -166,11 +172,44 @@ pub fn members_table(ui: &mut egui::Ui, app: &mut App) {
                         }
                     });
                 });
+                row.col(|ui| {
+                    let selected = elem.material.map(|m| m.0).unwrap_or(u32::MAX);
+                    let combo = egui::ComboBox::from_id_salt(format!("elem_mat_{}", i))
+                        .selected_text(
+                            elem.material
+                                .and_then(|m| app.model.materials.get(m.index()))
+                                .map(|m| m.name.clone())
+                                .unwrap_or_else(|| "―".to_string()),
+                        );
+                    combo.show_ui(ui, |ui| {
+                        if ui.selectable_label(selected == u32::MAX, "―").clicked() {
+                            pending_material.push((i, u32::MAX));
+                        }
+                        for mat in &app.model.materials {
+                            if ui
+                                .selectable_label(selected == mat.id.0, &mat.name)
+                                .clicked()
+                            {
+                                pending_material.push((i, mat.id.0));
+                            }
+                        }
+                    });
+                });
+                row.col(|ui| {
+                    if ui
+                        .button("🗑")
+                        .on_hover_text("部材を削除（関連する部材荷重も削除されます）")
+                        .clicked()
+                    {
+                        pending_delete = Some(elem.id);
+                    }
+                });
             });
         });
 
     // 確定処理
-    let had_pending = !pending_section.is_empty();
+    let had_pending =
+        !pending_section.is_empty() || !pending_material.is_empty() || pending_delete.is_some();
     for (i, sec_id) in pending_section {
         let elem_id = app.model.elements[i].id;
         let section = if sec_id == u32::MAX {
@@ -191,6 +230,33 @@ pub fn members_table(ui: &mut egui::Ui, app: &mut App) {
                 section,
             }),
         );
+    }
+    for (i, mat_id) in pending_material {
+        let elem_id = app.model.elements[i].id;
+        let material = if mat_id == u32::MAX {
+            None
+        } else {
+            let mid = MaterialId(mat_id);
+            if app.model.materials.iter().any(|m| m.id == mid) {
+                Some(mid)
+            } else {
+                None
+            }
+        };
+        app.undo.run(
+            &mut app.model,
+            Box::new(SetElementMaterial {
+                elem: elem_id,
+                material,
+            }),
+        );
+    }
+    if let Some(elem_id) = pending_delete {
+        app.undo
+            .run(&mut app.model, Box::new(DeleteMember { id: elem_id }));
+        if app.nav.focus_member == Some(elem_id) {
+            app.nav.focus_member = None;
+        }
     }
 
     // 編集があった場合は下流（結果・設計）を stale にする（UI設計 §5）

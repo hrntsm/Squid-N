@@ -37,6 +37,17 @@ pub fn solve_eigen(
         });
     }
 
+    // 質量ゼロ（密度・節点質量とも未設定）の検出。
+    // M ≈ 0 のまま進めると GEVD が対角フォールバックし周期 0 の無意味な結果になる。
+    let mass_trace: f64 = (0..n)
+        .map(|i| m_red.get(i, i).copied().unwrap_or(0.0))
+        .sum();
+    if mass_trace <= 0.0 {
+        return Err(SolveError::InvalidInput(
+            "質量がゼロです。材料の密度(ρ)を設定するか、節点質量を与えてください。".into(),
+        ));
+    }
+
     let k_free = assemble_global_k(model, dofmap);
     let k_red = reducer.reduce_k(&k_free);
 
@@ -49,6 +60,7 @@ pub fn solve_eigen(
     let mut x = init_subspace(n, q);
 
     let mut theta_prev = vec![f64::MAX; n_modes];
+    let mut is_converged = false;
 
     for _iteration in 0..EIGEN_MAX_ITER {
         let mut y = vec![0.0; n * q];
@@ -86,8 +98,16 @@ pub fn solve_eigen(
             theta_prev[m] = th;
         }
         if converged == n_modes {
+            is_converged = true;
             break;
         }
+    }
+
+    if !is_converged {
+        return Err(SolveError::NonConvergence(format!(
+            "固有値解析(部分空間反復)が {} 回で収束しませんでした。モデルの質量・剛性の分布を確認してください。",
+            EIGEN_MAX_ITER
+        )));
     }
 
     let mut omega2 = vec![0.0; n_modes];

@@ -1,6 +1,6 @@
 use crate::app::App;
 use squid_n_core::ids::SectionId;
-use squid_n_edit::{SectionField, SetSectionField, SetSectionName};
+use squid_n_edit::{DeleteSection, SectionField, SetSectionField, SetSectionName};
 
 pub fn sections_table(ui: &mut egui::Ui, app: &mut App) {
     use egui_extras::{Column, TableBuilder};
@@ -8,6 +8,7 @@ pub fn sections_table(ui: &mut egui::Ui, app: &mut App) {
     let n = app.model.sections.len();
     let mut pending_name: Vec<(usize, String)> = Vec::new();
     let mut pending_field: Vec<(usize, SectionField, f64)> = Vec::new();
+    let mut pending_delete: Option<SectionId> = None;
 
     // 編集バッファ（名称）
     let mut name_buf: Vec<String> = app.model.sections.iter().map(|s| s.name.clone()).collect();
@@ -37,8 +38,9 @@ pub fn sections_table(ui: &mut egui::Ui, app: &mut App) {
         .column(Column::initial(80.0))
         .column(Column::initial(80.0))
         .column(Column::initial(80.0))
+        .column(Column::auto())
         .header(20.0, |mut h| {
-            for t in &["ID", "名称", "A", "Iy", "Iz", "J"] {
+            for t in &["ID", "名称", "A", "Iy", "Iz", "J", ""] {
                 h.col(|ui| {
                     ui.strong(*t);
                 });
@@ -102,11 +104,29 @@ pub fn sections_table(ui: &mut egui::Ui, app: &mut App) {
                         }
                     });
                 }
+                row.col(|ui| {
+                    let sec_id = app.model.sections[i].id;
+                    let in_use = app.model.elements.iter().any(|e| e.section == Some(sec_id));
+                    let btn = ui.add_enabled(!in_use, egui::Button::new("🗑"));
+                    if in_use {
+                        btn.on_hover_text("部材から参照中のため削除できません");
+                    } else if btn.clicked() {
+                        pending_delete = Some(sec_id);
+                    }
+                });
             });
         });
 
     // 確定処理
     let (had_name, had_field) = (!pending_name.is_empty(), !pending_field.is_empty());
+    if let Some(sid) = pending_delete {
+        app.undo
+            .run(&mut app.model, Box::new(DeleteSection { id: sid }));
+        if app.nav.focus_section == Some(sid) {
+            app.nav.focus_section = None;
+        }
+        app.staleness.mark_edited();
+    }
     for (i, name) in pending_name {
         let sid = SectionId(app.model.sections[i].id.0);
         app.undo
