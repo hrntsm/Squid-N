@@ -358,7 +358,7 @@ fn attrs(e: &quick_xml::events::BytesStart) -> Result<HashMap<String, String>, S
         let a = a.map_err(|err| StbError::Parse(err.to_string()))?;
         let key = String::from_utf8_lossy(a.key.as_ref()).to_string();
         let val = a
-            .unescape_value()
+            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
             .map_err(|err| StbError::Parse(err.to_string()))?
             .to_string();
         m.insert(key, val);

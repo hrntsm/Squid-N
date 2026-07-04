@@ -35,7 +35,7 @@ schemars    = "0.8"
 bincode     = "1"
 anyhow      = "1"
 toml        = "0.8"
-quick-xml   = "0.36"
+quick-xml   = "0.41"
 
 [profile.release]
 lto = "thin"
