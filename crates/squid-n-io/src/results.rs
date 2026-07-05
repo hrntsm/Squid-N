@@ -50,7 +50,9 @@ pub struct ResultEntry {
     pub path: String,
 }
 
-pub trait ResultStore {
+/// 結果ストア。`Send` を要求するのは、MCP サーバ(P8)が `ServerState` を
+/// スレッド間で共有する(`rmcp::ServerHandler: Send + Sync`)ため。
+pub trait ResultStore: Send {
     fn writer(&mut self, case: CaseId, kind: ResultKind) -> Box<dyn ResultWriter>;
     fn query(&self, q: &ResultQuery) -> ResultBatch;
     fn manifest(&self) -> &ResultManifest;

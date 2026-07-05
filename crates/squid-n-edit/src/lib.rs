@@ -1,7 +1,11 @@
 use squid_n_core::ids::{ElemId, LoadCaseId, MaterialId, NodeId, SectionId, SlabId, StoryId};
 use squid_n_core::model::Model;
 
-pub trait EditCommand {
+/// 編集コマンド。`Send` を要求するのは、MCP サーバ(P8)が `UndoStack` を
+/// スレッド間で共有する(`rmcp::ServerHandler: Send + Sync`)ため。
+/// コマンドはモデルデータの断片のみを保持するプレーンな構造体であり、
+/// 全実装が自然に `Send` を満たす。
+pub trait EditCommand: Send {
     fn apply(&self, model: &mut Model) -> Box<dyn EditCommand>;
     fn label(&self) -> &str;
 }

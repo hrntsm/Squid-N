@@ -74,17 +74,24 @@ pub struct ServerState {
 #[cfg(feature = "mcp")]
 pub mod server {
     use super::*;
-    use rmcp::handler::server::router::tool::ToolRouter as _;
-    use rmcp::handler::server::tool::{tool_router, Parameters, ToolRouter};
-    use rmcp::model::{CallToolResult, Content, ServerInfo};
+    // rmcp 1.x では `tool_router`/`tool_handler` マクロはクレートルート（rmcp_macros の再エクスポート）にあり、
+    // `Parameters` は `handler::server::tool` 内で private import されているだけなので
+    // 実体を持つ `handler::server::wrapper` から取る必要がある。
+    use rmcp::handler::server::tool::ToolRouter;
+    use rmcp::handler::server::wrapper::Parameters;
+    use rmcp::model::{CallToolResult, Content, Implementation, ServerInfo};
     use rmcp::transport::stdio;
-    use rmcp::{tool, tool_handler, ErrorData, ServerHandler, ServiceExt};
+    use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
     #[derive(Clone)]
     pub struct SquidNServer {
         state: Arc<Mutex<ServerState>>,
+        /// rmcp の `#[tool_handler]` が生成するディスパッチ用ルータ。
+        /// rmcp 1.7 のマクロ展開はこのフィールドを直接読まない経路を取り得るため
+        /// dead_code を明示的に許可する（rmcp の標準パターンに従った保持）。
+        #[allow(dead_code)]
         tool_router: ToolRouter<Self>,
     }
 
@@ -132,10 +139,9 @@ pub mod server {
             let job = st.jobs.get(&args.job_id);
             match job {
                 Some(j) => Ok(CallToolResult::success(vec![Content::json(j)?])),
-                None => Ok(CallToolResult::error(
-                    rmcp::model::ErrorCode::InvalidParams,
-                    "job not found",
-                )),
+                // rmcp 1.x では CallToolResult::error は content のみを取り、
+                // JSON-RPC レベルのエラーコードは Err(ErrorData) 側で表現する。
+                None => Err(ErrorData::invalid_params("job not found", None)),
             }
         }
     }
@@ -143,11 +149,9 @@ pub mod server {
     #[tool_handler]
     impl ServerHandler for SquidNServer {
         fn get_info(&self) -> ServerInfo {
-            ServerInfo {
-                name: "squid-n-mcp".into(),
-                version: "0.1.0".into(),
-                ..Default::default()
-            }
+            // rmcp 1.x では ServerInfo(=InitializeResult)・Implementation は #[non_exhaustive] のため
+            // 構造体リテラルで組み立てられない。ビルダーメソッド経由で組み立てる。
+            ServerInfo::default().with_server_info(Implementation::new("squid-n-mcp", "0.1.0"))
         }
     }
 
