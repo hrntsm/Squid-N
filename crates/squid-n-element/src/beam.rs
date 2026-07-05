@@ -751,35 +751,34 @@ impl ElementBehavior for BeamElement {
                 mm.set(3, 9, 1.0 * ct);
                 mm.set(9, 3, 1.0 * ct);
                 mm.set(9, 9, 2.0 * ct);
-                // Bending Uy-Rz: indices 1,5,7,11
-                //   local order: [Uy_i=1, Rz_i=5, Uy_j=7, Rz_j=11]
-                let b4 = |mm: &mut LocalMat, i0: usize, j0: usize, sign: f64| {
-                    // row0 (Uy_i)
-                    mm.set(i0, j0, 156.0 * c2);
-                    mm.set(i0, j0 + 1, 22.0 * l * c2 * sign);
-                    mm.set(i0, j0 + 2, 54.0 * c2);
-                    mm.set(i0, j0 + 3, -13.0 * l * c2 * sign);
-                    // row1 (Rz_i / Ry_i)
-                    mm.set(i0 + 1, j0, 22.0 * l * c2 * sign);
-                    mm.set(i0 + 1, j0 + 1, 4.0 * l2 * c2);
-                    mm.set(i0 + 1, j0 + 2, 13.0 * l * c2 * sign);
-                    mm.set(i0 + 1, j0 + 3, -3.0 * l2 * c2);
-                    // row2 (Uy_j)
-                    mm.set(i0 + 2, j0, 54.0 * c2);
-                    mm.set(i0 + 2, j0 + 1, 13.0 * l * c2 * sign);
-                    mm.set(i0 + 2, j0 + 2, 156.0 * c2);
-                    mm.set(i0 + 2, j0 + 3, -22.0 * l * c2 * sign);
-                    // row3 (Rz_j / Ry_j)
-                    mm.set(i0 + 3, j0, -13.0 * l * c2 * sign);
-                    mm.set(i0 + 3, j0 + 1, -3.0 * l2 * c2);
-                    mm.set(i0 + 3, j0 + 2, -22.0 * l * c2 * sign);
-                    mm.set(i0 + 3, j0 + 3, 4.0 * l2 * c2);
+                // Bending: Hermite 梁の一貫質量（4x4 ブロック）。
+                // DOF は連続ではないためインデックス配列で指定する。
+                //   Uy-Rz 面: [Uy_i=1, Rz_i=5, Uy_j=7, Rz_j=11]
+                //   Uz-Ry 面: [Uz_i=2, Ry_i=4, Uz_j=8, Ry_j=10]（回転符号は逆）
+                let b4 = |mm: &mut LocalMat, idx: [usize; 4], sign: f64| {
+                    let [d0, r0, d1, r1] = idx;
+                    // 並進-並進
+                    mm.set(d0, d0, 156.0 * c2);
+                    mm.set(d0, d1, 54.0 * c2);
+                    mm.set(d1, d0, 54.0 * c2);
+                    mm.set(d1, d1, 156.0 * c2);
+                    // 並進-回転
+                    mm.set(d0, r0, 22.0 * l * c2 * sign);
+                    mm.set(r0, d0, 22.0 * l * c2 * sign);
+                    mm.set(d0, r1, -13.0 * l * c2 * sign);
+                    mm.set(r1, d0, -13.0 * l * c2 * sign);
+                    mm.set(d1, r0, 13.0 * l * c2 * sign);
+                    mm.set(r0, d1, 13.0 * l * c2 * sign);
+                    mm.set(d1, r1, -22.0 * l * c2 * sign);
+                    mm.set(r1, d1, -22.0 * l * c2 * sign);
+                    // 回転-回転
+                    mm.set(r0, r0, 4.0 * l2 * c2);
+                    mm.set(r0, r1, -3.0 * l2 * c2);
+                    mm.set(r1, r0, -3.0 * l2 * c2);
+                    mm.set(r1, r1, 4.0 * l2 * c2);
                 };
-                // Uy-Rz plane (sign = +1)
-                b4(&mut mm, 1, 1, 1.0);
-                // Uz-Ry plane (sign = -1)
-                // local order: [Uz_i=2, Ry_i=4, Uz_j=8, Ry_j=10]
-                b4(&mut mm, 2, 2, -1.0);
+                b4(&mut mm, [1, 5, 7, 11], 1.0);
+                b4(&mut mm, [2, 4, 8, 10], -1.0);
             }
         }
         mm

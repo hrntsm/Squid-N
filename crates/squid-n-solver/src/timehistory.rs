@@ -66,11 +66,106 @@ pub struct GroundMotion {
 
 /// 時刻歴応答解析の結果（設計書 §10.5）。
 /// 時系列の全量は結果I/O（§6）へストリーミングし、メモリに全保持しない。
+/// 例外として UI 描画用の代表応答（1 節点変位・ベースシア・最上階変形角）のみ
+/// `history` にステップごとの値を保持する。
 pub struct ResponseResult {
     pub time: Vec<f64>,
     pub peak_disp: Vec<[f64; 6]>,
     pub story_drift_angle: Vec<f64>,
     pub cumulative_ductility: Vec<f64>,
+    pub history: ResponseHistory,
+}
+
+/// UI 描画用の代表応答時刻歴（`time` と同じ長さ）。
+#[derive(Clone, Debug, Default)]
+pub struct ResponseHistory {
+    /// 記録節点（最も標高が高い、X 方向自由度を持つ節点）。
+    pub node: Option<squid_n_core::ids::NodeId>,
+    /// 記録節点の X 方向相対変位 [mm]。
+    pub node_disp_x: Vec<f64>,
+    /// ベースシア(X) [N]（全慣性力の合計、符号付き）。
+    pub base_shear_x: Vec<f64>,
+    /// 最上階の層間変形角 [rad]（符号付き。階が未定義なら 0）。
+    pub top_drift_angle: Vec<f64>,
+}
+
+/// 記録節点を選ぶ: X 方向が自由な節点のうち最も標高(Z)が高いもの。
+fn pick_record_node(model: &Model, dofmap: &DofMap) -> Option<squid_n_core::ids::NodeId> {
+    model
+        .nodes
+        .iter()
+        .filter(|n| dofmap.active(n.id.index() * DOF_PER_NODE).is_some())
+        .max_by(|a, b| {
+            a.coord[2]
+                .partial_cmp(&b.coord[2])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|n| n.id)
+}
+
+/// 最上階の現在の層間変形角（符号付き）。階が未定義なら 0。
+fn current_top_drift(model: &Model, dofmap: &DofMap, u_free: &[f64]) -> f64 {
+    let Some(si) = model.stories.len().checked_sub(1) else {
+        return 0.0;
+    };
+    let story = &model.stories[si];
+    let height_mm = if si == 0 {
+        story.elevation
+    } else {
+        story.elevation - model.stories[si - 1].elevation
+    };
+    if height_mm <= 0.0 {
+        return 0.0;
+    }
+    let top = story.node_ids.first().copied();
+    let bot = if si == 0 {
+        model.nodes.iter().find(|n| n.story.is_none()).map(|n| n.id)
+    } else {
+        model.stories[si - 1].node_ids.first().copied()
+    };
+    if let (Some(tn), Some(bn)) = (top, bot) {
+        (node_disp_x(u_free, dofmap, tn) - node_disp_x(u_free, dofmap, bn)) / height_mm
+    } else {
+        0.0
+    }
+}
+
+/// 1 ステップ分の代表応答を記録する。
+/// `a_red` は縮約空間の相対加速度、`xg_x` は当該時刻の地動加速度(X)。
+#[allow(clippy::too_many_arguments)]
+fn record_history_step(
+    history: &mut ResponseHistory,
+    model: &Model,
+    dofmap: &DofMap,
+    reducer: &Reducer,
+    m_r_x: &[f64],
+    rmr_x: f64,
+    u_free: &[f64],
+    a_red: &[f64],
+    xg_x: f64,
+) {
+    let disp = history
+        .node
+        .map(|n| node_disp_x(u_free, dofmap, n))
+        .unwrap_or(0.0);
+    history.node_disp_x.push(disp);
+    let a_free = reducer.expand_u(a_red);
+    let ma: f64 = m_r_x.iter().zip(a_free.iter()).map(|(m, a)| m * a).sum();
+    history.base_shear_x.push(-(ma + xg_x * rmr_x));
+    history
+        .top_drift_angle
+        .push(current_top_drift(model, dofmap, u_free));
+}
+
+/// rᵀ·M·r （X 方向合計質量）。ベースシア計算に使う。
+fn total_mass_x(m_r_x: &[f64], dofmap: &DofMap, n_nodes: usize) -> f64 {
+    let mut s = 0.0;
+    for ni in 0..n_nodes {
+        if let Some(a) = dofmap.active(ni * DOF_PER_NODE) {
+            s += m_r_x[a as usize];
+        }
+    }
+    s
 }
 
 /// 時刻歴応答の1時点の状態（縮約空間）。チェックポイント／再開で使用。
@@ -148,6 +243,7 @@ pub fn linear_time_history_with_state(
                 peak_disp: vec![[0.0; 6]; model.nodes.len()],
                 story_drift_angle: vec![0.0; model.stories.len()],
                 cumulative_ductility: vec![0.0; model.elements.len()],
+                history: ResponseHistory::default(),
             },
             TimeStepState {
                 step: 0,
@@ -232,9 +328,7 @@ pub fn linear_time_history_with_state(
     for i in 0..n_indep {
         rhs_a0[i] = -cv0[i] - ku0[i] - p_red_0[i];
     }
-    let mut mass_solver = make_solver(SolverBackend::DirectSparseCholesky);
-    mass_solver.factorize(&m_red)?;
-    let a = mass_solver.solve(&rhs_a0)?;
+    let a = solve_initial_accel(&m_red, &rhs_a0, n_indep)?;
 
     // --- 時刻歴ループ（start_step=0 から） ---
     run_steps(
@@ -401,6 +495,7 @@ pub fn linear_hht_alpha_analysis(
             peak_disp: vec![[0.0; 6]; model.nodes.len()],
             story_drift_angle: vec![0.0; model.stories.len()],
             cumulative_ductility: vec![0.0; model.elements.len()],
+            history: ResponseHistory::default(),
         });
     }
 
@@ -479,9 +574,7 @@ pub fn linear_hht_alpha_analysis(
     for i in 0..n_indep {
         rhs_a0[i] = -cv0[i] - ku0[i] - p_red_0[i];
     }
-    let mut mass_solver = make_solver(SolverBackend::DirectSparseCholesky);
-    mass_solver.factorize(&m_red)?;
-    let a = mass_solver.solve(&rhs_a0)?;
+    let a = solve_initial_accel(&m_red, &rhs_a0, n_indep)?;
 
     let (result, _state) = run_steps_hht(
         model,
@@ -511,7 +604,37 @@ pub fn linear_hht_alpha_analysis(
     Ok(result)
 }
 
-/// HHT-α のステップループ（内部関数）。
+/// 初期加速度 M·a₀ = rhs を解く。
+/// 質量行列は回転自由度などに質量ゼロ行を含み特異になり得るため、
+/// Cholesky → LU の順に試し、いずれも失敗した場合は
+/// rhs≈0（静止開始）なら a₀ = 0 とみなす。
+fn solve_initial_accel(
+    m_red: &faer::sparse::SparseColMat<usize, f64>,
+    rhs: &[f64],
+    n_indep: usize,
+) -> Result<Vec<f64>, SolveError> {
+    let mut chol = make_solver(SolverBackend::DirectSparseCholesky);
+    if chol.factorize(m_red).is_ok() {
+        return chol.solve(rhs);
+    }
+    let mut lu = make_solver(SolverBackend::DirectSparseLu);
+    if lu.factorize(m_red).is_ok() {
+        if let Ok(a) = lu.solve(rhs) {
+            if a.iter().all(|v| v.is_finite()) {
+                return Ok(a);
+            }
+        }
+    }
+    let rhs_norm: f64 = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if rhs_norm < 1e-9 {
+        // 静止開始（初期外力ゼロ）なら初期加速度もゼロ
+        return Ok(vec![0.0; n_indep]);
+    }
+    Err(SolveError::InvalidInput(
+        "質量行列が特異で初期加速度を計算できません。地震波の先頭を 0 から始めるか、全自由度に質量を与えてください。".into(),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_steps_hht(
     model: &Model,
@@ -551,6 +674,29 @@ fn run_steps_hht(
 
     let mut time = Vec::with_capacity(wave.accel_x.len() - start_step as usize + 1);
     time.push(start_step as f64 * dt);
+
+    // UI 用の代表応答記録
+    let mut history = ResponseHistory {
+        node: pick_record_node(model, dofmap),
+        ..Default::default()
+    };
+    let rmr_x = total_mass_x(m_r_x, dofmap, model.nodes.len());
+    let xg_init = wave
+        .accel_x
+        .get(start_step as usize)
+        .copied()
+        .unwrap_or(0.0);
+    record_history_step(
+        &mut history,
+        model,
+        dofmap,
+        reducer,
+        m_r_x,
+        rmr_x,
+        &u_free_init,
+        &a,
+        xg_init,
+    );
 
     for n in start_step as usize..wave.accel_x.len() {
         let t_next = (n + 1) as f64 * dt;
@@ -609,6 +755,18 @@ fn run_steps_hht(
             peak_disp_free[i] = peak_disp_free[i].max(u_free[i].abs());
         }
         update_story_drift(model, dofmap, &u_free, &mut story_drift_angle);
+        let xg_next = wave.accel_x.get(n + 1).copied().unwrap_or(0.0);
+        record_history_step(
+            &mut history,
+            model,
+            dofmap,
+            reducer,
+            m_r_x,
+            rmr_x,
+            &u_free,
+            &a,
+            xg_next,
+        );
     }
 
     let final_step = wave.accel_x.len() as u64;
@@ -637,6 +795,7 @@ fn run_steps_hht(
             peak_disp,
             story_drift_angle,
             cumulative_ductility: vec![0.0; model.elements.len()],
+            history,
         },
         final_state,
     ))
@@ -682,6 +841,29 @@ fn run_steps(
 
     let mut time = Vec::with_capacity(wave.accel_x.len() - start_step as usize + 1);
     time.push(start_step as f64 * dt);
+
+    // UI 用の代表応答記録
+    let mut history = ResponseHistory {
+        node: pick_record_node(model, dofmap),
+        ..Default::default()
+    };
+    let rmr_x = total_mass_x(m_r_x, dofmap, model.nodes.len());
+    let xg_init = wave
+        .accel_x
+        .get(start_step as usize)
+        .copied()
+        .unwrap_or(0.0);
+    record_history_step(
+        &mut history,
+        model,
+        dofmap,
+        reducer,
+        m_r_x,
+        rmr_x,
+        &u_free_init,
+        &a,
+        xg_init,
+    );
 
     for n in start_step as usize..wave.accel_x.len() {
         let t_next = (n + 1) as f64 * dt;
@@ -734,6 +916,18 @@ fn run_steps(
             peak_disp_free[i] = peak_disp_free[i].max(u_free[i].abs());
         }
         update_story_drift(model, dofmap, &u_free, &mut story_drift_angle);
+        let xg_next = wave.accel_x.get(n + 1).copied().unwrap_or(0.0);
+        record_history_step(
+            &mut history,
+            model,
+            dofmap,
+            reducer,
+            m_r_x,
+            rmr_x,
+            &u_free,
+            &a,
+            xg_next,
+        );
     }
 
     let final_step = wave.accel_x.len() as u64;
@@ -762,6 +956,7 @@ fn run_steps(
             peak_disp,
             story_drift_angle,
             cumulative_ductility: vec![0.0; model.elements.len()],
+            history,
         },
         final_state,
     ))
@@ -852,6 +1047,7 @@ pub fn nonlinear_time_history_analysis(
             peak_disp: vec![[0.0; 6]; model.nodes.len()],
             story_drift_angle: vec![0.0; model.stories.len()],
             cumulative_ductility: vec![0.0; model.elements.len()],
+            history: ResponseHistory::default(),
         });
     }
 
@@ -946,9 +1142,7 @@ pub fn nonlinear_time_history_analysis(
     for i in 0..n_indep {
         rhs_a0[i] = -cv0[i] - f_int0_red[i] - p_red_0[i];
     }
-    let mut mass_solver = make_solver(SolverBackend::DirectSparseCholesky);
-    mass_solver.factorize(&m_red)?;
-    let mut a = mass_solver.solve(&rhs_a0)?;
+    let mut a = solve_initial_accel(&m_red, &rhs_a0, n_indep)?;
 
     // --- 時刻歴ループ ---
     let n_steps = wave.accel_x.len();
@@ -963,6 +1157,28 @@ pub fn nonlinear_time_history_analysis(
     {
         let u_free_init = reducer.expand_u(&u);
         update_story_drift(model, dofmap, &u_free_init, &mut story_drift_angle);
+    }
+
+    // UI 用の代表応答記録
+    let mut history = ResponseHistory {
+        node: pick_record_node(model, dofmap),
+        ..Default::default()
+    };
+    let rmr_x = total_mass_x(&m_r_x, dofmap, model.nodes.len());
+    {
+        let u_free_init = reducer.expand_u(&u);
+        let xg_init = wave.accel_x.first().copied().unwrap_or(0.0);
+        record_history_step(
+            &mut history,
+            model,
+            dofmap,
+            reducer,
+            &m_r_x,
+            rmr_x,
+            &u_free_init,
+            &a,
+            xg_init,
+        );
     }
     let mut time = Vec::with_capacity(n_steps + 1);
     time.push(0.0);
@@ -1082,6 +1298,18 @@ pub fn nonlinear_time_history_analysis(
                 peak_disp_free[i] = peak_disp_free[i].max(u_free[i].abs());
             }
             update_story_drift(model, dofmap, &u_free, &mut story_drift_angle);
+            let xg_next = wave.accel_x.get(n + 1).copied().unwrap_or(0.0);
+            record_history_step(
+                &mut history,
+                model,
+                dofmap,
+                reducer,
+                &m_r_x,
+                rmr_x,
+                &u_free,
+                &a,
+                xg_next,
+            );
         } else {
             // 不収束: rollback
             model.restore(&snap, &mut behaviors);
@@ -1107,6 +1335,7 @@ pub fn nonlinear_time_history_analysis(
         peak_disp,
         story_drift_angle,
         cumulative_ductility: vec![0.0; model.elements.len()],
+        history,
     })
 }
 

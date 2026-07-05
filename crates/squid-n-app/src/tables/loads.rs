@@ -1,7 +1,10 @@
 use crate::app::App;
 use squid_n_core::ids::{ElemId, LoadCaseId, NodeId};
 use squid_n_core::model::{ElementKind, MemberLoad, MemberLoadKind};
-use squid_n_edit::{AddMemberLoad, DeleteMemberLoad, SetLoadCaseName, SetNodalLoad};
+use squid_n_edit::{
+    AddLoadCase, AddMemberLoad, DeleteLoadCase, DeleteMemberLoad, DeleteNodalLoad, SetLoadCaseName,
+    SetNodalLoad,
+};
 
 #[derive(Clone)]
 struct MemberLoadDraft {
@@ -33,10 +36,24 @@ impl Default for MemberLoadDraft {
 pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
     use egui_extras::{Column, TableBuilder};
 
-    // --- 荷重ケース一覧（名称編集可能） ---
-    ui.strong("荷重ケース");
+    // --- 荷重ケース一覧（名称編集・追加・削除・編集対象の選択） ---
+    ui.horizontal(|ui| {
+        ui.strong("荷重ケース");
+        if ui
+            .button("+ ケース追加")
+            .on_hover_text("新しい荷重ケースを追加します")
+            .clicked()
+        {
+            let name = format!("LC{}", app.model.load_cases.len());
+            app.undo.run(&mut app.model, Box::new(AddLoadCase { name }));
+            // 追加したケースを編集対象として選択
+            app.nav.focus_load_case = app.model.load_cases.last().map(|lc| lc.id);
+            app.staleness.mark_edited();
+        }
+    });
     let n_lc = app.model.load_cases.len();
     let mut pending_name: Vec<(usize, String)> = Vec::new();
+    let mut pending_delete: Option<LoadCaseId> = None;
     let mut name_bufs: Vec<String> = app
         .model
         .load_cases
@@ -49,8 +66,9 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
         .column(Column::auto())
         .column(Column::initial(120.0))
         .column(Column::initial(60.0))
+        .column(Column::auto())
         .header(20.0, |mut h| {
-            for t in &["ID", "名称", "荷重数"] {
+            for t in &["ID", "名称", "荷重数", ""] {
                 h.col(|ui| {
                     ui.strong(*t);
                 });
@@ -60,8 +78,20 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
             body.rows(22.0, n_lc, |mut row| {
                 let i = row.index();
                 let lc = &app.model.load_cases[i];
+                let is_sel = app.nav.focus_load_case == Some(lc.id);
                 row.col(|ui| {
-                    ui.label(lc.id.0.to_string());
+                    let rich = egui::RichText::new(lc.id.0.to_string()).color(if is_sel {
+                        crate::theme::WHITE
+                    } else {
+                        egui::Color32::PLACEHOLDER
+                    });
+                    if ui
+                        .selectable_label(is_sel, rich)
+                        .on_hover_text("クリックで下の荷重編集の対象にする")
+                        .clicked()
+                    {
+                        app.nav.focus_load_case = Some(lc.id);
+                    }
                 });
                 row.col(|ui| {
                     if i < name_bufs.len() {
@@ -79,18 +109,44 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
                     }
                 });
                 row.col(|ui| {
-                    ui.label(lc.nodal.len().to_string());
+                    ui.label((lc.nodal.len() + lc.member.len()).to_string());
+                });
+                row.col(|ui| {
+                    let referenced = app
+                        .model
+                        .combinations
+                        .iter()
+                        .any(|c| c.terms.iter().any(|(id, _)| *id == lc.id));
+                    let btn = ui.add_enabled(!referenced, egui::Button::new("🗑"));
+                    if referenced {
+                        btn.on_hover_text("荷重組合せから参照中のため削除できません");
+                    } else if btn
+                        .on_hover_text("ケースと中身の荷重をまとめて削除")
+                        .clicked()
+                    {
+                        pending_delete = Some(lc.id);
+                    }
                 });
             });
         });
 
-    let had_name = !pending_name.is_empty();
+    let had_name = !pending_name.is_empty() || pending_delete.is_some();
     for (i, name) in pending_name {
         let lc_id = LoadCaseId(app.model.load_cases[i].id.0);
         app.undo.run(
             &mut app.model,
             Box::new(SetLoadCaseName { id: lc_id, name }),
         );
+    }
+    if let Some(lc_id) = pending_delete {
+        app.undo
+            .run(&mut app.model, Box::new(DeleteLoadCase { id: lc_id }));
+        if app.nav.focus_load_case == Some(lc_id) {
+            app.nav.focus_load_case = None;
+        }
+        if app.last_lc == Some(lc_id) {
+            app.last_lc = None;
+        }
     }
     if had_name {
         app.staleness.mark_edited();
@@ -101,12 +157,18 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
     // --- 節点荷重詳細（選択中の荷重ケース） ---
     ui.strong("節点荷重");
     if app.model.load_cases.is_empty() {
-        ui.label("荷重ケースがありません");
+        ui.label("荷重ケースがありません。「+ ケース追加」で作成してください。");
         return;
     }
+    // 編集対象: ナビゲータ/上表で選択したケース → 最後に実行したケース → 先頭
     let lc_idx = app
-        .last_lc
+        .nav
+        .focus_load_case
         .and_then(|id| app.model.load_cases.iter().position(|lc| lc.id == id))
+        .or_else(|| {
+            app.last_lc
+                .and_then(|id| app.model.load_cases.iter().position(|lc| lc.id == id))
+        })
         .unwrap_or(0);
     let lc_id = app.model.load_cases[lc_idx].id;
     ui.label(format!(
@@ -116,6 +178,7 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
 
     let nodal_count = app.model.load_cases[lc_idx].nodal.len();
     let mut pending_load: Vec<(NodeId, [f64; 6])> = Vec::new();
+    let mut pending_nodal_delete: Option<NodeId> = None;
     let mut value_bufs: Vec<[String; 6]> = app.model.load_cases[lc_idx]
         .nodal
         .iter()
@@ -126,6 +189,7 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
         .striped(true)
         .column(Column::auto())
         .columns(Column::initial(70.0), 6)
+        .column(Column::auto())
         .header(20.0, |mut h| {
             h.col(|ui| {
                 ui.strong("節点");
@@ -135,6 +199,7 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
                     ui.strong(*t);
                 });
             }
+            h.col(|_| {});
         })
         .body(|body| {
             body.rows(22.0, nodal_count, |mut row| {
@@ -169,10 +234,15 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
                         }
                     });
                 }
+                row.col(|ui| {
+                    if ui.button("🗑").on_hover_text("この節点荷重を削除").clicked() {
+                        pending_nodal_delete = Some(nodal.node);
+                    }
+                });
             });
         });
 
-    let had_load = !pending_load.is_empty();
+    let had_load = !pending_load.is_empty() || pending_nodal_delete.is_some();
     for (node, values) in pending_load {
         app.undo.run(
             &mut app.model,
@@ -181,6 +251,12 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
                 node,
                 values,
             }),
+        );
+    }
+    if let Some(node) = pending_nodal_delete {
+        app.undo.run(
+            &mut app.model,
+            Box::new(DeleteNodalLoad { lc: lc_id, node }),
         );
     }
     if had_load {

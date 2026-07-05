@@ -1,4 +1,4 @@
-use squid_n_core::ids::{ElemId, LoadCaseId, NodeId, SectionId};
+use squid_n_core::ids::{ElemId, LoadCaseId, MaterialId, NodeId, SectionId};
 use squid_n_core::model::Model;
 
 pub trait EditCommand {
@@ -314,7 +314,11 @@ impl EditCommand for AddMember {
     }
 }
 
-/// 部材削除。逆操作は部材追加。
+/// 部材削除（中間の部材も可）。逆操作は [`InsertMember`]。
+///
+/// ID＝配列インデックスの不変条件を保つため、削除後は当該部材より後ろの
+/// 部材 ID と、それを参照する部材荷重の `elem` を 1 つずつ繰り上げる。
+/// 当該部材を参照する部材荷重は連動して削除し、undo で復元する。
 pub struct DeleteMember {
     pub id: ElemId,
 }
@@ -325,12 +329,82 @@ impl EditCommand for DeleteMember {
         if idx >= model.elements.len() || model.elements[idx].id != self.id {
             return Box::new(Noop);
         }
+        // 当該部材を参照する部材荷重を (荷重ケース index, 荷重 index, 内容) で退避してから削除
+        let mut removed_loads = Vec::new();
+        for (lci, lc) in model.load_cases.iter_mut().enumerate() {
+            let mut li = 0;
+            while li < lc.member.len() {
+                if lc.member[li].elem == self.id {
+                    removed_loads.push((lci, li, lc.member.remove(li)));
+                } else {
+                    li += 1;
+                }
+            }
+        }
         let removed = model.elements.remove(idx);
-        Box::new(AddMember { elem: removed })
+        shift_elem_ids(model, |id| {
+            if id.0 > self.id.0 {
+                id.0 -= 1;
+            }
+        });
+        Box::new(InsertMember {
+            index: idx,
+            elem: removed,
+            member_loads: removed_loads,
+        })
     }
 
     fn label(&self) -> &str {
         "部材削除"
+    }
+}
+
+/// 指定インデックスへ部材を再挿入し、以降の部材 ID・参照を 1 つ繰り下げ、
+/// 連動削除された部材荷重を復元する（[`DeleteMember`] の逆操作専用）。
+pub struct InsertMember {
+    pub index: usize,
+    pub elem: squid_n_core::model::ElementData,
+    /// (荷重ケース index, 荷重 index, 内容)
+    pub member_loads: Vec<(usize, usize, squid_n_core::model::MemberLoad)>,
+}
+
+impl EditCommand for InsertMember {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        if self.index > model.elements.len() {
+            return Box::new(Noop);
+        }
+        let id = ElemId(self.index as u32);
+        shift_elem_ids(model, |eid| {
+            if eid.0 >= id.0 {
+                eid.0 += 1;
+            }
+        });
+        let mut elem = self.elem.clone();
+        elem.id = id;
+        model.elements.insert(self.index, elem);
+        for (lci, li, load) in &self.member_loads {
+            if let Some(lc) = model.load_cases.get_mut(*lci) {
+                let pos = (*li).min(lc.member.len());
+                lc.member.insert(pos, load.clone());
+            }
+        }
+        Box::new(DeleteMember { id })
+    }
+
+    fn label(&self) -> &str {
+        "部材削除の取り消し"
+    }
+}
+
+/// モデル内の全ての `ElemId` 参照（部材自身の ID を含む）に `f` を適用する。
+fn shift_elem_ids(model: &mut Model, mut f: impl FnMut(&mut ElemId)) {
+    for elem in &mut model.elements {
+        f(&mut elem.id);
+    }
+    for lc in &mut model.load_cases {
+        for ml in &mut lc.member {
+            f(&mut ml.elem);
+        }
     }
 }
 
@@ -797,6 +871,12 @@ impl EditCommand for RestoreElementSectionAndDeleteSection {
         }
         model.elements[elem_idx].section = self.old_section;
         model.sections.remove(new_idx);
+        let removed_id = self.new_section;
+        shift_section_ids(model, |sid| {
+            if sid.0 > removed_id.0 {
+                sid.0 -= 1;
+            }
+        });
         Box::new(DuplicateSectionForMember { member: self.elem })
     }
 
@@ -806,6 +886,11 @@ impl EditCommand for RestoreElementSectionAndDeleteSection {
 }
 
 /// 断面削除。逆操作は AddSection。
+///
+/// 部材から参照中の断面は削除すると参照が壊れるため Noop とする
+/// （先に割当を解除するか、UI 側でボタンを無効化する）。
+/// ID＝配列インデックスの不変条件を保つため、削除後は後続の断面 ID と
+/// 部材からの参照を 1 つずつ繰り上げる。
 pub struct DeleteSection {
     pub id: SectionId,
 }
@@ -816,7 +901,15 @@ impl EditCommand for DeleteSection {
         if idx >= model.sections.len() || model.sections[idx].id != self.id {
             return Box::new(Noop);
         }
+        if model.elements.iter().any(|e| e.section == Some(self.id)) {
+            return Box::new(Noop);
+        }
         let removed = model.sections.remove(idx);
+        shift_section_ids(model, |sid| {
+            if sid.0 > self.id.0 {
+                sid.0 -= 1;
+            }
+        });
         Box::new(AddSection {
             old: removed,
             index: idx,
@@ -828,7 +921,7 @@ impl EditCommand for DeleteSection {
     }
 }
 
-/// 断面追加（DeleteSection の逆操作）。
+/// 断面追加（DeleteSection の逆操作）。後続の断面 ID・参照を 1 つ繰り下げてから挿入する。
 pub struct AddSection {
     pub old: squid_n_core::model::Section,
     pub index: usize,
@@ -839,12 +932,382 @@ impl EditCommand for AddSection {
         if self.index > model.sections.len() {
             return Box::new(Noop);
         }
-        model.sections.insert(self.index, self.old.clone());
-        Box::new(DeleteSection { id: self.old.id })
+        let id = SectionId(self.index as u32);
+        shift_section_ids(model, |sid| {
+            if sid.0 >= id.0 {
+                sid.0 += 1;
+            }
+        });
+        let mut sec = self.old.clone();
+        sec.id = id;
+        model.sections.insert(self.index, sec);
+        Box::new(DeleteSection { id })
     }
 
     fn label(&self) -> &str {
         "断面追加"
+    }
+}
+
+/// モデル内の全ての `SectionId` 参照（断面自身の ID を含む）に `f` を適用する。
+fn shift_section_ids(model: &mut Model, mut f: impl FnMut(&mut SectionId)) {
+    for sec in &mut model.sections {
+        f(&mut sec.id);
+    }
+    for elem in &mut model.elements {
+        if let Some(sid) = &mut elem.section {
+            f(sid);
+        }
+    }
+}
+
+/// 材料追加。末尾に `MaterialId(len)` で追加する（ID＝配列インデックスの不変条件を維持）。
+/// 逆操作は材料削除。
+pub struct AddMaterial {
+    pub name: String,
+    pub young: f64,
+    pub poisson: f64,
+    pub density: f64,
+    pub fc: Option<f64>,
+    pub fy: Option<f64>,
+}
+
+impl EditCommand for AddMaterial {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        let new_id = MaterialId(model.materials.len() as u32);
+        model.materials.push(squid_n_core::model::Material {
+            id: new_id,
+            name: self.name.clone(),
+            young: self.young,
+            poisson: self.poisson,
+            density: self.density,
+            shear: None,
+            fc: self.fc,
+            fy: self.fy,
+        });
+        Box::new(DeleteMaterial { id: new_id })
+    }
+
+    fn label(&self) -> &str {
+        "材料追加"
+    }
+}
+
+/// 材料削除。部材から参照中の材料は Noop。逆操作は [`InsertMaterial`]。
+/// ID＝配列インデックスの不変条件を保つため、後続の材料 ID と部材からの参照を繰り上げる。
+pub struct DeleteMaterial {
+    pub id: MaterialId,
+}
+
+impl EditCommand for DeleteMaterial {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        let idx = self.id.index();
+        if idx >= model.materials.len() || model.materials[idx].id != self.id {
+            return Box::new(Noop);
+        }
+        if model.elements.iter().any(|e| e.material == Some(self.id)) {
+            return Box::new(Noop);
+        }
+        let removed = model.materials.remove(idx);
+        shift_material_ids(model, |mid| {
+            if mid.0 > self.id.0 {
+                mid.0 -= 1;
+            }
+        });
+        Box::new(InsertMaterial {
+            index: idx,
+            old: removed,
+        })
+    }
+
+    fn label(&self) -> &str {
+        "材料削除"
+    }
+}
+
+/// 指定インデックスへ材料を再挿入する（[`DeleteMaterial`] の逆操作専用）。
+pub struct InsertMaterial {
+    pub index: usize,
+    pub old: squid_n_core::model::Material,
+}
+
+impl EditCommand for InsertMaterial {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        if self.index > model.materials.len() {
+            return Box::new(Noop);
+        }
+        let id = MaterialId(self.index as u32);
+        shift_material_ids(model, |mid| {
+            if mid.0 >= id.0 {
+                mid.0 += 1;
+            }
+        });
+        let mut mat = self.old.clone();
+        mat.id = id;
+        model.materials.insert(self.index, mat);
+        Box::new(DeleteMaterial { id })
+    }
+
+    fn label(&self) -> &str {
+        "材料削除の取り消し"
+    }
+}
+
+/// モデル内の全ての `MaterialId` 参照（材料自身の ID を含む）に `f` を適用する。
+fn shift_material_ids(model: &mut Model, mut f: impl FnMut(&mut MaterialId)) {
+    for mat in &mut model.materials {
+        f(&mut mat.id);
+    }
+    for elem in &mut model.elements {
+        if let Some(mid) = &mut elem.material {
+            f(mid);
+        }
+    }
+}
+
+/// 編集対象の材料プロパティ。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MaterialField {
+    Young,
+    Poisson,
+    Density,
+    Fc,
+    Fy,
+}
+
+/// 材料プロパティ変更（E・ポアソン比・密度・Fc・Fy）。
+pub struct SetMaterialField {
+    pub id: MaterialId,
+    pub field: MaterialField,
+    pub value: Option<f64>,
+}
+
+impl EditCommand for SetMaterialField {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        let idx = self.id.index();
+        if idx >= model.materials.len() || model.materials[idx].id != self.id {
+            return Box::new(Noop);
+        }
+        let mat = &mut model.materials[idx];
+        let old = match self.field {
+            MaterialField::Young => {
+                let old = Some(mat.young);
+                mat.young = self.value.unwrap_or(mat.young);
+                old
+            }
+            MaterialField::Poisson => {
+                let old = Some(mat.poisson);
+                mat.poisson = self.value.unwrap_or(mat.poisson);
+                old
+            }
+            MaterialField::Density => {
+                let old = Some(mat.density);
+                mat.density = self.value.unwrap_or(mat.density);
+                old
+            }
+            MaterialField::Fc => std::mem::replace(&mut mat.fc, self.value),
+            MaterialField::Fy => std::mem::replace(&mut mat.fy, self.value),
+        };
+        Box::new(SetMaterialField {
+            id: self.id,
+            field: self.field,
+            value: old,
+        })
+    }
+
+    fn label(&self) -> &str {
+        "材料プロパティ変更"
+    }
+}
+
+/// 材料名変更。
+pub struct SetMaterialName {
+    pub id: MaterialId,
+    pub name: String,
+}
+
+impl EditCommand for SetMaterialName {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        let idx = self.id.index();
+        if idx >= model.materials.len() || model.materials[idx].id != self.id {
+            return Box::new(Noop);
+        }
+        let old = std::mem::replace(&mut model.materials[idx].name, self.name.clone());
+        Box::new(SetMaterialName {
+            id: self.id,
+            name: old,
+        })
+    }
+
+    fn label(&self) -> &str {
+        "材料名変更"
+    }
+}
+
+/// 荷重ケース追加。末尾に `LoadCaseId(len)` で追加する。逆操作は荷重ケース削除。
+pub struct AddLoadCase {
+    pub name: String,
+}
+
+impl EditCommand for AddLoadCase {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        let new_id = LoadCaseId(model.load_cases.len() as u32);
+        model.load_cases.push(squid_n_core::model::LoadCase {
+            id: new_id,
+            name: self.name.clone(),
+            nodal: Vec::new(),
+            member: Vec::new(),
+        });
+        Box::new(DeleteLoadCase { id: new_id })
+    }
+
+    fn label(&self) -> &str {
+        "荷重ケース追加"
+    }
+}
+
+/// 荷重ケース削除（中身の節点荷重・部材荷重ごと削除し、undo で復元する）。
+/// 荷重組合せから参照中のケースは Noop。
+/// ID＝配列インデックスの不変条件を保つため、後続のケース ID と組合せからの参照を繰り上げる。
+pub struct DeleteLoadCase {
+    pub id: LoadCaseId,
+}
+
+impl EditCommand for DeleteLoadCase {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        let idx = self.id.index();
+        if idx >= model.load_cases.len() || model.load_cases[idx].id != self.id {
+            return Box::new(Noop);
+        }
+        if model
+            .combinations
+            .iter()
+            .any(|c| c.terms.iter().any(|(lc, _)| *lc == self.id))
+        {
+            return Box::new(Noop);
+        }
+        let removed = model.load_cases.remove(idx);
+        shift_load_case_ids(model, |lcid| {
+            if lcid.0 > self.id.0 {
+                lcid.0 -= 1;
+            }
+        });
+        Box::new(InsertLoadCase {
+            index: idx,
+            old: removed,
+        })
+    }
+
+    fn label(&self) -> &str {
+        "荷重ケース削除"
+    }
+}
+
+/// 指定インデックスへ荷重ケースを再挿入する（[`DeleteLoadCase`] の逆操作専用）。
+pub struct InsertLoadCase {
+    pub index: usize,
+    pub old: squid_n_core::model::LoadCase,
+}
+
+impl EditCommand for InsertLoadCase {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        if self.index > model.load_cases.len() {
+            return Box::new(Noop);
+        }
+        let id = LoadCaseId(self.index as u32);
+        shift_load_case_ids(model, |lcid| {
+            if lcid.0 >= id.0 {
+                lcid.0 += 1;
+            }
+        });
+        let mut lc = self.old.clone();
+        lc.id = id;
+        model.load_cases.insert(self.index, lc);
+        Box::new(DeleteLoadCase { id })
+    }
+
+    fn label(&self) -> &str {
+        "荷重ケース削除の取り消し"
+    }
+}
+
+/// モデル内の全ての `LoadCaseId` 参照（ケース自身の ID を含む）に `f` を適用する。
+fn shift_load_case_ids(model: &mut Model, mut f: impl FnMut(&mut LoadCaseId)) {
+    for lc in &mut model.load_cases {
+        f(&mut lc.id);
+    }
+    for combo in &mut model.combinations {
+        for (lcid, _) in &mut combo.terms {
+            f(lcid);
+        }
+    }
+}
+
+/// 階定義の一括適用（階自動生成の結果を反映する）。
+///
+/// `model.stories`・各節点の所属階・剛床拘束(`Constraint::RigidDiaphragm`)を
+/// まとめて差し替える。既存の RigidDiaphragm 拘束は除去し、Mpc / RigidLink は
+/// 保持する。逆操作は差し替え前の状態の復元。
+pub struct ApplyStories {
+    pub stories: Vec<squid_n_core::model::Story>,
+    /// `model.nodes` と同順の所属階。長さが合わない分は無視する。
+    pub node_story: Vec<Option<squid_n_core::ids::StoryId>>,
+    /// 追加する剛床拘束（既存の RigidDiaphragm と置換）。
+    pub constraints: Vec<squid_n_core::model::Constraint>,
+}
+
+impl EditCommand for ApplyStories {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        use squid_n_core::model::Constraint;
+        let old_stories = std::mem::replace(&mut model.stories, self.stories.clone());
+        let old_node_story: Vec<Option<squid_n_core::ids::StoryId>> =
+            model.nodes.iter().map(|n| n.story).collect();
+        for (node, st) in model.nodes.iter_mut().zip(self.node_story.iter()) {
+            node.story = *st;
+        }
+        // RigidDiaphragm のみ差し替え、それ以外の拘束は保持
+        let old_constraints = model.constraints.clone();
+        model
+            .constraints
+            .retain(|c| !matches!(c, Constraint::RigidDiaphragm { .. }));
+        model.constraints.extend(self.constraints.iter().cloned());
+        Box::new(RestoreStories {
+            stories: old_stories,
+            node_story: old_node_story,
+            constraints: old_constraints,
+        })
+    }
+
+    fn label(&self) -> &str {
+        "階定義の適用"
+    }
+}
+
+/// [`ApplyStories`] の逆操作。拘束リストを丸ごと復元する。
+pub struct RestoreStories {
+    pub stories: Vec<squid_n_core::model::Story>,
+    pub node_story: Vec<Option<squid_n_core::ids::StoryId>>,
+    pub constraints: Vec<squid_n_core::model::Constraint>,
+}
+
+impl EditCommand for RestoreStories {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        let new_stories = std::mem::replace(&mut model.stories, self.stories.clone());
+        let new_node_story: Vec<Option<squid_n_core::ids::StoryId>> =
+            model.nodes.iter().map(|n| n.story).collect();
+        for (node, st) in model.nodes.iter_mut().zip(self.node_story.iter()) {
+            node.story = *st;
+        }
+        let new_constraints = std::mem::replace(&mut model.constraints, self.constraints.clone());
+        Box::new(RestoreStories {
+            stories: new_stories,
+            node_story: new_node_story,
+            constraints: new_constraints,
+        })
+    }
+
+    fn label(&self) -> &str {
+        "階定義の復元"
     }
 }
 
@@ -1358,5 +1821,254 @@ mod tests {
         stack.run(&mut model, Box::new(cmd));
         assert!(stack.can_undo());
         stack.undo(&mut model);
+    }
+
+    /// 2 節点 + 部材 2 本のモデル（部材削除・再採番テスト用）。
+    fn two_member_model() -> Model {
+        let mut model = empty_model();
+        for (i, x) in [0.0, 1000.0, 2000.0].iter().enumerate() {
+            model.nodes.push(Node {
+                id: NodeId(i as u32),
+                coord: [*x, 0.0, 0.0],
+                restraint: Dof6Mask::FREE,
+                mass: None,
+                story: None,
+            });
+        }
+        for i in 0..2u32 {
+            model.elements.push(ElementData {
+                id: ElemId(i),
+                kind: ElementKind::Beam,
+                nodes: smallvec![NodeId(i), NodeId(i + 1)],
+                section: None,
+                material: None,
+                local_axis: LocalAxis {
+                    ref_vector: [1.0, 0.0, 0.0],
+                },
+                end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+                force_regime: ForceRegime::Auto,
+                rigid_zone: Default::default(),
+            });
+        }
+        model
+    }
+
+    #[test]
+    fn test_delete_member_middle_renumbers_and_roundtrips() {
+        use squid_n_core::ids::LoadCaseId;
+        use squid_n_core::model::{LoadCase, MemberLoad, MemberLoadKind};
+        let mut model = two_member_model();
+        // 両方の部材に部材荷重を付ける
+        model.load_cases.push(LoadCase {
+            id: LoadCaseId(0),
+            name: "lc".into(),
+            nodal: vec![],
+            member: vec![
+                MemberLoad {
+                    elem: ElemId(0),
+                    dir: [0.0, 0.0, -1.0],
+                    kind: MemberLoadKind::Point { a: 500.0, p: 1.0 },
+                },
+                MemberLoad {
+                    elem: ElemId(1),
+                    dir: [0.0, 0.0, -1.0],
+                    kind: MemberLoadKind::Point { a: 500.0, p: 2.0 },
+                },
+            ],
+        });
+        let before = model.clone();
+        let mut stack = UndoStack::new();
+
+        // 先頭（中間）の部材を削除 → 後続 ID が繰り上がり、関連荷重も消える
+        stack.run(&mut model, Box::new(DeleteMember { id: ElemId(0) }));
+        assert_eq!(model.elements.len(), 1);
+        assert_eq!(model.elements[0].id, ElemId(0));
+        assert!(model.validate().is_ok());
+        assert_eq!(model.load_cases[0].member.len(), 1);
+        // 残った荷重は旧 ElemId(1) → 新 ElemId(0) を指す
+        assert_eq!(model.load_cases[0].member[0].elem, ElemId(0));
+
+        // undo で完全復元
+        stack.undo(&mut model);
+        assert!(model.eq_ignoring_dofmap(&before));
+        assert!(model.validate().is_ok());
+    }
+
+    #[test]
+    fn test_delete_section_in_use_is_noop_and_renumbers() {
+        use squid_n_core::model::Section;
+        let mut model = two_member_model();
+        for i in 0..2u32 {
+            model.sections.push(Section {
+                id: SectionId(i),
+                name: format!("S{}", i),
+                area: 100.0,
+                iy: 1.0,
+                iz: 1.0,
+                j: 1.0,
+                depth: 10.0,
+                width: 10.0,
+                as_y: 80.0,
+                as_z: 80.0,
+                panel_thickness: None,
+                thickness: None,
+            });
+        }
+        // 部材 0 に断面 1 を割当（断面 0 は未使用）
+        model.elements[0].section = Some(SectionId(1));
+        let mut stack = UndoStack::new();
+
+        // 使用中の断面 1 は削除できない
+        stack.run(&mut model, Box::new(DeleteSection { id: SectionId(1) }));
+        assert_eq!(model.sections.len(), 2);
+
+        // 未使用の断面 0 は削除でき、断面 1 → 0 に繰り上がり参照も追随
+        let before = model.clone();
+        stack.run(&mut model, Box::new(DeleteSection { id: SectionId(0) }));
+        assert_eq!(model.sections.len(), 1);
+        assert_eq!(model.sections[0].id, SectionId(0));
+        assert_eq!(model.elements[0].section, Some(SectionId(0)));
+        assert!(model.validate().is_ok());
+
+        stack.undo(&mut model);
+        assert!(model.eq_ignoring_dofmap(&before));
+    }
+
+    #[test]
+    fn test_add_delete_material_roundtrip() {
+        let mut model = empty_model();
+        let mut stack = UndoStack::new();
+        stack.run(
+            &mut model,
+            Box::new(AddMaterial {
+                name: "SN400B".into(),
+                young: 205000.0,
+                poisson: 0.3,
+                density: 7.85e-9,
+                fc: None,
+                fy: Some(235.0),
+            }),
+        );
+        assert_eq!(model.materials.len(), 1);
+        assert_eq!(model.materials[0].id, MaterialId(0));
+        assert!(model.validate().is_ok());
+
+        stack.undo(&mut model);
+        assert_eq!(model.materials.len(), 0);
+        stack.redo(&mut model);
+        assert_eq!(model.materials.len(), 1);
+    }
+
+    #[test]
+    fn test_delete_material_in_use_is_noop() {
+        let mut model = two_member_model();
+        let mut stack = UndoStack::new();
+        stack.run(
+            &mut model,
+            Box::new(AddMaterial {
+                name: "SN400B".into(),
+                young: 205000.0,
+                poisson: 0.3,
+                density: 7.85e-9,
+                fc: None,
+                fy: Some(235.0),
+            }),
+        );
+        model.elements[0].material = Some(MaterialId(0));
+        stack.run(&mut model, Box::new(DeleteMaterial { id: MaterialId(0) }));
+        assert_eq!(model.materials.len(), 1, "使用中の材料は削除できない");
+    }
+
+    #[test]
+    fn test_delete_material_middle_renumbers() {
+        let mut model = two_member_model();
+        let mut stack = UndoStack::new();
+        for name in ["A", "B"] {
+            stack.run(
+                &mut model,
+                Box::new(AddMaterial {
+                    name: name.into(),
+                    young: 1.0,
+                    poisson: 0.3,
+                    density: 0.0,
+                    fc: None,
+                    fy: None,
+                }),
+            );
+        }
+        model.elements[0].material = Some(MaterialId(1));
+        let before = model.clone();
+        stack.run(&mut model, Box::new(DeleteMaterial { id: MaterialId(0) }));
+        assert_eq!(model.materials.len(), 1);
+        assert_eq!(model.materials[0].name, "B");
+        assert_eq!(model.elements[0].material, Some(MaterialId(0)));
+        assert!(model.validate().is_ok());
+        stack.undo(&mut model);
+        assert!(model.eq_ignoring_dofmap(&before));
+    }
+
+    #[test]
+    fn test_set_material_field_roundtrip() {
+        let mut model = empty_model();
+        let mut stack = UndoStack::new();
+        stack.run(
+            &mut model,
+            Box::new(AddMaterial {
+                name: "Fc21".into(),
+                young: 21500.0,
+                poisson: 0.2,
+                density: 2.3e-9,
+                fc: Some(21.0),
+                fy: None,
+            }),
+        );
+        stack.run(
+            &mut model,
+            Box::new(SetMaterialField {
+                id: MaterialId(0),
+                field: MaterialField::Fc,
+                value: Some(24.0),
+            }),
+        );
+        assert_eq!(model.materials[0].fc, Some(24.0));
+        stack.undo(&mut model);
+        assert_eq!(model.materials[0].fc, Some(21.0));
+    }
+
+    #[test]
+    fn test_add_delete_load_case_roundtrip() {
+        use squid_n_core::ids::LoadCaseId;
+        let mut model = empty_model();
+        let mut stack = UndoStack::new();
+        stack.run(&mut model, Box::new(AddLoadCase { name: "DL".into() }));
+        stack.run(&mut model, Box::new(AddLoadCase { name: "LL".into() }));
+        assert_eq!(model.load_cases.len(), 2);
+        assert_eq!(model.load_cases[0].id, LoadCaseId(0));
+        assert_eq!(model.load_cases[1].id, LoadCaseId(1));
+
+        // 先頭を削除 → 後続 ID 繰り上がり
+        let before = model.clone();
+        stack.run(&mut model, Box::new(DeleteLoadCase { id: LoadCaseId(0) }));
+        assert_eq!(model.load_cases.len(), 1);
+        assert_eq!(model.load_cases[0].id, LoadCaseId(0));
+        assert_eq!(model.load_cases[0].name, "LL");
+
+        stack.undo(&mut model);
+        assert!(model.eq_ignoring_dofmap(&before));
+    }
+
+    #[test]
+    fn test_delete_load_case_referenced_by_combo_is_noop() {
+        use squid_n_core::ids::LoadCaseId;
+        use squid_n_core::model::LoadCombination;
+        let mut model = empty_model();
+        let mut stack = UndoStack::new();
+        stack.run(&mut model, Box::new(AddLoadCase { name: "DL".into() }));
+        model.combinations.push(LoadCombination {
+            name: "combo".into(),
+            terms: vec![(LoadCaseId(0), 1.0)],
+        });
+        stack.run(&mut model, Box::new(DeleteLoadCase { id: LoadCaseId(0) }));
+        assert_eq!(model.load_cases.len(), 1, "組合せ参照中のケースは削除不可");
     }
 }

@@ -6,7 +6,7 @@ license = "MIT"
 
 [features]
 default = []
-gui = ["egui", "eframe", "egui_extras", "egui_plot"]
+gui = ["egui", "eframe", "egui_extras", "egui_plot", "dep:rfd"]
 
 [[bin]]
 name = "squid-n"
@@ -21,8 +21,11 @@ squid-n-design-jp = { path = "../squid-n-design-jp" }
 squid-n-edit = { path = "../squid-n-edit" }
 squid-n-section = { path = "../squid-n-section" }
 squid-n-load = { path = "../squid-n-load" }
+squid-n-io = { path = "../squid-n-io" }
 egui = { workspace = true, optional = true }
 eframe = { workspace = true, optional = true }
 egui_extras = { workspace = true, optional = true }
 egui_plot = { workspace = true, optional = true }
 smallvec = { workspace = true }
+rfd = { version = "0.17", optional = true }
+squid-n-math = { version = "0.0.1", path = "../squid-n-math" }

@@ -1,11 +1,18 @@
 use crate::app::App;
 
+/// 時刻歴グラフの描画データ。`App::run_time_history` が
+/// ソルバーの `ResponseResult.history` から充填する。
 #[derive(Clone, Default)]
 pub struct TimeHistoryData {
     pub time: Vec<f64>,
+    /// 記録節点の X 方向相対変位 [mm]
     pub node_disp: Vec<f64>,
+    /// ベースシア(X) [N]
     pub story_shear: Vec<f64>,
+    /// 最上階の層間変形角 [rad]
     pub story_drift_angle: Vec<f64>,
+    /// 記録節点
+    pub node: Option<squid_n_core::ids::NodeId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -16,43 +23,30 @@ pub enum TimeHistorySource {
     StoryDriftAngle,
 }
 
-pub fn dummy_time_history() -> TimeHistoryData {
-    let n = 200;
-    let dt = 0.01;
-    TimeHistoryData {
-        time: (0..n).map(|i| i as f64 * dt).collect(),
-        node_disp: (0..n)
-            .map(|i| {
-                let t = i as f64 * dt;
-                (t * 10.0).sin() * (-t * 0.5).exp() * 10.0
-            })
-            .collect(),
-        story_shear: (0..n)
-            .map(|i| {
-                let t = i as f64 * dt;
-                (t * 8.0).sin() * (-t * 0.3).exp() * 5000.0
-            })
-            .collect(),
-        story_drift_angle: (0..n)
-            .map(|i| {
-                let t = i as f64 * dt;
-                (t * 12.0).sin() * (-t * 0.4).exp() * 0.005
-            })
-            .collect(),
-    }
-}
-
 pub fn time_history_panel(ui: &mut egui::Ui, app: &mut App) {
+    if app.time_history_data.time.is_empty() {
+        ui.colored_label(
+            crate::theme::GRAY_600,
+            "時刻歴応答データがありません。解析タブの「時刻歴」から実行してください。",
+        );
+        return;
+    }
+
     let mut source = app.time_history_source;
 
     ui.horizontal(|ui| {
         ui.label("表示項目:");
-        ui.selectable_value(&mut source, TimeHistorySource::NodeDisp, "節点変位");
-        ui.selectable_value(&mut source, TimeHistorySource::StoryShear, "層せん断");
+        let node_label = app
+            .time_history_data
+            .node
+            .map(|n| format!("節点 N{} 変位", n.0))
+            .unwrap_or_else(|| "節点変位".to_string());
+        ui.selectable_value(&mut source, TimeHistorySource::NodeDisp, node_label);
+        ui.selectable_value(&mut source, TimeHistorySource::StoryShear, "ベースシア");
         ui.selectable_value(
             &mut source,
             TimeHistorySource::StoryDriftAngle,
-            "層間変形角",
+            "層間変形角(最上階)",
         );
     });
 
@@ -63,33 +57,28 @@ pub fn time_history_panel(ui: &mut egui::Ui, app: &mut App) {
     }
 
     let data = &app.time_history_data;
-    let values: Vec<[f64; 2]> = match source {
-        TimeHistorySource::NodeDisp => data
-            .time
-            .iter()
-            .zip(data.node_disp.iter())
-            .map(|(&t, &v)| [t, v])
-            .collect(),
-        TimeHistorySource::StoryShear => data
-            .time
-            .iter()
-            .zip(data.story_shear.iter())
-            .map(|(&t, &v)| [t, v])
-            .collect(),
-        TimeHistorySource::StoryDriftAngle => data
-            .time
-            .iter()
-            .zip(data.story_drift_angle.iter())
-            .map(|(&t, &v)| [t, v])
-            .collect(),
+    let series = match source {
+        TimeHistorySource::NodeDisp => &data.node_disp,
+        TimeHistorySource::StoryShear => &data.story_shear,
+        TimeHistorySource::StoryDriftAngle => &data.story_drift_angle,
     };
+    let values: Vec<[f64; 2]> = data
+        .time
+        .iter()
+        .zip(series.iter())
+        .map(|(&t, &v)| [t, v])
+        .collect();
 
     // §3 データビジュアライゼーション配色（系列ごとに弁別可能な 3 色）
     let (ylabel, line_color) = match source {
         TimeHistorySource::NodeDisp => ("変位 [mm]", crate::theme::DATA_BLUE),
-        TimeHistorySource::StoryShear => ("層せん断 [N]", crate::theme::PARETO_RED),
+        TimeHistorySource::StoryShear => ("ベースシア [N]", crate::theme::PARETO_RED),
         TimeHistorySource::StoryDriftAngle => ("層間変形角 [rad]", crate::theme::GOOD_GREEN),
     };
+
+    // ピーク値サマリ
+    let peak = series.iter().cloned().fold(0.0f64, |m, v| m.max(v.abs()));
+    ui.label(format!("最大絶対値: {:.4e}", peak));
 
     let plot = egui_plot::Plot::new("time_history_plot")
         .legend(egui_plot::Legend::default())
@@ -105,17 +94,16 @@ pub fn time_history_panel(ui: &mut egui::Ui, app: &mut App) {
 
     // カーソル位置の値を表示
     if let Some(pointer) = plot.response.hover_pos() {
-        let max_t = data.time.last().copied().unwrap_or(1.0);
         let pointer_value = plot.transform.value_from_position(pointer);
-        let idx_time = pointer_value.x.max(0.0).min(max_t);
-        let idx_floor = idx_time as usize;
-        if idx_floor < data.time.len() {
-            let t = data.time[idx_floor];
-            let val = match source {
-                TimeHistorySource::NodeDisp => data.node_disp[idx_floor],
-                TimeHistorySource::StoryShear => data.story_shear[idx_floor],
-                TimeHistorySource::StoryDriftAngle => data.story_drift_angle[idx_floor],
-            };
+        let dt = if data.time.len() >= 2 {
+            (data.time[data.time.len() - 1] - data.time[0]) / (data.time.len() - 1) as f64
+        } else {
+            1.0
+        };
+        let idx = ((pointer_value.x - data.time[0]) / dt).round().max(0.0) as usize;
+        if idx < data.time.len() && idx < series.len() {
+            let t = data.time[idx];
+            let val = series[idx];
             ui.horizontal(|ui| {
                 ui.label(format!("t = {:.3} s", t));
                 ui.separator();

@@ -58,6 +58,10 @@ jobs:
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # quick-xml の DoS 脆弱性。直接依存は 0.41 に更新済みだが、
+          # wayland-scanner / zbus_xml（eframe 経由の推移的依存）が
+          # まだ quick-xml ^0.39 を要求しているため、上流の更新待ち。
+          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
 
   dependency-check:
     name: 依存性チェック

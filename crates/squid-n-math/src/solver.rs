@@ -15,6 +15,13 @@ pub enum SolveError {
     DimMismatch { k: usize, rhs: usize },
     #[error("faer error: {0}")]
     Backend(String),
+    /// 入力モデル起因のエラー（拘束不足・断面/材料未割当など）。
+    /// メッセージはユーザー向け診断文（日本語）を想定する。
+    #[error("{0}")]
+    InvalidInput(String),
+    /// 反復法・固有値解析が規定回数内に収束しなかった。
+    #[error("収束しませんでした: {0}")]
+    NonConvergence(String),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -30,6 +37,6 @@ pub fn make_solver(backend: SolverBackend) -> Box<dyn LinearSolver> {
         SolverBackend::IterativePcg { tol, max_iter } => {
             Box::new(crate::pcg::PcgSolver::new(tol, max_iter))
         }
-        SolverBackend::DirectSparseLu => todo!("DirectSparseLu not yet implemented"),
+        SolverBackend::DirectSparseLu => Box::new(crate::lu::LuSolver::default()),
     }
 }
