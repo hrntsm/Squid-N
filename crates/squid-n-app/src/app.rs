@@ -26,6 +26,7 @@ pub enum ModelTab {
     Members,
     Sections,
     Materials,
+    Slabs,
 }
 
 /// 結果タブ内の切替（3D 各種図・時刻歴グラフ・プッシュオーバー曲線）。
@@ -126,6 +127,28 @@ pub struct AnalysisSettings {
     pub th_duration: f64,
     pub th_period: f64,
     pub th_amp: f64,
+    /// 時刻歴の入力方向(サンプル波・CSV波形の作用方向)
+    pub th_dir: SeismicDir,
+    /// 時刻歴の減衰モデル
+    pub th_damping_model: ThDampingModel,
+    /// Rayleigh の2次モード減衰比(1次は th_damping を使用)
+    pub th_h2: f64,
+    /// 時刻歴の積分法
+    pub th_integrator: ThIntegrator,
+}
+
+/// 時刻歴の減衰モデル選択（UI 用）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThDampingModel {
+    StiffnessProportional,
+    Rayleigh,
+}
+
+/// 時刻歴の積分法選択（UI 用）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThIntegrator {
+    NewmarkBeta,
+    HhtAlpha,
 }
 
 impl Default for AnalysisSettings {
@@ -145,8 +168,29 @@ impl Default for AnalysisSettings {
             th_duration: 10.0,
             th_period: 0.5,
             th_amp: 1000.0,
+            th_dir: SeismicDir::X,
+            th_damping_model: ThDampingModel::StiffnessProportional,
+            th_h2: 0.02,
+            th_integrator: ThIntegrator::NewmarkBeta,
         }
     }
+}
+
+/// バックグラウンド解析ジョブ（プッシュオーバー／時刻歴）が送る結果。
+pub enum JobResult {
+    Pushover(Result<squid_n_solver::pushover::PushoverResult, String>),
+    TimeHistory(Result<squid_n_solver::timehistory::ResponseResult, String>),
+}
+
+/// バックグラウンド解析ジョブ。重い解析(プッシュオーバー・時刻歴)を
+/// UI スレッドから逃がす(P8 §5)。結果は poll_job で受け取り適用する。
+pub struct AnalysisJob {
+    pub label: &'static str,
+    pub started: std::time::SystemTime,
+    rx: std::sync::mpsc::Receiver<JobResult>,
+    /// ジョブ成功時に自動遷移する結果タブ・表示切替（GUI 専用）。
+    #[cfg(feature = "gui")]
+    pub jump_on_success: Option<(Tab, ResultsView)>,
 }
 
 pub struct App {
@@ -161,6 +205,9 @@ pub struct App {
     pub last_static: Option<StaticKey>,
     /// 解析実行中のエラーメッセージ
     pub last_error: Option<String>,
+    /// 実行中のバックグラウンド解析ジョブ（プッシュオーバー・時刻歴、P8 §5）。
+    /// 完了は `poll_job` で検知して結果を適用する。
+    pub job: Option<AnalysisJob>,
     /// 節点座標の編集バッファ（model.nodes に同期）
     pub node_edit: Vec<[String; 3]>,
     /// 節点追加フォームの入力中座標（境界条件の編集とは別の独立 UI）
@@ -232,6 +279,17 @@ pub struct App {
     /// 荷重タブ「荷重組合せ」自動生成 UI のドラフト状態
     #[cfg(feature = "gui")]
     pub combo_draft: ComboDraft,
+    /// モデルタブ「スラブ」追加フォームのドラフト状態
+    #[cfg(feature = "gui")]
+    pub slab_draft: crate::tables::slabs::SlabDraft,
+    /// 解析タブ「階の定義」W[kN] 編集バッファ（kN、model.stories と同じ並び）。
+    /// ドラッグ／フォーカス中でない行のみ model 値で上書きする。
+    #[cfg(feature = "gui")]
+    pub story_weight_edit: Vec<f64>,
+    /// `story_weight_edit` の各行が現在操作中（ドラッグ中またはフォーカス中）か。
+    /// true の間は model 値での上書きを止めて入力中の値を保つ。
+    #[cfg(feature = "gui")]
+    pub story_weight_active: Vec<bool>,
 }
 
 /// 荷重組合せ自動生成 UI のドラフト（GUI 専用）。DL/LL は必須、地震X/Y・積雪は任意。
@@ -256,6 +314,7 @@ impl Default for App {
             design_term: LoadTerm::Long,
             last_static: None,
             last_error: None,
+            job: None,
             node_edit: Vec::new(),
             node_draft: ["0".to_string(), "0".to_string(), "0".to_string()],
             pending_duplicate_node_coord: None,
@@ -300,6 +359,12 @@ impl Default for App {
             analysis_combo_idx: 0,
             #[cfg(feature = "gui")]
             combo_draft: ComboDraft::default(),
+            #[cfg(feature = "gui")]
+            slab_draft: crate::tables::slabs::SlabDraft::default(),
+            #[cfg(feature = "gui")]
+            story_weight_edit: Vec::new(),
+            #[cfg(feature = "gui")]
+            story_weight_active: Vec::new(),
         }
     }
 }
@@ -367,9 +432,9 @@ impl App {
         self.nav = Navigator::default();
         self.last_static = None;
         self.last_error = None;
-        self.beam_loads.clear();
         self.staleness = Staleness::default();
         self.sync_node_edit();
+        self.refresh_beam_loads();
     }
 
     /// プロジェクトを指定パスへ保存する。成功時は project_path と未保存フラグを更新。
@@ -684,19 +749,19 @@ impl App {
         }
     }
 
-    /// プッシュオーバー解析を実行する。モデルは複製の上で解析する
+    /// プッシュオーバー解析の純粋計算部分。所有権を取り `&self` を使わないため、
+    /// バックグラウンドジョブ（`start_pushover_job`）からも呼び出せる。
+    /// モデルは呼び出し側で複製したものを渡す
     /// （非線形状態の副作用を GUI 上のモデルへ残さないため）。
-    pub fn run_pushover(&mut self) {
-        self.last_error = None;
-        if let Err(e) = Analysis::prepare(&self.model) {
-            self.last_error = Some(format!("解析準備エラー: {}", e));
-            return;
-        }
-        let mut work = self.model.clone();
+    fn compute_pushover(
+        model: squid_n_core::model::Model,
+        cfg: AnalysisSettings,
+    ) -> Result<squid_n_solver::pushover::PushoverResult, String> {
+        Analysis::prepare(&model).map_err(|e| format!("解析準備エラー: {}", e))?;
+        let mut work = model;
         let dofmap = squid_n_core::dof::DofMap::build(&work);
         let reducer = squid_n_solver::constraint::Reducer::build(&work, &dofmap);
-        let cfg = &self.analysis_cfg;
-        match squid_n_solver::pushover::pushover_analysis(
+        squid_n_solver::pushover::pushover_analysis(
             &mut work,
             &dofmap,
             &reducer,
@@ -706,55 +771,143 @@ impl App {
             false,
             false,
             0.0,
-        ) {
-            Ok(res) => {
+        )
+        .map_err(|e| format!("プッシュオーバー解析エラー: {}", e))
+    }
+
+    /// `compute_pushover` の結果を適用する（bundle 格納・最終実行時刻更新・エラー設定）。
+    fn apply_pushover_result(
+        &mut self,
+        res: Result<squid_n_solver::pushover::PushoverResult, String>,
+    ) {
+        match res {
+            Ok(result) => {
                 let mut bundle = self.results.take().unwrap_or_default();
-                bundle.pushover = Some(res);
+                bundle.pushover = Some(result);
                 self.results = Some(bundle);
                 self.staleness.last_run = Some(SystemTime::now());
+                self.last_error = None;
             }
-            Err(e) => self.last_error = Some(format!("プッシュオーバー解析エラー: {}", e)),
+            Err(e) => self.last_error = Some(e),
         }
     }
 
-    /// 線形時刻歴応答解析を実行する。減衰は 1 次固有周期に対する剛性比例。
-    pub fn run_time_history(&mut self, wave: squid_n_solver::timehistory::GroundMotion) {
+    /// プッシュオーバー解析を実行する。モデルは複製の上で解析する
+    /// （非線形状態の副作用を GUI 上のモデルへ残さないため）。
+    pub fn run_pushover(&mut self) {
         self.last_error = None;
-        let analysis = match Analysis::prepare(&self.model) {
-            Ok(a) => a,
-            Err(e) => {
-                self.last_error = Some(format!("解析準備エラー: {}", e));
-                return;
-            }
-        };
-        // 1 次固有円振動数（減衰の基準）
-        let omega1 = match analysis.eigen(1) {
-            Ok(modal) => match modal.omega2.first() {
-                Some(&w2) if w2 > 0.0 => w2.sqrt(),
-                _ => {
-                    self.last_error = Some("固有値が得られず減衰を設定できません。".to_string());
-                    return;
+        let res = Self::compute_pushover(self.model.clone(), self.analysis_cfg);
+        self.apply_pushover_result(res);
+    }
+
+    /// プッシュオーバー解析をバックグラウンドスレッドで実行する（P8 §5、残課題1）。
+    /// UI スレッドをブロックしないよう重い解析を逃がす。
+    /// 既にジョブが実行中の場合は何もしない（last_error に案内文を設定）。
+    pub fn start_pushover_job(&mut self) {
+        if self.job.is_some() {
+            self.last_error = Some("解析実行中です".to_string());
+            return;
+        }
+        self.last_error = None;
+        let model = self.model.clone();
+        let cfg = self.analysis_cfg;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::compute_pushover(model, cfg)
+            }))
+            .unwrap_or_else(|_| {
+                Err(
+                    "解析スレッドが異常終了しました（プログラムの不具合の可能性があります）。"
+                        .to_string(),
+                )
+            });
+            let _ = tx.send(JobResult::Pushover(result));
+        });
+        self.job = Some(AnalysisJob {
+            label: "プッシュオーバー",
+            started: std::time::SystemTime::now(),
+            rx,
+            #[cfg(feature = "gui")]
+            jump_on_success: Some((Tab::Results, ResultsView::Pushover)),
+        });
+    }
+
+    /// 線形時刻歴応答解析の純粋計算部分。所有権を取り `&self` を使わないため、
+    /// バックグラウンドジョブ（`start_time_history_job`）からも呼び出せる。
+    /// 減衰モデル・積分法は `cfg` に従う（剛性比例／Rayleigh、Newmark-β／HHT-α）。
+    fn compute_time_history(
+        model: squid_n_core::model::Model,
+        cfg: AnalysisSettings,
+        wave: squid_n_solver::timehistory::GroundMotion,
+    ) -> Result<squid_n_solver::timehistory::ResponseResult, String> {
+        let analysis = Analysis::prepare(&model).map_err(|e| format!("解析準備エラー: {}", e))?;
+        let damping = match cfg.th_damping_model {
+            ThDampingModel::StiffnessProportional => {
+                // 1 次固有円振動数（減衰の基準）
+                let omega1 = match analysis.eigen(1) {
+                    Ok(modal) => match modal.omega2.first() {
+                        Some(&w2) if w2 > 0.0 => w2.sqrt(),
+                        _ => return Err("固有値が得られず減衰を設定できません。".to_string()),
+                    },
+                    Err(e) => return Err(format!("固有値解析エラー: {}", e)),
+                };
+                squid_n_solver::damping::Damping::StiffnessProportional {
+                    h: cfg.th_damping,
+                    omega: omega1,
+                    basis: squid_n_solver::damping::StiffnessKind::Initial,
                 }
-            },
-            Err(e) => {
-                self.last_error = Some(format!("固有値解析エラー: {}", e));
-                return;
+            }
+            ThDampingModel::Rayleigh => {
+                // 1次・2次の固有円振動数（Rayleigh 減衰の基準）
+                let modal = match analysis.eigen(2) {
+                    Ok(m) => m,
+                    Err(e) => return Err(format!("固有値解析エラー: {}", e)),
+                };
+                let (w1, w2) = match (modal.omega2.first(), modal.omega2.get(1)) {
+                    (Some(&a), Some(&b)) if a > 0.0 && b > 0.0 => (a.sqrt(), b.sqrt()),
+                    _ => {
+                        return Err(
+                            "Rayleigh 減衰には 2 次までの固有値が必要です（モード数を確保できませんでした）。"
+                                .to_string(),
+                        );
+                    }
+                };
+                squid_n_solver::damping::Damping::Rayleigh {
+                    h1: cfg.th_damping,
+                    w1,
+                    h2: cfg.th_h2,
+                    w2,
+                }
             }
         };
-        let damping = squid_n_solver::damping::Damping::StiffnessProportional {
-            h: self.analysis_cfg.th_damping,
-            omega: omega1,
-            basis: squid_n_solver::damping::StiffnessKind::Initial,
+        let result = match cfg.th_integrator {
+            ThIntegrator::NewmarkBeta => {
+                let newmark = squid_n_solver::timehistory::NewmarkCfg::average_accel();
+                analysis.time_history(&wave, newmark, damping)
+            }
+            ThIntegrator::HhtAlpha => {
+                let hht = squid_n_solver::timehistory::HhtCfg::new(wave.dt);
+                analysis.time_history_hht(&wave, hht, damping)
+            }
         };
-        let newmark = squid_n_solver::timehistory::NewmarkCfg::average_accel();
-        match analysis.time_history(&wave, newmark, damping) {
+        result.map_err(|e| format!("時刻歴解析エラー: {}", e))
+    }
+
+    /// `compute_time_history` の結果を適用する
+    /// （bundle 格納・time_history_data 更新(gui)・最終実行時刻更新・エラー設定）。
+    fn apply_time_history_result(
+        &mut self,
+        res: Result<squid_n_solver::timehistory::ResponseResult, String>,
+    ) {
+        match res {
             Ok(res) => {
                 #[cfg(feature = "gui")]
                 {
                     self.time_history_data = crate::time_history_view::TimeHistoryData {
                         time: res.time.clone(),
-                        node_disp: res.history.node_disp_x.clone(),
-                        story_shear: res.history.base_shear_x.clone(),
+                        node_disp: res.history.node_disp.clone(),
+                        story_shear: res.history.base_shear.clone(),
                         story_drift_angle: res.history.top_drift_angle.clone(),
                         node: res.history.node,
                     };
@@ -763,29 +916,137 @@ impl App {
                 bundle.time_history = Some(res);
                 self.results = Some(bundle);
                 self.staleness.last_run = Some(SystemTime::now());
+                self.last_error = None;
             }
-            Err(e) => self.last_error = Some(format!("時刻歴解析エラー: {}", e)),
+            Err(e) => self.last_error = Some(e),
         }
     }
 
-    /// 正弦減衰のサンプル地震波を生成して時刻歴解析を実行する
-    /// （外部波形ファイルなしで機能を試せる導線）。
-    pub fn run_time_history_sample(&mut self) {
-        let cfg = &self.analysis_cfg;
+    /// 線形時刻歴応答解析を実行する。減衰モデル・積分法は `analysis_cfg` に従う
+    /// （剛性比例／Rayleigh、Newmark-β／HHT-α）。
+    pub fn run_time_history(&mut self, wave: squid_n_solver::timehistory::GroundMotion) {
+        self.last_error = None;
+        let res = Self::compute_time_history(self.model.clone(), self.analysis_cfg, wave);
+        self.apply_time_history_result(res);
+    }
+
+    /// 時刻歴応答解析をバックグラウンドスレッドで実行する（P8 §5、残課題1）。
+    /// UI スレッドをブロックしないよう重い解析を逃がす。
+    /// 既にジョブが実行中の場合は何もしない（last_error に案内文を設定）。
+    pub fn start_time_history_job(&mut self, wave: squid_n_solver::timehistory::GroundMotion) {
+        if self.job.is_some() {
+            self.last_error = Some("解析実行中です".to_string());
+            return;
+        }
+        self.last_error = None;
+        let model = self.model.clone();
+        let cfg = self.analysis_cfg;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::compute_time_history(model, cfg, wave)
+            }))
+            .unwrap_or_else(|_| {
+                Err(
+                    "解析スレッドが異常終了しました（プログラムの不具合の可能性があります）。"
+                        .to_string(),
+                )
+            });
+            let _ = tx.send(JobResult::TimeHistory(result));
+        });
+        self.job = Some(AnalysisJob {
+            label: "時刻歴応答",
+            started: std::time::SystemTime::now(),
+            rx,
+            #[cfg(feature = "gui")]
+            jump_on_success: Some((Tab::Results, ResultsView::TimeHistory)),
+        });
+    }
+
+    /// 実行中のジョブの完了を確認し、完了していれば結果を適用する。
+    /// 成功/失敗いずれかで結果を受信できた場合、またはスレッド異常終了時は
+    /// `job` を `None` に戻し `true` を返す。まだ実行中なら `false` を返す。
+    pub fn poll_job(&mut self) -> bool {
+        let recv = match &self.job {
+            Some(job) => job.rx.try_recv(),
+            None => return false,
+        };
+        match recv {
+            Ok(result) => {
+                #[cfg(feature = "gui")]
+                let jump = self.job.take().and_then(|j| j.jump_on_success);
+                #[cfg(not(feature = "gui"))]
+                {
+                    self.job = None;
+                }
+                match result {
+                    JobResult::Pushover(res) => self.apply_pushover_result(res),
+                    JobResult::TimeHistory(res) => self.apply_time_history_result(res),
+                }
+                #[cfg(feature = "gui")]
+                {
+                    if self.last_error.is_none() {
+                        if let Some((tab, view)) = jump {
+                            self.active_tab = tab;
+                            self.results_view = view;
+                        }
+                    }
+                }
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.job = None;
+                self.last_error = Some(
+                    "解析スレッドが異常終了しました（結果を受信できませんでした）。".to_string(),
+                );
+                true
+            }
+        }
+    }
+
+    /// 正弦減衰のサンプル地震波を `cfg` から組み立てる
+    /// （外部波形ファイルなしで機能を試せる導線。同期実行・ジョブ実行の双方で使う）。
+    fn sample_wave(cfg: &AnalysisSettings) -> squid_n_solver::timehistory::GroundMotion {
         let n = ((cfg.th_duration / cfg.th_dt).ceil() as usize).max(2);
         let omega = 2.0 * std::f64::consts::PI / cfg.th_period.max(1e-6);
-        let accel_x: Vec<f64> = (0..n)
+        let accel: Vec<f64> = (0..n)
             .map(|i| {
                 let t = i as f64 * cfg.th_dt;
                 cfg.th_amp * (omega * t).sin() * (-0.3 * t).exp()
             })
             .collect();
-        let wave = squid_n_solver::timehistory::GroundMotion {
-            dt: cfg.th_dt,
-            accel_x,
-            accel_y: None,
-        };
+        Self::build_ground_motion(cfg.th_dt, cfg.th_dir, accel)
+    }
+
+    /// 正弦減衰のサンプル地震波を生成して時刻歴解析を実行する（同期）。
+    pub fn run_time_history_sample(&mut self) {
+        let wave = Self::sample_wave(&self.analysis_cfg);
         self.run_time_history(wave);
+    }
+
+    /// 方向 `dir` に加速度列 `accel` を割り当てた `GroundMotion` を組み立てる
+    /// （X なら accel_x、Y なら accel_y に入れ、他方はゼロ列にする）。
+    fn build_ground_motion(
+        dt: f64,
+        dir: SeismicDir,
+        accel: Vec<f64>,
+    ) -> squid_n_solver::timehistory::GroundMotion {
+        match dir {
+            SeismicDir::X => squid_n_solver::timehistory::GroundMotion {
+                dt,
+                accel_x: accel,
+                accel_y: None,
+            },
+            SeismicDir::Y => {
+                let n = accel.len();
+                squid_n_solver::timehistory::GroundMotion {
+                    dt,
+                    accel_x: vec![0.0; n],
+                    accel_y: Some(accel),
+                }
+            }
+        }
     }
 
     /// T7: 解析結果の member_forces から検定結果を生成する。
@@ -839,6 +1100,40 @@ impl App {
             bundle.checks = checks;
         }
     }
+
+    /// 全スラブの床荷重を大梁へ分配し、辺インデックスを実部材IDへ対応付けて
+    /// `self.beam_loads` を更新する。対応する梁が無い辺の荷重は捨てる。
+    ///
+    /// `squid_n_load::floor::distribute_slab` が返す `BeamLoad.elem` は実部材ID
+    /// ではなく、スラブ境界の辺インデックス（`ElemId(i)`, i=0..4、辺 i は
+    /// `boundary[i]` → `boundary[(i+1)%4]`）である。ここでその節点対を両端に
+    /// 持つ `Beam` 要素を探し、実 ElemId に置き換える（ノード順は不問）。
+    pub fn refresh_beam_loads(&mut self) {
+        let mut beam_loads = Vec::new();
+        for slab in &self.model.slabs {
+            if slab.boundary.len() < 4 {
+                continue;
+            }
+            for mut bl in squid_n_load::floor::distribute_slab(&self.model, slab) {
+                let k = bl.elem.0 as usize;
+                if k >= 4 {
+                    continue;
+                }
+                let n0 = slab.boundary[k];
+                let n1 = slab.boundary[(k + 1) % 4];
+                let found = self.model.elements.iter().find(|e| {
+                    e.kind == squid_n_core::model::ElementKind::Beam
+                        && e.nodes.len() == 2
+                        && ((e.nodes[0] == n0 && e.nodes[1] == n1)
+                            || (e.nodes[0] == n1 && e.nodes[1] == n0))
+                });
+                let Some(elem) = found else { continue };
+                bl.elem = elem.id;
+                beam_loads.push(bl);
+            }
+        }
+        self.beam_loads = beam_loads;
+    }
 }
 
 /// 鋼材判定（Material.name に "S" で始まる JIS 鋼種名が含まれるか）。
@@ -859,6 +1154,14 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // バックグラウンド解析ジョブ（P8 §5）: 完了していれば結果を適用し、
+        // 実行中は完了検知のため再描画を要求し続ける。
+        if self.job.is_some() {
+            self.poll_job();
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
+
         // 上部ツールバー: ファイルメニュー + 工程タブ（自由遷移）+ Undo/Redo
         ui.horizontal(|ui| {
             ui.menu_button("ファイル", |ui| {
@@ -1316,6 +1619,7 @@ impl App {
                 ("部材", ModelTab::Members),
                 ("断面", ModelTab::Sections),
                 ("材料", ModelTab::Materials),
+                ("スラブ", ModelTab::Slabs),
             ];
             for (label, sub) in &subs {
                 let sel = self.model_tab == *sub;
@@ -1339,6 +1643,7 @@ impl App {
                 crate::section_editor::section_editor_panel(ui, self);
             }
             ModelTab::Materials => crate::tables::materials::materials_table(ui, self),
+            ModelTab::Slabs => crate::tables::slabs::slabs_table(ui, self),
         }
     }
 
@@ -1346,6 +1651,9 @@ impl App {
     fn analysis_tab_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("解析設定");
         ui.separator();
+
+        // バックグラウンドジョブ実行中は全解析ボタンを無効化する（P8 §5）。
+        let running = self.job.is_some();
 
         if let Some(when) = self.staleness.last_run {
             if let Ok(dur) = when.elapsed() {
@@ -1373,14 +1681,58 @@ impl App {
                     "未定義（地震静的・プッシュオーバーには階が必要です）",
                 );
             } else {
-                for s in &self.model.stories {
-                    ui.label(format!(
-                        "{}: 標高 {:.0} mm, 節点 {}, W = {:.1} kN",
-                        s.name,
-                        s.elevation,
-                        s.node_ids.len(),
-                        s.seismic_weight.unwrap_or(0.0) / 1000.0
-                    ));
+                // model.stories を借用したまま undo.run（model の可変借用）はできないため、
+                // 行データを先に複製してから描画・編集確定を行う。
+                let story_rows: Vec<(squid_n_core::ids::StoryId, String, f64, usize, Option<f64>)> =
+                    self.model
+                        .stories
+                        .iter()
+                        .map(|s| {
+                            (
+                                s.id,
+                                s.name.clone(),
+                                s.elevation,
+                                s.node_ids.len(),
+                                s.seismic_weight,
+                            )
+                        })
+                        .collect();
+                self.story_weight_edit.resize(story_rows.len(), 0.0);
+                self.story_weight_active.resize(story_rows.len(), false);
+                for (i, (story, name, elevation, n_nodes, weight)) in
+                    story_rows.into_iter().enumerate()
+                {
+                    if !self.story_weight_active[i] {
+                        self.story_weight_edit[i] = weight.unwrap_or(0.0) / 1000.0;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                            "{}: 標高 {:.0} mm, 節点 {}",
+                            name, elevation, n_nodes
+                        ));
+                        ui.label("W[kN]:");
+                        let resp = ui
+                            .add(
+                                egui::DragValue::new(&mut self.story_weight_edit[i])
+                                    .speed(1.0)
+                                    .range(0.0..=1.0e9),
+                            )
+                            .on_hover_text("地震重量を手動調整します(自動生成値を上書き、undo可)");
+                        self.story_weight_active[i] = resp.dragged() || resp.has_focus();
+                        if resp.drag_stopped() || resp.lost_focus() {
+                            let new_weight = self.story_weight_edit[i] * 1000.0;
+                            if (new_weight - weight.unwrap_or(0.0)).abs() > 1e-6 {
+                                self.undo.run(
+                                    &mut self.model,
+                                    Box::new(squid_n_edit::SetStoryWeight {
+                                        story,
+                                        weight: Some(new_weight),
+                                    }),
+                                );
+                                self.staleness.mark_edited();
+                            }
+                        }
+                    });
                 }
             }
             if ui
@@ -1430,7 +1782,10 @@ impl App {
                         }
                     });
                 if ui
-                    .add_enabled(selected_lc.is_some(), egui::Button::new("▶ 実行"))
+                    .add_enabled(
+                        selected_lc.is_some() && !running,
+                        egui::Button::new("▶ 実行"),
+                    )
                     .clicked()
                 {
                     if let Some(lc) = selected_lc {
@@ -1486,7 +1841,10 @@ impl App {
                                 }
                             }
                         });
-                    if ui.button("▶ 実行").clicked() {
+                    if ui
+                        .add_enabled(!running, egui::Button::new("▶ 実行"))
+                        .clicked()
+                    {
                         self.run_combination(self.analysis_combo_idx);
                         if self.last_error.is_none() {
                             self.active_tab = Tab::Results;
@@ -1505,7 +1863,10 @@ impl App {
                 let mut n = self.analysis_cfg.n_modes;
                 ui.add(egui::DragValue::new(&mut n).range(1..=30));
                 self.analysis_cfg.n_modes = n;
-                if ui.button("▶ 実行").clicked() {
+                if ui
+                    .add_enabled(!running, egui::Button::new("▶ 実行"))
+                    .clicked()
+                {
                     self.run_eigen(self.analysis_cfg.n_modes);
                 }
             });
@@ -1553,7 +1914,10 @@ impl App {
                         .range(0.05..=1.0),
                 );
             });
-            if ui.button("▶ 実行").clicked() {
+            if ui
+                .add_enabled(!running, egui::Button::new("▶ 実行"))
+                .clicked()
+            {
                 self.run_seismic(self.analysis_cfg.seismic_dir);
                 if self.last_error.is_none() {
                     self.active_tab = Tab::Results;
@@ -1579,26 +1943,74 @@ impl App {
                         .range(1.0..=10000.0),
                 );
             });
-            if ui.button("▶ 実行").clicked() {
-                self.run_pushover();
-                if self.last_error.is_none() {
-                    self.active_tab = Tab::Results;
-                    self.results_view = ResultsView::Pushover;
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!running, egui::Button::new("▶ 実行"))
+                    .clicked()
+                {
+                    self.start_pushover_job();
                 }
-            }
+                if self
+                    .job
+                    .as_ref()
+                    .is_some_and(|j| j.label == "プッシュオーバー")
+                {
+                    ui.spinner();
+                }
+            });
         });
         ui.add_space(6.0);
 
         // ── 時刻歴応答 ────────────────────────────────────────────
         ui.group(|ui| {
-            ui.strong("時刻歴応答（線形 Newmark-β）");
+            ui.strong("時刻歴応答（線形）");
             ui.horizontal(|ui| {
-                ui.label("減衰比 h:");
+                ui.label("方向:");
+                ui.selectable_value(&mut self.analysis_cfg.th_dir, SeismicDir::X, "X");
+                ui.selectable_value(&mut self.analysis_cfg.th_dir, SeismicDir::Y, "Y");
+                ui.separator();
+                ui.label("積分法:");
+                ui.selectable_value(
+                    &mut self.analysis_cfg.th_integrator,
+                    ThIntegrator::NewmarkBeta,
+                    "Newmark-β",
+                );
+                ui.selectable_value(
+                    &mut self.analysis_cfg.th_integrator,
+                    ThIntegrator::HhtAlpha,
+                    "HHT-α(α=-0.1)",
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("減衰:");
+                ui.selectable_value(
+                    &mut self.analysis_cfg.th_damping_model,
+                    ThDampingModel::StiffnessProportional,
+                    "剛性比例",
+                );
+                ui.selectable_value(
+                    &mut self.analysis_cfg.th_damping_model,
+                    ThDampingModel::Rayleigh,
+                    "Rayleigh",
+                );
+                ui.separator();
+                ui.label(match self.analysis_cfg.th_damping_model {
+                    ThDampingModel::StiffnessProportional => "減衰比 h:",
+                    ThDampingModel::Rayleigh => "h1(1次):",
+                });
                 ui.add(
                     egui::DragValue::new(&mut self.analysis_cfg.th_damping)
                         .speed(0.005)
                         .range(0.0..=0.3),
                 );
+                if self.analysis_cfg.th_damping_model == ThDampingModel::Rayleigh {
+                    ui.label("h2(2次):");
+                    ui.add(
+                        egui::DragValue::new(&mut self.analysis_cfg.th_h2)
+                            .speed(0.005)
+                            .range(0.0..=0.3),
+                    );
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("サンプル波: dt[s]");
@@ -1628,34 +2040,35 @@ impl App {
             });
             ui.horizontal(|ui| {
                 if ui
-                    .button("▶ サンプル波で実行")
+                    .add_enabled(!running, egui::Button::new("▶ サンプル波で実行"))
                     .on_hover_text("正弦減衰波を生成して時刻歴解析を実行します")
                     .clicked()
                 {
-                    self.run_time_history_sample();
-                    if self.last_error.is_none() {
-                        self.active_tab = Tab::Results;
-                        self.results_view = ResultsView::TimeHistory;
-                    }
+                    let wave = Self::sample_wave(&self.analysis_cfg);
+                    self.start_time_history_job(wave);
                 }
                 if ui
-                    .button("📂 波形CSVを開いて実行…")
+                    .add_enabled(!running, egui::Button::new("📂 波形CSVを開いて実行…"))
                     .on_hover_text(
                         "1 行 1 値(加速度 gal)の CSV/テキスト。dt は上の設定値を使用します",
                     )
                     .clicked()
                 {
                     self.run_time_history_from_csv();
-                    if self.last_error.is_none() {
-                        self.active_tab = Tab::Results;
-                        self.results_view = ResultsView::TimeHistory;
-                    }
+                }
+                if self.job.as_ref().is_some_and(|j| j.label == "時刻歴応答") {
+                    ui.spinner();
                 }
             });
+            ui.label(
+                egui::RichText::new("応答グラフは入力の大きい方向を記録")
+                    .small()
+                    .color(crate::theme::GRAY_600),
+            );
         });
     }
 
-    /// 波形 CSV（1 行 1 値、gal 単位）を選択して時刻歴解析を実行する。
+    /// 波形 CSV（1 行 1 値、gal 単位）を選択して時刻歴解析をジョブ実行する。
     fn run_time_history_from_csv(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("波形 (CSV/テキスト)", &["csv", "txt", "dat"])
@@ -1671,7 +2084,7 @@ impl App {
             }
         };
         // 1 行 1 値（カンマ区切りなら最後の列）を gal → mm/s² (×10) で読む
-        let accel_x: Vec<f64> = content
+        let accel: Vec<f64> = content
             .lines()
             .filter_map(|l| {
                 let field = l.split(',').next_back()?.trim();
@@ -1679,19 +2092,16 @@ impl App {
             })
             .map(|gal| gal * 10.0)
             .collect();
-        if accel_x.len() < 2 {
+        if accel.len() < 2 {
             self.last_error = Some(
                 "波形データが読み取れませんでした（数値が 2 点未満）。1 行 1 値の CSV を指定してください。"
                     .to_string(),
             );
             return;
         }
-        let wave = squid_n_solver::timehistory::GroundMotion {
-            dt: self.analysis_cfg.th_dt,
-            accel_x,
-            accel_y: None,
-        };
-        self.run_time_history(wave);
+        let wave =
+            Self::build_ground_motion(self.analysis_cfg.th_dt, self.analysis_cfg.th_dir, accel);
+        self.start_time_history_job(wave);
     }
 
     /// 結果タブ：3Dビューア と 時刻歴グラフを切替。
@@ -2001,6 +2411,15 @@ impl App {
             };
             ui.label(format!("{}{}", file_label, marker));
             ui.separator();
+            // バックグラウンド解析ジョブの実行状況
+            if let Some(job) = &self.job {
+                let elapsed = job.started.elapsed().unwrap_or_default().as_secs_f64();
+                ui.colored_label(
+                    crate::theme::GOOD_GREEN,
+                    format!("⏳ {} 実行中… {:.0}s", job.label, elapsed),
+                );
+                ui.separator();
+            }
             // stale アイコン
             if self.staleness.results_stale {
                 ui.colored_label(crate::theme::BEST_YELLOW, "⚠ stale");
@@ -2099,12 +2518,154 @@ mod tests {
         app.run_time_history_sample();
         assert!(app.last_error.is_none(), "{:?}", app.last_error);
         let th = app.results.as_ref().unwrap().time_history.as_ref().unwrap();
-        assert!(th.history.node_disp_x.len() > 100);
+        assert!(th.history.node_disp.len() > 100);
         assert!(
-            th.history.node_disp_x.iter().any(|v| v.abs() > 1e-6),
+            th.history.node_disp.iter().any(|v| v.abs() > 1e-6),
             "応答がゼロのままです"
         );
         assert!(th.history.node.is_some());
+    }
+
+    #[test]
+    fn test_time_history_y_direction_flow() {
+        let mut app = App::default();
+        app.load_model(crate::sample::portal_frame());
+        app.analysis_cfg.th_duration = 2.0;
+        app.analysis_cfg.th_dir = SeismicDir::Y;
+        app.run_time_history_sample();
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
+        let th = app.results.as_ref().unwrap().time_history.as_ref().unwrap();
+        assert!(
+            th.history.record_dir_y,
+            "th_dir=Y なのに代表応答の記録方向が X のままです"
+        );
+        assert!(
+            th.history.node_disp.iter().any(|v| v.abs() > 1e-6),
+            "応答がゼロのままです"
+        );
+    }
+
+    #[test]
+    fn test_build_ground_motion_routes_by_direction() {
+        // wave 構築のみを検証する純粋関数のテスト（th_dir=Y でも accel_x 側に
+        // 誤って入らないことを確認する）。
+        let accel = vec![1.0, 2.0, 3.0];
+        let wave_x = App::build_ground_motion(0.01, SeismicDir::X, accel.clone());
+        assert_eq!(wave_x.accel_x, accel);
+        assert!(wave_x.accel_y.is_none());
+
+        let wave_y = App::build_ground_motion(0.01, SeismicDir::Y, accel.clone());
+        assert_eq!(wave_y.accel_x, vec![0.0; accel.len()]);
+        assert_eq!(wave_y.accel_y, Some(accel));
+    }
+
+    /// 2 層等質量等剛性せん断モデル（軸ばね 2 本の直列、Ux 方向のみ自由）。
+    /// portal_frame は平面骨組で弱軸・面外方向の縮約後自由度が多く、
+    /// 固有値解析(部分空間反復)が n_modes=2 で不安定になりやすいため、
+    /// Rayleigh 減衰(1次・2次固有値が必要)のテストには本モデルを用いる。
+    fn shear_2dof_model() -> squid_n_core::model::Model {
+        use squid_n_core::dof::Dof6Mask;
+        use squid_n_core::ids::MaterialId;
+        use squid_n_core::model::{
+            ElementData, ElementKind, EndCondition, ForceRegime, LocalAxis, Material, Model, Node,
+            Section,
+        };
+        const FREE_UX: Dof6Mask = Dof6Mask(0b111110);
+        let k = 1000.0_f64;
+        let m = 1.0_f64;
+        let young = k * 1000.0; // EA/L = young*1/1000 = k
+        let node = |id: u32, x: f64, restraint: Dof6Mask, mass: Option<[f64; 6]>| Node {
+            id: NodeId(id),
+            coord: [x, 0.0, 0.0],
+            restraint,
+            mass,
+            story: None,
+        };
+        let beam = |id: u32, a: u32, b: u32| ElementData {
+            id: ElemId(id),
+            kind: ElementKind::Beam,
+            nodes: smallvec::smallvec![NodeId(a), NodeId(b)],
+            section: Some(SectionId(0)),
+            material: Some(MaterialId(0)),
+            local_axis: LocalAxis {
+                ref_vector: [0.0, 0.0, 1.0],
+            },
+            end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+            force_regime: ForceRegime::Auto,
+            rigid_zone: Default::default(),
+        };
+        Model {
+            nodes: vec![
+                node(0, 0.0, Dof6Mask::FIXED, None),
+                node(1, 1000.0, FREE_UX, Some([m, 0.0, 0.0, 0.0, 0.0, 0.0])),
+                node(2, 2000.0, FREE_UX, Some([m, 0.0, 0.0, 0.0, 0.0, 0.0])),
+            ],
+            elements: vec![beam(0, 0, 1), beam(1, 1, 2)],
+            sections: vec![Section {
+                id: SectionId(0),
+                name: "spring".into(),
+                area: 1.0,
+                iy: 1.0,
+                iz: 1.0,
+                j: 1.0,
+                depth: 1.0,
+                width: 1.0,
+                as_y: 1.0,
+                as_z: 1.0,
+                panel_thickness: None,
+                thickness: None,
+            }],
+            materials: vec![Material {
+                id: MaterialId(0),
+                name: "mat".into(),
+                young,
+                poisson: 0.0,
+                density: 0.0,
+                shear: None,
+                fc: None,
+                fy: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_time_history_rayleigh_and_hht() {
+        let mut app = App::default();
+        app.load_model(shear_2dof_model());
+        app.analysis_cfg.th_duration = 2.0;
+        app.analysis_cfg.th_damping_model = ThDampingModel::Rayleigh;
+        app.analysis_cfg.th_integrator = ThIntegrator::HhtAlpha;
+        app.run_time_history_sample();
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
+        let th = app.results.as_ref().unwrap().time_history.as_ref().unwrap();
+        assert!(!th.history.node_disp.is_empty());
+        assert!(
+            th.history.node_disp.iter().any(|v| v.abs() > 1e-6),
+            "応答がゼロのままです"
+        );
+    }
+
+    #[test]
+    fn test_set_story_weight_via_ui_flow() {
+        let mut app = App::default();
+        app.load_model(crate::sample::portal_frame());
+        app.generate_stories_action();
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
+        let story_id = app.model.stories[0].id;
+        let old_weight = app.model.stories[0].seismic_weight;
+
+        app.undo.run(
+            &mut app.model,
+            Box::new(squid_n_edit::SetStoryWeight {
+                story: story_id,
+                weight: Some(12345.0),
+            }),
+        );
+        assert_eq!(app.model.stories[0].seismic_weight, Some(12345.0));
+
+        app.undo.undo(&mut app.model);
+        assert_eq!(app.model.stories[0].seismic_weight, old_weight);
     }
 
     #[test]
@@ -2117,6 +2678,82 @@ mod tests {
         assert!(app.last_error.is_none(), "{:?}", app.last_error);
         let po = app.results.as_ref().unwrap().pushover.as_ref().unwrap();
         assert!(!po.capacity_curve.is_empty());
+    }
+
+    /// `poll_job` が完了するまで待つ（タイムアウト5秒でパニック、10ms 間隔でポーリング）。
+    fn wait_for_job(app: &mut App) {
+        let start = std::time::Instant::now();
+        while !app.poll_job() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "ジョブが時間内に完了しませんでした"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn test_async_pushover_job_flow() {
+        let mut app = App::default();
+        app.load_model(crate::sample::portal_frame());
+        app.generate_stories_action();
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
+        app.analysis_cfg.push_steps = 10;
+
+        app.start_pushover_job();
+        assert!(app.job.is_some());
+
+        wait_for_job(&mut app);
+
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
+        assert!(app.job.is_none());
+        let po = app.results.as_ref().unwrap().pushover.as_ref().unwrap();
+        assert!(!po.capacity_curve.is_empty());
+    }
+
+    #[test]
+    fn test_async_time_history_job_flow() {
+        let mut app = App::default();
+        app.load_model(crate::sample::portal_frame());
+        app.analysis_cfg.th_duration = 2.0;
+        let wave = App::sample_wave(&app.analysis_cfg);
+
+        app.start_time_history_job(wave);
+        assert!(app.job.is_some());
+
+        wait_for_job(&mut app);
+
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
+        assert!(app.job.is_none());
+        let th = app.results.as_ref().unwrap().time_history.as_ref().unwrap();
+        assert!(th.history.node_disp.len() > 100);
+        assert!(
+            th.history.node_disp.iter().any(|v| v.abs() > 1e-6),
+            "応答がゼロのままです"
+        );
+    }
+
+    #[test]
+    fn test_start_job_while_running_is_rejected() {
+        let mut app = App::default();
+        app.load_model(crate::sample::portal_frame());
+        app.generate_stories_action();
+        app.analysis_cfg.push_steps = 10;
+
+        app.start_pushover_job();
+        assert!(app.job.is_some());
+
+        // 実行中に再度 start しても2つ目は無視され、job は上書きされない。
+        app.start_time_history_job(App::sample_wave(&app.analysis_cfg));
+        assert!(app.job.is_some());
+        assert_eq!(app.job.as_ref().unwrap().label, "プッシュオーバー");
+
+        wait_for_job(&mut app);
+
+        assert!(app.job.is_none());
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
+        assert!(app.results.as_ref().unwrap().pushover.is_some());
+        assert!(app.results.as_ref().unwrap().time_history.is_none());
     }
 
     #[test]
@@ -2269,5 +2906,102 @@ mod tests {
         assert!(result.stories[0].qun > 0.0);
         // Qu はプッシュオーバー最終点の層せん断（capacity_curve.story_shear）から取得される。
         assert!(result.stories[0].qu > 0.0, "{}", result.stories[0].qu);
+    }
+
+    /// Z=0 平面の矩形（4000×6000）+外周4本の梁 + スラブ1枚（TriTrapezoid）を持つモデルを作る。
+    /// 辺 i = boundary[i] → boundary[(i+1)%4] の順に梁を並べる（refresh_beam_loads の対応付けと一致）。
+    fn make_slab_test_model() -> squid_n_core::model::Model {
+        use squid_n_core::ids::SlabId;
+        use squid_n_core::model::{
+            AreaLoad, DistributionMethod, ElementData, ElementKind, EndCondition, ForceRegime,
+            LocalAxis, Node, Slab,
+        };
+
+        let mk_node = |id: u32, x: f64, y: f64| Node {
+            id: NodeId(id),
+            coord: [x, y, 0.0],
+            restraint: Default::default(),
+            mass: None,
+            story: None,
+        };
+        let nodes = vec![
+            mk_node(0, 0.0, 0.0),
+            mk_node(1, 4000.0, 0.0),
+            mk_node(2, 4000.0, 6000.0),
+            mk_node(3, 0.0, 6000.0),
+        ];
+        let mk_beam = |id: u32, i: u32, j: u32| ElementData {
+            id: ElemId(id),
+            kind: ElementKind::Beam,
+            nodes: [NodeId(i), NodeId(j)].into_iter().collect(),
+            section: None,
+            material: None,
+            local_axis: LocalAxis {
+                ref_vector: [0.0, 0.0, 1.0],
+            },
+            end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+            force_regime: ForceRegime::Auto,
+            rigid_zone: Default::default(),
+        };
+        let elements = vec![
+            mk_beam(0, 0, 1),
+            mk_beam(1, 1, 2),
+            mk_beam(2, 2, 3),
+            mk_beam(3, 3, 0),
+        ];
+        let slab = Slab {
+            id: SlabId(0),
+            boundary: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)],
+            joists: vec![],
+            loads: vec![AreaLoad {
+                kind: "DL".into(),
+                value: 0.005,
+            }],
+            method: DistributionMethod::TriTrapezoid,
+        };
+        squid_n_core::model::Model {
+            nodes,
+            elements,
+            slabs: vec![slab],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_refresh_beam_loads_maps_edges_to_members() {
+        let model = make_slab_test_model();
+        model
+            .validate()
+            .expect("テストモデルは validate を通るはず");
+
+        let mut app = App {
+            model,
+            ..App::default()
+        };
+        app.refresh_beam_loads();
+
+        assert_eq!(app.beam_loads.len(), 4, "外周4辺すべてに荷重が対応付くはず");
+        for bl in &app.beam_loads {
+            let elem = app
+                .model
+                .elements
+                .iter()
+                .find(|e| e.id == bl.elem)
+                .expect("beam_loads.elem は実在する部材IDを指すはず");
+            assert_eq!(elem.kind, squid_n_core::model::ElementKind::Beam);
+            assert!(
+                bl.cmq.c_i.abs() > 1e-9 || bl.cmq.q_i.abs() > 1e-9,
+                "CMQ が非ゼロのはず: {:?} {:?}",
+                bl.cmq.c_i,
+                bl.cmq.q_i
+            );
+        }
+
+        // 梁が1本欠けたモデルでは、対応する辺の荷重が捨てられ3件になる
+        let mut missing = app.model.clone();
+        missing.elements.pop();
+        app.model = missing;
+        app.refresh_beam_loads();
+        assert_eq!(app.beam_loads.len(), 3);
     }
 }

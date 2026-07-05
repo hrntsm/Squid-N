@@ -185,6 +185,7 @@ fn draw_arrow(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: 
 }
 
 /// 節点を中心に `axis` まわりの回転を示す円弧（全周）を描く。
+#[allow(clippy::too_many_arguments)]
 fn draw_rotation_arc(
     painter: &egui::Painter,
     center_world: [f64; 3],
@@ -244,6 +245,7 @@ fn draw_rotation_arc(
 ///
 /// 現在は全体座標系（X/Y/Z）の軸方向に描画する。将来的に節点ごとに局所座標系を
 /// 導入した際は、この関数が参照する軸ベクトルを局所座標系の軸へ差し替えればよい。
+#[allow(clippy::too_many_arguments)]
 fn draw_support_symbol(
     painter: &egui::Painter,
     node_coord: [f64; 3],
@@ -411,6 +413,12 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
     app.view_mode = mode;
     app.deform_scale = deform_scale;
     app.view_mode_idx = mode_idx;
+
+    // CMQ 図はモデル編集に常に追従させるため、表示中は毎フレーム再計算する
+    // （スラブ数は小さい前提）。
+    if app.view_mode == ViewMode::Cmq {
+        app.refresh_beam_loads();
+    }
 
     // --- 梁作成モード ---
     // ON 中はクリックで節点を選び、2 点目で梁を生成する（OFF 中は部材クリック=断面割当）。
@@ -1017,7 +1025,7 @@ fn draw_cmq_diagram(painter: &egui::Painter, app: &App, pts: &[[f32; 2]]) {
                 painter.clip_rect().min.y + 30.0,
             ),
             egui::Align2::LEFT_TOP,
-            "CMQ データがありません（スラブ入力 UI が未実装のため、床荷重分配（CMQ）は現在 GUI から生成できません）",
+            "スラブが未定義です。モデルタブの「スラブ」でスラブと床荷重を定義すると CMQ 図を表示できます",
             egui::FontId::proportional(13.0),
             theme::GRAY_600,
         );

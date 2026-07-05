@@ -36,6 +36,13 @@ impl Default for MemberLoadDraft {
 pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
     use egui_extras::{Column, TableBuilder};
 
+    // --- スラブ荷重（床荷重）への案内 ---
+    ui.label(format!(
+        "スラブ: {} 枚（モデルタブの「スラブ」で床荷重を追加できます。分配結果は結果タブ/モデルタブの3Dビューで表示モード「CMQ図」を選ぶと確認できます）",
+        app.model.slabs.len()
+    ));
+    ui.add_space(4.0);
+
     // --- 荷重ケース一覧（名称編集・追加・削除・編集対象の選択） ---
     ui.horizontal(|ui| {
         ui.strong("荷重ケース");

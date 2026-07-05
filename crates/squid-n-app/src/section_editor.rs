@@ -7,7 +7,7 @@
 
 use crate::app::App;
 use squid_n_core::ids::SectionId;
-use squid_n_edit::{AddSection, AddSectionShape};
+use squid_n_edit::{AddSection, AddSectionShape, EditSectionShape};
 use squid_n_section::catalog::CatalogShape;
 use squid_n_section::shape::{BarSet, RcRebar, SectionShape, ShearBar};
 
@@ -304,7 +304,7 @@ pub fn section_editor_panel(ui: &mut egui::Ui, app: &mut App) {
                 app.undo.run(
                     &mut app.model,
                     Box::new(AddSectionShape {
-                        shape,
+                        shape: shape.clone(),
                         new_id: predicted_id,
                         name: draft.name.clone(),
                     }),
@@ -315,9 +315,62 @@ pub fn section_editor_panel(ui: &mut egui::Ui, app: &mut App) {
                 draft.name = format!("断面{}", n + 1);
             }
             ui.separator();
+
+            let focus = focused_section_index(app.nav.focus_section, &app.model.sections);
+            let apply_resp = ui.add_enabled(focus.is_some(), egui::Button::new("✏ 選択断面へ適用"));
+            match focus {
+                Some(idx) => {
+                    let sid = app.model.sections[idx].id;
+                    let name = app.model.sections[idx].name.clone();
+                    let used = app
+                        .model
+                        .elements
+                        .iter()
+                        .filter(|e| e.section == Some(sid))
+                        .count();
+                    let apply_resp = apply_resp.on_hover_text(format!(
+                        "現在のフォーム内容で断面 {name} の形状を再定義します\
+（この断面を使う全 {used} 部材に波及。名称 {name} は維持されます）"
+                    ));
+                    if apply_resp.clicked() {
+                        app.undo.run(
+                            &mut app.model,
+                            Box::new(EditSectionShape {
+                                section: sid,
+                                new_shape: shape.clone(),
+                            }),
+                        );
+                        app.staleness.mark_edited();
+                    }
+                }
+                None => {
+                    apply_resp.on_hover_text("断面テーブルで対象断面を選択してください");
+                }
+            }
+
+            ui.separator();
             ui.label(format!("現在: {}/セクション", app.model.sections.len()));
         });
     });
+}
+
+/// `focus_section`（ナビゲータで選択中の断面）が現在も存在するか確認し、
+/// 存在すれば `sections` 内のインデックスを返す。断面テーブル側での削除等で
+/// 参照が古くなっている場合は `None`（ボタン無効化用）。
+/// `App` 全体ではなく個別フィールドを引数に取ることで、呼び出し側の
+/// `ui.group` クロージャが `app.section_draft` と `app.model` を disjoint に
+/// 借用できるようにしている。
+fn focused_section_index(
+    focus_section: Option<SectionId>,
+    sections: &[squid_n_core::model::Section],
+) -> Option<usize> {
+    let sid = focus_section?;
+    let idx = sid.index();
+    if idx < sections.len() && sections[idx].id == sid {
+        Some(idx)
+    } else {
+        None
+    }
 }
 
 fn steel_h_fields(ui: &mut egui::Ui, d: &mut SectionEditorDraft) {
@@ -592,5 +645,54 @@ mod tests {
         // H 400x200x8x12 の A は閉形式
         let expected = 2.0 * 200.0 * 12.0 + (400.0 - 24.0) * 8.0;
         assert!((sec.area - expected).abs() < 1e-9);
+    }
+
+    /// 「選択断面へ適用」ボタンが発行する `EditSectionShape` を undo.run 経由で
+    /// 適用すると断面性能（A 等）が再算定され、undo で元の断面形状に戻ることを確認する。
+    /// GUI（egui）非依存で、draft→shape 構築 (`build_shape`) と undo スタックのみで検証する。
+    #[test]
+    fn test_edit_section_shape_via_undo_recomputes_and_reverts() {
+        use squid_n_core::model::Model;
+        use squid_n_edit::UndoStack;
+
+        // 既存断面（H 400x200x8x12）を用意
+        let old_draft = SectionEditorDraft::default();
+        let old_shape = build_shape(&old_draft);
+        let sid = SectionId(0);
+        let old_sec = old_shape.to_section(sid, "既存断面".to_string());
+        let old_area = old_sec.area;
+
+        let mut model = Model::default();
+        model.sections.push(old_sec);
+
+        // フォーム（draft）で寸法を変更 → 断面編集パネルの「適用」と同じ経路で shape を構築
+        let new_draft = SectionEditorDraft {
+            h: 500.0,
+            b: 250.0,
+            tw: 10.0,
+            tf: 15.0,
+            ..SectionEditorDraft::default()
+        };
+        let new_shape = build_shape(&new_draft);
+        let new_area_expected = new_shape.to_section(sid, "既存断面".into()).area;
+        assert!((new_area_expected - old_area).abs() > 1e-6);
+
+        let mut undo = UndoStack::new();
+        undo.run(
+            &mut model,
+            Box::new(EditSectionShape {
+                section: sid,
+                new_shape,
+            }),
+        );
+
+        // 再算定された断面性能が反映され、名称は維持される
+        assert!((model.sections[0].area - new_area_expected).abs() < 1e-6);
+        assert_eq!(model.sections[0].name, "既存断面");
+
+        // undo で元の形状・断面性能に戻る
+        undo.undo(&mut model);
+        assert!((model.sections[0].area - old_area).abs() < 1e-6);
+        assert_eq!(model.sections[0].name, "既存断面");
     }
 }

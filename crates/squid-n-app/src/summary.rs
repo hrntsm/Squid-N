@@ -238,7 +238,7 @@ pub fn build_report_csv(app: &App) -> String {
     if let Some(th) = &results.time_history {
         let peak = th
             .history
-            .node_disp_x
+            .node_disp
             .iter()
             .fold(0.0f64, |m, v| m.max(v.abs()));
         out.push_str(&format!(
