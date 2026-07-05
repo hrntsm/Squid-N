@@ -1,19 +1,47 @@
 use crate::{CheckResult, DesignCheck, DesignCtx, LoadTerm, MemberForcesAt};
 use squid_n_core::model::{Material, Section};
 
-/// 鋼材の F 値 [N/mm²]（令98条/告示。板厚 t<=40mm の代表値）。
+/// 鋼材の F 値表（グレード名 → F値 [N/mm²]）（令98条/告示。板厚 t<=40mm の代表値）。
+///
+/// `steel_f_value`（完全一致）・`steel_f_value_prefix`（前方一致）の両方が
+/// この表を共有する（挙動の重複を避けるためテーブルを一本化）。
+const STEEL_F_TABLE: &[(&str, f64)] = &[
+    ("SS400", 235.0),
+    ("SN400", 235.0),
+    ("SM400", 235.0),
+    ("SS490", 285.0),
+    ("SN490", 325.0),
+    ("SM490", 325.0),
+    ("SN520", 355.0),
+    ("SM520", 355.0),
+    ("SN550", 450.0),
+    ("SM570", 450.0),
+];
+
+/// 鋼材の F 値 [N/mm²]（完全一致）。
 ///
 /// 戻り値は F 値。長期許容引張・圧縮・曲げ ft = F/1.5、
 /// 長期許容せん断 fs = F/(1.5·√3)。短期は長期の 1.5 倍（=F, F/√3）。
 fn steel_f_value(grade: &str) -> Option<f64> {
-    match grade {
-        "SS400" | "SN400" | "SM400" => Some(235.0),
-        "SS490" => Some(285.0),
-        "SN490" | "SM490" => Some(325.0),
-        "SN520" | "SM520" => Some(355.0),
-        "SN550" | "SM570" => Some(450.0),
-        _ => None,
-    }
+    STEEL_F_TABLE
+        .iter()
+        .find(|(g, _)| *g == grade)
+        .map(|(_, f)| *f)
+}
+
+/// 鋼材の F 値 [N/mm²]（前方一致）。
+///
+/// 材料名が板厚区分や強度記号等の接尾辞を伴う場合（例 "SN400B"→235、
+/// "SM490A"→325）に対応するため、`STEEL_F_TABLE` の記号と材料名の前方一致で
+/// 判定する。複数の記号が前方一致しうる場合（表の拡張時等）は、最も記号が
+/// 長い（＝最も具体的な）ものを優先する（例: 将来 "SN4" のような短い記号が
+/// 追加されても "SN490" の記号自体が優先され、"SN4.." に誤マッチしない）。
+pub fn steel_f_value_prefix(name: &str) -> Option<f64> {
+    STEEL_F_TABLE
+        .iter()
+        .filter(|(g, _)| name.starts_with(g))
+        .max_by_key(|(g, _)| g.len())
+        .map(|(_, f)| *f)
 }
 
 /// 鋼材の許容曲げ応力度 fb [N/mm²]。
@@ -266,6 +294,32 @@ mod tests {
         assert!((steel_f_value("SN490").unwrap() - 325.0).abs() < 1e-9);
         assert!((steel_f_value("SS490").unwrap() - 285.0).abs() < 1e-9);
         assert!(steel_f_value("UNKNOWN").is_none());
+    }
+
+    #[test]
+    fn test_steel_f_value_prefix_matches_suffixed_grade() {
+        // "SN400B"（板厚区分等の接尾辞付き）→ "SN400" の前方一致で 235。
+        assert!((steel_f_value_prefix("SN400B").unwrap() - 235.0).abs() < 1e-9);
+        // "SM490A" → "SM490" の前方一致で 325。
+        assert!((steel_f_value_prefix("SM490A").unwrap() - 325.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_steel_f_value_prefix_does_not_confuse_sn400_and_sn490() {
+        // "SN490" は "SN400" を前方一致しない（別の記号）→ 325 のまま。
+        assert!((steel_f_value_prefix("SN490").unwrap() - 325.0).abs() < 1e-9);
+        assert!((steel_f_value_prefix("SN490B").unwrap() - 325.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_steel_f_value_prefix_unknown_is_none() {
+        assert!(steel_f_value_prefix("XYZ").is_none());
+    }
+
+    #[test]
+    fn test_steel_f_value_prefix_exact_grade_still_matches() {
+        // 接尾辞なしの完全一致も前方一致経路で拾えること。
+        assert!((steel_f_value_prefix("SS400").unwrap() - 235.0).abs() < 1e-9);
     }
 
     /// 仕様 P3 §6.4 の検算例（鋼梁の長期曲げ、SN400・板厚<=40 ⇒ F=235、横座屈なし）。

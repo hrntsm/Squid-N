@@ -635,12 +635,13 @@ impl App {
     > {
         use squid_n_core::section_shape::SectionShape;
         use squid_n_design_jp::ds::{
-            max_width_thickness, rc_member_rank, s_member_rank, worst_rank, RankCriteria,
+            max_width_thickness, rc_member_rank, s_member_rank_scaled, worst_rank, RankCriteria,
         };
         use squid_n_design_jp::holding_capacity::{
             check_holding_capacity, ds_value, qud_by_story, MemberRank,
         };
         use squid_n_design_jp::rc_capacity::{rc_qmu_simple, rc_qsu_simple};
+        use squid_n_design_jp::steel_f_value_prefix;
 
         if self.model.stories.is_empty() {
             return Err(
@@ -698,84 +699,103 @@ impl App {
         let qud = qud_by_story(&weights, self.analysis_cfg.z, rt, t);
 
         let n_stories = weights.len();
-        let (story_ranks, member_ranks): (Vec<MemberRank>, Vec<(ElemId, MemberRank)>) = if self
-            .design_rank_auto
-        {
-            // 鋼部材は幅厚比、RC 矩形部材はせん断余裕度 Qsu/Qmu の略算から
-            // ランクを算定し、所属階ごとに集計する。
-            //
-            // 所属階の規則: 部材の節点のうち最も高い階(story index 最大)。
-            // story_gen::generate_stories は各節点をその節点自身の標高が属する
-            // レベルへ割り当てる（柱下端は下階または基部=None、柱上端は上階、
-            // 梁は両端とも同一階）ため、柱は自動的に上端側の階（＝各節点の
-            // story のうち最大値）に算入される。
-            let mut per_story: Vec<Vec<MemberRank>> = vec![Vec::new(); n_stories];
-            let mut computed: Vec<(ElemId, MemberRank)> = Vec::new();
-            for elem in &self.model.elements {
-                let Some(sec) = elem
-                    .section
-                    .and_then(|sid| self.model.sections.get(sid.index()))
-                else {
-                    continue;
-                };
-                let Some(mat) = elem
-                    .material
-                    .and_then(|mid| self.model.materials.get(mid.index()))
-                else {
-                    continue;
-                };
-                let rank = if is_steel(&mat.name) {
-                    // 鋼部材: 形状情報がない断面(カタログ数値直入力等)・
-                    // 円形鋼管等の幅厚比対象外形状はスキップ。
-                    let Some(shape) = sec.shape.as_ref() else {
-                        continue;
-                    };
-                    let Some(wt) = max_width_thickness(shape) else {
-                        continue;
-                    };
-                    s_member_rank(wt, &RankCriteria::default())
-                } else {
-                    // RC 部材: RcRect のみ対応。RcCircle・形状未設定・
-                    // コンクリート強度(fc)未設定の材料はスキップ(選択値へフォールバック)。
-                    let Some(SectionShape::RcRect { b, d, rebar }) = sec.shape.as_ref() else {
-                        continue;
-                    };
-                    let clear_span = elem_geometric_length(elem, &self.model);
-                    let Some(input) = rc_capacity_input_from_rect(*b, *d, rebar, mat, clear_span)
+        let (story_ranks, member_ranks): (Vec<MemberRank>, Vec<(ElemId, MemberRank)>) =
+            if self.design_rank_auto {
+                // 鋼部材は幅厚比、RC 矩形部材はせん断余裕度 Qsu/Qmu の略算から
+                // ランクを算定し、所属階ごとに集計する。
+                //
+                // 所属階の規則: 部材の節点のうち最も高い階(story index 最大)。
+                // story_gen::generate_stories は各節点をその節点自身の標高が属する
+                // レベルへ割り当てる（柱下端は下階または基部=None、柱上端は上階、
+                // 梁は両端とも同一階）ため、柱は自動的に上端側の階（＝各節点の
+                // story のうち最大値）に算入される。
+                let mut per_story: Vec<Vec<MemberRank>> = vec![Vec::new(); n_stories];
+                let mut computed: Vec<(ElemId, MemberRank)> = Vec::new();
+                for elem in &self.model.elements {
+                    let Some(sec) = elem
+                        .section
+                        .and_then(|sid| self.model.sections.get(sid.index()))
                     else {
                         continue;
                     };
-                    let qmu = rc_qmu_simple(&input);
-                    let qsu = rc_qsu_simple(&input);
-                    rc_member_rank(qsu, qmu, &RankCriteria::default())
-                };
-                // 節点が階を持たない部材（両端とも基部）はスキップ。
-                let Some(story_idx) = elem
-                    .nodes
-                    .iter()
-                    .filter_map(|nid| self.model.nodes.get(nid.index()))
-                    .filter_map(|n| n.story)
-                    .max()
-                else {
-                    continue;
-                };
-                let idx = story_idx.index();
-                if idx >= n_stories {
-                    continue;
+                    let Some(mat) = elem
+                        .material
+                        .and_then(|mid| self.model.materials.get(mid.index()))
+                    else {
+                        continue;
+                    };
+                    let rank = if is_steel(&mat.name) {
+                        // 鋼部材: 形状情報がない断面(カタログ数値直入力等)・
+                        // 円形鋼管等の幅厚比対象外形状はスキップ。
+                        let Some(shape) = sec.shape.as_ref() else {
+                            continue;
+                        };
+                        let Some(wt) = max_width_thickness(shape) else {
+                            continue;
+                        };
+                        // F 値は材料名の前方一致で引く(例 "SN400B"→235)。引けなければ 235。
+                        let f_value = steel_f_value_prefix(&mat.name).unwrap_or(235.0);
+                        s_member_rank_scaled(wt, f_value, &RankCriteria::default())
+                    } else {
+                        // RC 部材: RcRect のみ対応。RcCircle・形状未設定・
+                        // コンクリート強度(fc)未設定の材料はスキップ(選択値へフォールバック)。
+                        let Some(SectionShape::RcRect { b, d, rebar }) = sec.shape.as_ref() else {
+                            continue;
+                        };
+                        // 内法スパン = 幾何長 - 両端剛域長。剛域長の合計が幾何長以上になる
+                        // (不整合な入力)場合は下限0を割り込むため、幾何長のままとする。
+                        let geom_len = elem_geometric_length(elem, &self.model);
+                        let rz_len = elem.rigid_zone.length_i + elem.rigid_zone.length_j;
+                        let clear_span = if geom_len - rz_len > 0.0 {
+                            geom_len - rz_len
+                        } else {
+                            geom_len
+                        };
+                        let Some(mut input) =
+                            rc_capacity_input_from_rect(*b, *d, rebar, mat, clear_span)
+                        else {
+                            continue;
+                        };
+                        // σ0: 最後に実行した静的解析結果(self.results.member_forces)から
+                        // 当該部材の軸力を引き、圧縮のときのみ設定する(長期軸力を用いるのが
+                        // 本筋だが、ここでは最後に実行した静的ケースの軸力を用いる簡易運用)。
+                        let sigma_0 = self
+                            .results
+                            .as_ref()
+                            .map(|r| rc_sigma_0_from_last_static(&r.member_forces, elem.id, *b, *d))
+                            .unwrap_or(0.0);
+                        input.sigma_0 = sigma_0;
+                        let qmu = rc_qmu_simple(&input);
+                        let qsu = rc_qsu_simple(&input);
+                        rc_member_rank(qsu, qmu, &RankCriteria::default())
+                    };
+                    // 節点が階を持たない部材（両端とも基部）はスキップ。
+                    let Some(story_idx) = elem
+                        .nodes
+                        .iter()
+                        .filter_map(|nid| self.model.nodes.get(nid.index()))
+                        .filter_map(|n| n.story)
+                        .max()
+                    else {
+                        continue;
+                    };
+                    let idx = story_idx.index();
+                    if idx >= n_stories {
+                        continue;
+                    }
+                    per_story[idx].push(rank);
+                    computed.push((elem.id, rank));
                 }
-                per_story[idx].push(rank);
-                computed.push((elem.id, rank));
-            }
-            // 階ごとの代表ランク = 算定できた部材ランクの最悪値。
-            // 1 本も算定できなかった層は手動選択ランクへフォールバック。
-            let ranks: Vec<MemberRank> = per_story
-                .into_iter()
-                .map(|rs| worst_rank(&rs).unwrap_or(self.design_rank))
-                .collect();
-            (ranks, computed)
-        } else {
-            (vec![self.design_rank; n_stories], Vec::new())
-        };
+                // 階ごとの代表ランク = 算定できた部材ランクの最悪値。
+                // 1 本も算定できなかった層は手動選択ランクへフォールバック。
+                let ranks: Vec<MemberRank> = per_story
+                    .into_iter()
+                    .map(|rs| worst_rank(&rs).unwrap_or(self.design_rank))
+                    .collect();
+                (ranks, computed)
+            } else {
+                (vec![self.design_rank; n_stories], Vec::new())
+            };
 
         let ds_vec: Vec<f64> = story_ranks
             .iter()
@@ -1375,7 +1395,39 @@ fn rc_capacity_input_from_rect(
         pw,
         sigma_wy: 295.0, // SD295 相当、要・原典照合
         clear_span,
+        // 軸方向圧縮応力度は呼び出し側(compute_holding_capacity)が既知の場合に上書きする。
+        // ここでは既定値 0(軸力なし・安全側)とする。
+        sigma_0: 0.0,
     })
+}
+
+/// 最後に実行した静的解析結果(`member_forces`)から部材の軸力を取得し、
+/// 圧縮のときのみ σ0 \[N/mm²\]（= |N|/(b・D)）を返す。引張・軸力なし・
+/// 対象部材の結果が無い場合は 0.0（安全側）。
+///
+/// # 符号規約（要確認済み・推測ではない）
+/// `squid_n_element::beam::BeamElement::recover_forces` は局所剛性 K・u を
+/// そのまま評価値とするため、始端(pos=0.0、`eval_sections`\[0\])では
+/// `n = f_local[0] = -N`（N は引張正）となる。これは
+/// `squid_n_solver::linear::test_linear_static_axial_cantilever` で
+/// N=+1000N（引張）を与えたとき `forces.at[0].1[0]` ≈ -1000 になることで
+/// 確認済み（すなわち f_local\[0\] は「圧縮正」）。よって `mf.at.first()`
+/// (= pos=0.0、始端)の n は「圧縮正」（n>0 のとき圧縮）であり、
+/// n<=0（引張または軸力なし）なら σ0=0（安全側）とする。
+fn rc_sigma_0_from_last_static(
+    member_forces: &[(ElemId, squid_n_element::beam::MemberForces)],
+    elem_id: ElemId,
+    b: f64,
+    d: f64,
+) -> f64 {
+    member_forces
+        .iter()
+        .find(|(id, _)| *id == elem_id)
+        .and_then(|(_, mf)| mf.at.first())
+        .map(|(_, f)| f[0])
+        .filter(|n| *n > 0.0)
+        .map(|n| n / (b * d))
+        .unwrap_or(0.0)
 }
 
 /// 部材両端節点間の幾何長 \[mm\]（内法補正なしの簡易値。剛域等は考慮しない）。
@@ -3553,25 +3605,162 @@ mod tests {
 
         // 柱: 節点間距離 3000mm、梁: 節点間距離 4000mm。それぞれ手計算で
         // rc_capacity_input_from_rect → rc_qsu/qmu_simple → rc_member_rank を再現する。
+        //
+        // σ0 は実運用と同じ規則(rc_sigma_0_from_last_static、最後の静的解析結果=
+        // 地震静的の軸力から圧縮時のみ算定)で個別に反映する。地震水平力による
+        // 柱の転倒モーメント抵抗で柱0・柱1の軸力は一方が圧縮・他方が引張(または
+        // 大きさが異なる)になり得るため、部材ごとに算定する(柱を一括りにしない)。
         let mat = &app.model.materials[0];
-        let expected_rank_for_span = |clear_span: f64| {
-            let input = rc_capacity_input_from_rect(400.0, 600.0, &rebar, mat, clear_span)
+        let member_forces = &app.results.as_ref().unwrap().member_forces;
+        let expected_rank_for = |elem_id: ElemId, clear_span: f64| {
+            let mut input = rc_capacity_input_from_rect(400.0, 600.0, &rebar, mat, clear_span)
                 .expect("fc 設定済みなので Some");
+            input.sigma_0 = rc_sigma_0_from_last_static(member_forces, elem_id, 400.0, 600.0);
             let qmu = rc_qmu_simple(&input);
             let qsu = rc_qsu_simple(&input);
             rc_member_rank(qsu, qmu, &RankCriteria::default())
         };
-        let col_rank = expected_rank_for_span(3000.0);
-        let beam_rank = expected_rank_for_span(4000.0);
+        let col0_rank = expected_rank_for(ElemId(0), 3000.0);
+        let col1_rank = expected_rank_for(ElemId(1), 3000.0);
+        let beam_rank = expected_rank_for(ElemId(2), 4000.0);
 
         for (elem_id, rank) in &result.member_ranks {
-            let expected = if elem_id.0 == 2 { beam_rank } else { col_rank };
+            let expected = match elem_id.0 {
+                2 => beam_rank,
+                1 => col1_rank,
+                _ => col0_rank,
+            };
             assert_eq!(
                 *rank, expected,
                 "ElemId({}) のランクが手計算値と一致しません",
                 elem_id.0
             );
         }
+    }
+
+    /// `rc_sigma_0_from_last_static`: 圧縮軸力から σ0 が正しく算定されることを、
+    /// 実際に静的解析を実行して確認する。
+    ///
+    /// モデル: 鉛直片持ち柱（節点0=基部, 固定, z=0 / 節点1=先端, 自由, z=3000）に
+    /// RC矩形断面 400x600 を設定し、先端節点へ下向き(圧縮)集中荷重 P=100,000N を
+    /// 与える。軸力のみが生じる単純な釣合いなので、内力の軸力の大きさは
+    /// 弾性係数・断面性能によらず厳密に P と一致する。
+    ///
+    /// 符号規約の確認: squid-n-solver::linear::test_linear_static_axial_cantilever
+    /// で N=+1000N(引張)のとき forces.at[0].1[0]≈-1000 であることを確認済みなので、
+    /// 圧縮(先端を下向きに押す)では forces.at[0].1[0]≈+P（正）になるはず。
+    #[test]
+    fn test_rc_sigma_0_from_compression_axial_force() {
+        use squid_n_core::dof::Dof6Mask;
+        use squid_n_core::ids::MaterialId;
+        use squid_n_core::model::{
+            ElementData, ElementKind, EndCondition, ForceRegime, LoadCase, LocalAxis, Material,
+            Model, NodalLoad, Node,
+        };
+        use squid_n_core::section_shape::{BarSet, RcRebar, SectionShape, ShearBar};
+
+        let b = 400.0;
+        let d = 600.0;
+        let rebar = RcRebar {
+            main_x: BarSet {
+                count: 8,
+                dia: 22.0,
+                layers: 2,
+            },
+            main_y: BarSet {
+                count: 4,
+                dia: 19.0,
+                layers: 1,
+            },
+            cover: 40.0,
+            shear: ShearBar {
+                dia: 10.0,
+                pitch: 150.0,
+                legs: 2,
+            },
+        };
+        let rc_shape = SectionShape::RcRect {
+            b,
+            d,
+            rebar: rebar.clone(),
+        };
+
+        let p = 100_000.0; // 圧縮荷重 [N]
+        let model = Model {
+            nodes: vec![
+                Node {
+                    id: NodeId(0),
+                    coord: [0.0, 0.0, 0.0],
+                    restraint: Dof6Mask::FIXED,
+                    mass: None,
+                    story: None,
+                },
+                Node {
+                    id: NodeId(1),
+                    coord: [0.0, 0.0, 3000.0],
+                    restraint: Dof6Mask::FREE,
+                    mass: None,
+                    story: None,
+                },
+            ],
+            sections: vec![rc_shape.to_section(SectionId(0), "RC-400x600".into())],
+            materials: vec![Material {
+                id: MaterialId(0),
+                name: "FC24".into(),
+                young: 23000.0,
+                poisson: 0.2,
+                density: 2.4e-9,
+                shear: None,
+                fc: Some(24.0),
+                fy: None,
+            }],
+            elements: vec![ElementData {
+                id: ElemId(0),
+                kind: ElementKind::Beam,
+                nodes: [NodeId(0), NodeId(1)].into_iter().collect(),
+                section: Some(SectionId(0)),
+                material: Some(MaterialId(0)),
+                local_axis: LocalAxis {
+                    ref_vector: [1.0, 0.0, 0.0],
+                },
+                end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+                force_regime: ForceRegime::Auto,
+                rigid_zone: Default::default(),
+            }],
+            load_cases: vec![LoadCase {
+                id: LoadCaseId(0),
+                name: "圧縮".into(),
+                nodal: vec![NodalLoad {
+                    node: NodeId(1),
+                    values: [0.0, 0.0, -p, 0.0, 0.0, 0.0],
+                }],
+                member: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        let mut app = App::default();
+        app.load_model(model);
+        app.run_linear_static(LoadCaseId(0));
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
+
+        let member_forces = &app.results.as_ref().unwrap().member_forces;
+        let (_, mf) = member_forces
+            .iter()
+            .find(|(id, _)| *id == ElemId(0))
+            .expect("elem 0 の内力があるはず");
+        let n_raw = mf.at.first().expect("eval_sections[0] があるはず").1[0];
+        // 圧縮なので符号規約上「圧縮正」の n_raw は正で、大きさは P と厳密に一致する。
+        assert!((n_raw - p).abs() < 1e-6, "n_raw={} (expected {})", n_raw, p);
+
+        let sigma_0 = rc_sigma_0_from_last_static(member_forces, ElemId(0), b, d);
+        let expected_sigma_0 = p / (b * d);
+        assert!(
+            (sigma_0 - expected_sigma_0).abs() < 1e-9,
+            "sigma_0={} expected={}",
+            sigma_0,
+            expected_sigma_0
+        );
     }
 
     /// Z=0 平面の矩形（4000×6000）+外周4本の梁 + スラブ1枚（TriTrapezoid）を持つモデルを作る。

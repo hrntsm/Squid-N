@@ -26,6 +26,10 @@ pub struct RcCapacityInput {
     pub sigma_wy: f64,
     /// 内法スパン h0 \[mm\]（反曲点中央を仮定し Qmu = 2Mu/h0）
     pub clear_span: f64,
+    /// 軸方向圧縮応力度 σ0 \[N/mm²\]（既定 0）。`rc_qsu_simple` の軸力項
+    /// `0.1・σ0・b・j` に用いる。荒川式の適用範囲である 0〜0.4Fc に
+    /// `rc_qsu_simple` 内でクランプされる（要・原典照合）。
+    pub sigma_0: f64,
 }
 
 /// 曲げ終局モーメント Mu ≈ 0.9・at・σy・j（引張鉄筋降伏型の略算式、j = 7・d_e/8）。
@@ -57,14 +61,16 @@ pub fn rc_qmu_simple(inp: &RcCapacityInput) -> f64 {
 /// せん断終局耐力 Qsu \[N\]（荒川mean式系の略算式、要・原典照合）。
 ///
 /// ```text
-/// Qsu = { 0.068・pt^0.23・(Fc+18) / (M/(Q・d_e)+0.12) + 0.85・√(pw・σwy) }・b・j
+/// Qsu = { 0.068・pt^0.23・(Fc+18) / (M/(Q・d_e)+0.12) + 0.85・√(pw・σwy) + 0.1・σ0 }・b・j
 /// ```
 /// - `pt = 100・at/(b・d_e)` \[%\]（引張鉄筋比）
 /// - `j = 7・d_e/8`
 /// - せん断スパン比 `M/(Q・d_e) = h0/(2・d_e)` は反曲点中央（等曲げ勾配）の仮定から
 ///   導く略算のため、式の適用範囲である 1.0〜3.0 にクランプする。
 /// - `pw` は式の適用範囲の上限 0.012 でクランプする（下限は 0）。
-/// - 軸力項 `0.1・σ0` は簡易化のため安全側（Qsu を過小評価する側）に省略する。
+/// - 軸力項 `0.1・σ0`（σ0: 軸方向圧縮応力度）は荒川式の適用範囲である
+///   0〜0.4Fc にクランプする（負の σ0（引張）は 0 とみなし、Qsu を低減しない
+///   安全側の扱いとする）。
 ///
 /// 全係数は要・原典照合（靭性指針/技術基準解説書等）。
 /// 不正入力（b, d_eff, at, Fc, clear_span のいずれかが 0 以下）は 0.0 を返す。
@@ -78,7 +84,10 @@ pub fn rc_qsu_simple(inp: &RcCapacityInput) -> f64 {
     let pw = inp.pw.clamp(0.0, 0.012);
     let concrete_term = 0.068 * pt.powf(0.23) * (inp.fc + 18.0) / (shear_span_ratio + 0.12);
     let hoop_term = 0.85 * (pw * inp.sigma_wy).max(0.0).sqrt();
-    (concrete_term + hoop_term) * inp.b * j
+    // 軸力項: 適用範囲 0〜0.4Fc にクランプ（荒川式の適用範囲、要・原典照合）。
+    let sigma_0 = inp.sigma_0.clamp(0.0, 0.4 * inp.fc);
+    let axial_term = 0.1 * sigma_0;
+    (concrete_term + hoop_term + axial_term) * inp.b * j
 }
 
 #[cfg(test)]
@@ -98,6 +107,7 @@ mod tests {
             pw: 0.002,
             sigma_wy: 295.0,
             clear_span: 3000.0,
+            sigma_0: 0.0,
         }
     }
 
@@ -268,5 +278,60 @@ mod tests {
         let mut span_zero = sample_input();
         span_zero.clear_span = 0.0;
         assert_eq!(rc_qsu_simple(&span_zero), 0.0);
+    }
+
+    #[test]
+    fn test_rc_qsu_simple_sigma_0_zero_matches_original() {
+        // sigma_0=0.0（既定）は従来値と一致すること。
+        let inp = sample_input();
+        assert_eq!(inp.sigma_0, 0.0);
+        let qsu = rc_qsu_simple(&inp);
+        let pt: f64 = 100.0 * 1935.0 / (400.0 * 530.0);
+        let j = 7.0 * 530.0 / 8.0;
+        let shear_span_ratio: f64 = 3000.0 / (2.0 * 530.0);
+        let concrete_term = 0.068 * pt.powf(0.23) * (24.0 + 18.0) / (shear_span_ratio + 0.12);
+        let hoop_term = 0.85 * (0.002_f64 * 295.0).sqrt();
+        let qsu_handcalc = (concrete_term + hoop_term) * 400.0 * j;
+        assert!((qsu - qsu_handcalc).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rc_qsu_simple_axial_term_adds_01_sigma0_b_j() {
+        // 適用範囲内(0〜0.4Fc=9.6)の sigma_0=5.0 のとき、Qsu は
+        // sigma_0=0 の場合に対して厳密に 0.1・σ0・b・j 分だけ増える。
+        let mut inp = sample_input();
+        let qsu_base = rc_qsu_simple(&inp);
+        inp.sigma_0 = 5.0;
+        let qsu_with_axial = rc_qsu_simple(&inp);
+        let j = 7.0 * 530.0 / 8.0;
+        let expected_delta = 0.1 * 5.0 * 400.0 * j;
+        assert!(
+            (qsu_with_axial - qsu_base - expected_delta).abs() < 1e-6,
+            "delta={} expected={}",
+            qsu_with_axial - qsu_base,
+            expected_delta
+        );
+    }
+
+    #[test]
+    fn test_rc_qsu_simple_sigma_0_clamped_to_upper_bound_04fc() {
+        // Fc=24.0 → 上限 0.4*24=9.6。これを超える sigma_0=20.0 は 9.6 にクランプされる。
+        let mut inp_over = sample_input();
+        inp_over.sigma_0 = 20.0;
+        let mut inp_clamped = sample_input();
+        inp_clamped.sigma_0 = 0.4 * 24.0;
+        assert!((rc_qsu_simple(&inp_over) - rc_qsu_simple(&inp_clamped)).abs() < 1e-9);
+        // クランプなしでは sigma_0=9.6 の方が sigma_0=0 より Qsu が大きいはず。
+        assert!(rc_qsu_simple(&inp_clamped) > rc_qsu_simple(&sample_input()));
+    }
+
+    #[test]
+    fn test_rc_qsu_simple_sigma_0_negative_is_clamped_to_zero() {
+        // 負の sigma_0（引張）は 0 とみなす（Qsu を低減しない安全側）。
+        let mut inp_neg = sample_input();
+        inp_neg.sigma_0 = -10.0;
+        let qsu_neg = rc_qsu_simple(&inp_neg);
+        let qsu_zero = rc_qsu_simple(&sample_input());
+        assert!((qsu_neg - qsu_zero).abs() < 1e-9);
     }
 }
