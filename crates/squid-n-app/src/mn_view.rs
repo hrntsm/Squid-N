@@ -12,8 +12,8 @@ use crate::theme;
 use crate::viewer::{project, q_axis_angle, q_mul, q_norm, CameraState};
 use squid_n_core::section_shape::SectionShape;
 use squid_n_section::mn_surface::{
-    build_box_surface, build_surface, plastic_fibers, slice_at_n, MnSurface, PlasticFiber,
-    StrengthParams, YieldModelKind,
+    build_simple_spring_surface, build_surface, plastic_fibers, slice_at_n, MnSurface,
+    PlasticFiber, StrengthParams, YieldModelKind,
 };
 
 /// 曲面の格子解像度（経線方向・周方向）。
@@ -252,7 +252,7 @@ fn ensure_cache(state: &mut MnViewState, section_idx: usize, shape: &SectionShap
 
     let fiber = build_surface(&fiber_fibers, YieldModelKind::MultiFiber, N_ALPHA, N_BETA);
     let ms = build_surface(&ms_fibers, YieldModelKind::MultiSpring, N_ALPHA, N_BETA);
-    let simple = build_box_surface(&fiber_fibers, N_ALPHA, N_BETA);
+    let simple = build_simple_spring_surface(&fiber_fibers, N_ALPHA, N_BETA);
 
     state.cache = Some(MnCache {
         section_idx,
@@ -532,20 +532,34 @@ fn draw_slice_plot(ui: &mut egui::Ui, cache: &MnCache, show: [bool; 3], n_target
         .legend(egui_plot::Legend::default())
         .height(height)
         .show(ui, |plot_ui| {
-            // 単純降伏バネ: N/My/Mz が独立降伏のため、軸力が耐力範囲内なら
-            // 軸力によらず一定の矩形になる（範囲外は描かない＝これが他モデルとの違い）。
-            if show[0] && n_target >= cache.simple.n_comp && n_target <= cache.simple.n_tens {
-                let my = cache.simple.mp_y / 1e6;
-                let mz = cache.simple.mp_z / 1e6;
-                let pts = vec![[my, mz], [my, -mz], [-my, -mz], [-my, mz], [my, mz]];
-                plot_ui.line(
-                    egui_plot::Line::new(
-                        YieldModelKind::SimpleSpring.label(),
-                        egui_plot::PlotPoints::from(pts),
-                    )
-                    .color(model_color(YieldModelKind::SimpleSpring))
-                    .width(2.0),
-                );
+            // 単純降伏バネ: 2バネ連成の線形相関 |N|/N許容 + M/M許容 = 1 により、
+            // 軸力に応じて (1 − |N|/N許容) 倍に相似縮小する楕円になる
+            // （軸力によらず線形に縮む点がファイバ積分系モデルとの違い）。
+            if show[0] {
+                let n_ref = if n_target >= 0.0 {
+                    cache.simple.n_tens.max(1.0)
+                } else {
+                    cache.simple.n_comp.abs().max(1.0)
+                };
+                let m_scale = 1.0 - n_target.abs() / n_ref;
+                if m_scale > 0.0 {
+                    let my = m_scale * cache.simple.mp_y / 1e6;
+                    let mz = m_scale * cache.simple.mp_z / 1e6;
+                    let pts: Vec<[f64; 2]> = (0..=SLICE_PTS)
+                        .map(|k| {
+                            let th = 2.0 * std::f64::consts::PI * k as f64 / SLICE_PTS as f64;
+                            [my * th.cos(), mz * th.sin()]
+                        })
+                        .collect();
+                    plot_ui.line(
+                        egui_plot::Line::new(
+                            YieldModelKind::SimpleSpring.label(),
+                            egui_plot::PlotPoints::from(pts),
+                        )
+                        .color(model_color(YieldModelKind::SimpleSpring))
+                        .width(2.0),
+                    );
+                }
             }
             if show[1] {
                 plot_slice_curve(

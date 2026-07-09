@@ -2,8 +2,10 @@
 //!
 //! 部材の降伏判定に用いる N–My–Mz 空間の相関曲面を、モデル化手法別に算定する:
 //!
-//! - **端部単純降伏バネ** (`SimpleSpring`): N・My・Mz が独立に降伏する
-//!   （軸力と曲げの相関を持たない）ため、曲面は直方体になる。
+//! - **端部単純降伏バネ** (`SimpleSpring`): 軸バネと回転バネの2バネ連成を
+//!   線形相関 |N|/N許容 + M/M許容 = 1 で考慮する。曲面は N 軸を頂点とする
+//!   双錐（N-M 平面内では直線）になり、ファイバ積分による曲面の
+//!   ふくらみ（特に RC の圧縮側での耐力上昇）は表現できない。
 //! - **マルチスプリング** (`MultiSpring`): 断面を少数の軸バネ群で置換したモデル。
 //!   N-M 相関は表現できるが、バネ本数が少ないため曲面は多面体状（ファセット状）になる。
 //! - **マルチファイバー** (`MultiFiber`): 断面を多数のファイバに細分割したモデル。
@@ -42,7 +44,7 @@ pub struct PlasticFiber {
 /// 降伏判定のモデル化手法。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum YieldModelKind {
-    /// 部材端の単純降伏バネ（N/My/Mz 独立降伏、相関なし）
+    /// 部材端の単純降伏バネ（2バネ連成: |N|/N許容 + M/M許容 = 1 の線形相関）
     SimpleSpring,
     /// マルチスプリング（粗いバネ群、N-M 相関あり・多面体状）
     MultiSpring,
@@ -242,48 +244,55 @@ pub fn build_surface(
     }
 }
 
-/// 単純降伏バネモデルの曲面（直方体）を構築する。
+/// 単純降伏バネモデルの曲面（軸バネと回転バネの2バネ連成）を構築する。
 ///
 /// バネの降伏値は細分割ファイバから算定した軸耐力 Nc/Nt と N=0 の全塑性モーメント
-/// Mp_y/Mp_z とし、N・My・Mz は互いに独立に降伏する（相関なし）ものとする。
-/// 描画の都合上、他モデルと同じ (α, β) 格子トポロジで直方体表面を返す。
-pub fn build_box_surface(fibers_fine: &[PlasticFiber], n_alpha: usize, n_beta: usize) -> MnSurface {
+/// Mp_y/Mp_z とし、軸バネと回転バネの連成を線形相関
+///
+/// ```text
+/// |N|/N許容 + M/M許容 = 1
+/// ```
+///
+/// で考慮する（N許容は引張側 Nt / 圧縮側 |Nc| を使い分け、M/M許容は
+/// 正規化モーメントの合成値 √((My/Mp_y)² + (Mz/Mp_z)²)）。
+/// 曲面は N 軸を頂点とする双錐（N-M 平面内では直線）になる。
+/// 描画の都合上、他モデルと同じ (α, β) 格子トポロジで返す。
+pub fn build_simple_spring_surface(
+    fibers_fine: &[PlasticFiber],
+    n_alpha: usize,
+    n_beta: usize,
+) -> MnSurface {
     let (nc, nt) = axial_capacity(fibers_fine);
     let mp_y = plastic_moment_at_n(fibers_fine, 1.0, 0.0, 0.0).map_or(0.0, |m| m[0]);
     let mp_z = plastic_moment_at_n(fibers_fine, 0.0, 1.0, 0.0).map_or(0.0, |m| m[1]);
 
-    // 原点から方向 d へ伸ばした半直線と直方体境界の交点を格子点とする。
-    // 原点が直方体内部にある必要があるため、耐力が 0 の軸は微小値で下駄を履かせる。
-    let lo = [nc.min(-1.0), -mp_y.abs().max(1.0), -mp_z.abs().max(1.0)];
-    let hi = [nt.max(1.0), mp_y.abs().max(1.0), mp_z.abs().max(1.0)];
-    // 各軸の半幅（方向ベクトルの尺度合わせに使用）
-    let half = [
-        (hi[0] - lo[0]) / 2.0,
-        (hi[1] - lo[1]) / 2.0,
-        (hi[2] - lo[2]) / 2.0,
-    ];
+    // 耐力 0 の軸があると退化するため微小値で下駄を履かせる
+    let n_tens_ref = nt.max(1.0);
+    let n_comp_ref = nc.abs().max(1.0);
+    let my_ref = mp_y.abs().max(1.0);
+    let mz_ref = mp_z.abs().max(1.0);
 
     let mut grid = Vec::with_capacity(n_alpha + 1);
     for i in 0..=n_alpha {
         let alpha = std::f64::consts::PI * i as f64 / n_alpha as f64;
+        // α ∈ [0, π/2) は引張側、(π/2, π] は圧縮側の N 許容値を使う
+        let n_ref = if alpha.cos() >= 0.0 {
+            n_tens_ref
+        } else {
+            n_comp_ref
+        };
+        // 正規化空間の方向 (cosα, sinα·cosβ, sinα·sinβ) に対し
+        // |N|/N許容 + √((My/Mp_y)² + (Mz/Mp_z)²) = t·(|cosα| + sinα) = 1
+        // となるよう倍率 t を定める（sinα ≥ 0）。
+        let t = 1.0 / (alpha.cos().abs() + alpha.sin());
         let mut row = Vec::with_capacity(n_beta);
         for j in 0..n_beta {
             let beta = 2.0 * std::f64::consts::PI * j as f64 / n_beta as f64;
-            let d = [
-                alpha.cos() * half[0],
-                alpha.sin() * beta.cos() * half[1],
-                alpha.sin() * beta.sin() * half[2],
-            ];
-            // t = min_k (境界_k / d_k) （d_k の符号に応じた側の境界を使う）
-            let mut t = f64::INFINITY;
-            for k in 0..3 {
-                if d[k] > 1e-300 {
-                    t = t.min(hi[k] / d[k]);
-                } else if d[k] < -1e-300 {
-                    t = t.min(lo[k] / d[k]);
-                }
-            }
-            row.push([d[0] * t, d[1] * t, d[2] * t]);
+            row.push([
+                t * alpha.cos() * n_ref,
+                t * alpha.sin() * beta.cos() * my_ref,
+                t * alpha.sin() * beta.sin() * mz_ref,
+            ]);
         }
         grid.push(row);
     }
@@ -784,22 +793,32 @@ mod tests {
     }
 
     #[test]
-    fn test_box_surface_extents() {
+    fn test_simple_spring_surface_linear_interaction() {
         let fibers = steel_rect_fibers(100.0, 200.0, 235.0, 100);
-        let surf = build_box_surface(&fibers, 16, 32);
+        let surf = build_simple_spring_surface(&fibers, 16, 32);
         let npl = 100.0 * 200.0 * 235.0;
-        let mp_y = 235.0 * 100.0 * 200.0 * 200.0 / 4.0;
-        // 格子点の最大値が直方体の各辺に一致（相関なし）
-        let n_max = surf.grid.iter().flatten().map(|p| p[0]).fold(0.0, f64::max);
-        let my_max = surf.grid.iter().flatten().map(|p| p[1]).fold(0.0, f64::max);
-        assert_relative_eq!(n_max, npl, max_relative = 1e-6);
-        assert_relative_eq!(my_max, mp_y, max_relative = 1e-2);
-        // 直方体は N が最大でも M 耐力が落ちない: 極の近傍でも |My| 上限は mp_y
-        assert!(surf
-            .grid
-            .iter()
-            .flatten()
-            .all(|p| p[1].abs() <= my_max * (1.0 + 1e-9)));
+        // 極は軸耐力に一致
+        for p in &surf.grid[0] {
+            assert_relative_eq!(p[0], npl, max_relative = 1e-6);
+        }
+        for p in &surf.grid[16] {
+            assert_relative_eq!(p[0], -npl, max_relative = 1e-6);
+        }
+        // 全格子点が |N|/N許容 + √((My/Mp_y)² + (Mz/Mp_z)²) = 1 を満たす
+        for p in surf.grid.iter().flatten() {
+            let n_ref = if p[0] >= 0.0 {
+                surf.n_tens
+            } else {
+                surf.n_comp.abs()
+            };
+            let f = p[0].abs() / n_ref
+                + ((p[1] / surf.mp_y).powi(2) + (p[2] / surf.mp_z).powi(2)).sqrt();
+            assert_relative_eq!(f, 1.0, max_relative = 1e-9);
+        }
+        // 赤道（α=π/2、i=8）は N=0 の全塑性モーメント楕円: β=0 で My = Mp_y
+        let equator = &surf.grid[8];
+        assert_relative_eq!(equator[0][0], 0.0, epsilon = npl * 1e-12);
+        assert_relative_eq!(equator[0][1], surf.mp_y, max_relative = 1e-9);
     }
 
     #[test]
