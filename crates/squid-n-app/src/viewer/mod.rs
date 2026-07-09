@@ -59,17 +59,19 @@ pub enum ViewMode {
 }
 
 // ===== クォータニオン（アークボール回転用, [w, x, y, z]）=====
-type Quat = [f32; 4];
+// mn_view（M-N相関曲面ビュー）でも同じ操作感の3Dカメラを実装するため、
+// これらのヘルパは pub(crate) として公開し再利用する。
+pub(crate) type Quat = [f32; 4];
 
 /// 軸 `axis`（正規化済み想定）まわり `ang` ラジアンの回転クォータニオン。
-fn q_axis_angle(axis: [f32; 3], ang: f32) -> Quat {
+pub(crate) fn q_axis_angle(axis: [f32; 3], ang: f32) -> Quat {
     let h = ang * 0.5;
     let s = h.sin();
     [h.cos(), axis[0] * s, axis[1] * s, axis[2] * s]
 }
 
 /// クォータニオン積 a⊗b。
-fn q_mul(a: Quat, b: Quat) -> Quat {
+pub(crate) fn q_mul(a: Quat, b: Quat) -> Quat {
     [
         a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
         a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
@@ -79,7 +81,7 @@ fn q_mul(a: Quat, b: Quat) -> Quat {
 }
 
 /// 正規化（数値誤差の累積を抑える）。
-fn q_norm(q: Quat) -> Quat {
+pub(crate) fn q_norm(q: Quat) -> Quat {
     let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
     if n < 1e-9 {
         [1.0, 0.0, 0.0, 0.0]
@@ -89,7 +91,7 @@ fn q_norm(q: Quat) -> Quat {
 }
 
 /// ベクトル v をクォータニオン q で回転する。
-fn q_rotate(q: Quat, v: [f32; 3]) -> [f32; 3] {
+pub(crate) fn q_rotate(q: Quat, v: [f32; 3]) -> [f32; 3] {
     let qv = [q[1], q[2], q[3]];
     let t = [
         2.0 * (qv[1] * v[2] - qv[2] * v[1]),
@@ -111,11 +113,11 @@ fn q_rotate(q: Quat, v: [f32; 3]) -> [f32; 3] {
 #[derive(Clone)]
 pub struct CameraState {
     /// 回転（クォータニオン）
-    rot: Quat,
+    pub(crate) rot: Quat,
     /// 画面パン（px）
-    pan: [f32; 2],
+    pub(crate) pan: [f32; 2],
     /// ズーム倍率（§3-2: 既定 3.0、範囲 0.5–10.0）
-    zoom: f32,
+    pub(crate) zoom: f32,
 }
 
 impl Default for CameraState {
@@ -135,7 +137,7 @@ impl Default for CameraState {
 
 /// ワールド座標 `p` を投影する。`center3` はモデル中心（回転中心）、`scale` は px/世界長、
 /// `screen_center` は描画領域中心（px）。
-fn project(
+pub(crate) fn project(
     p: [f64; 3],
     center3: [f64; 3],
     cam: &CameraState,

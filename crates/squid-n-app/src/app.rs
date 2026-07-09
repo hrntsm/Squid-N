@@ -38,6 +38,14 @@ pub enum ResultsView {
     Pushover,
 }
 
+/// 設計タブ内の切替（検定表・MN相関曲面ビュー）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DesignView {
+    #[default]
+    Table,
+    MnSurface,
+}
+
 /// ナビゲータ（左ペイン）。階/部材群/ケース系の選択状態。
 #[derive(Default)]
 pub struct Navigator {
@@ -266,6 +274,12 @@ pub struct App {
     /// 結果タブ内の表示切替（3D / 時刻歴）
     #[cfg(feature = "gui")]
     pub results_view: ResultsView,
+    /// 設計タブ内の表示切替（検定表 / MN相関曲面）
+    #[cfg(feature = "gui")]
+    pub design_view: DesignView,
+    /// MN 相関曲面ビューの状態（断面選択・材料強度・表示切替・カメラ等）
+    #[cfg(feature = "gui")]
+    pub mn_view: crate::mn_view::MnViewState,
     /// ビューアの表示モード
     #[cfg(feature = "gui")]
     pub view_mode: crate::viewer::ViewMode,
@@ -364,6 +378,10 @@ impl Default for App {
             left_panel_width: 280.0,
             #[cfg(feature = "gui")]
             results_view: ResultsView::default(),
+            #[cfg(feature = "gui")]
+            design_view: DesignView::default(),
+            #[cfg(feature = "gui")]
+            mn_view: crate::mn_view::MnViewState::default(),
             #[cfg(feature = "gui")]
             view_mode: crate::viewer::ViewMode::default(),
             #[cfg(feature = "gui")]
@@ -1701,7 +1719,7 @@ impl eframe::App for App {
             Tab::Model | Tab::Loads => crate::viewer::viewer_panel(ui, self),
             Tab::Analysis => self.analysis_tab_panel(ui),
             Tab::Results => self.results_tab_panel(ui),
-            Tab::Design => crate::design_view::design_table(ui, self),
+            Tab::Design => self.design_tab_panel(ui),
             Tab::Report => self.report_tab_panel(ui),
         });
 
@@ -2509,6 +2527,25 @@ impl App {
             ResultsView::Spatial => crate::viewer::viewer_panel(ui, self),
             ResultsView::TimeHistory => crate::time_history_view::time_history_panel(ui, self),
             ResultsView::Pushover => self.pushover_panel(ui),
+        }
+    }
+
+    /// 設計タブ：検定表（許容応力度・保有水平耐力）と MN 相関曲面ビューを切り替える。
+    fn design_tab_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let sel_table = self.design_view == DesignView::Table;
+            let sel_mn = self.design_view == DesignView::MnSurface;
+            if ui.selectable_label(sel_table, "検定表").clicked() {
+                self.design_view = DesignView::Table;
+            }
+            if ui.selectable_label(sel_mn, "MN相関曲面").clicked() {
+                self.design_view = DesignView::MnSurface;
+            }
+        });
+        ui.separator();
+        match self.design_view {
+            DesignView::Table => crate::design_view::design_table(ui, self),
+            DesignView::MnSurface => crate::mn_view::mn_surface_panel(ui, self),
         }
     }
 
