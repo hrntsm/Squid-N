@@ -206,19 +206,19 @@ pub fn steel_i_t(b: f64, tf: f64, h: f64, tw: f64) -> f64 {
 /// `lb`: 圧縮フランジ支点間距離（横座屈長さ）[mm]、`i`: [`steel_i_t`] の
 /// 断面二次半径、`h`: 梁せい [mm]、`af`: 圧縮フランジ断面積 `B·tf` [mm²]。
 ///
-/// 修正係数 C は本来 `1.75+1.05(M2/M1)+0.3(M2/M1)² ≤ 2.3`（端部モーメント比
-/// M2/M1 に依存）だが、[`DesignCtx`] に端部モーメント比の情報が無いため、
-/// 本実装では常に **C=1.0（安全側・最も不利な等曲げ分布相当）固定**とする。
+/// 修正係数 `c` は呼び出し側で [`steel_lateral_buckling_c`] を用いて求め、
+/// ここでは既に確定した値を受け取る（`c=1.0` は安全側・最も不利な等曲げ
+/// 分布相当）。`fb1` の分母 `C·Λ²` が大きくなるほど `fb1` は増加する。
 ///
 /// 短期は長期の 1.5 倍（上限 F）。
-pub fn steel_fb_h(f: f64, term: LoadTerm, lb: f64, i: f64, h: f64, af: f64) -> f64 {
-    const C: f64 = 1.0;
+pub fn steel_fb_h(f: f64, term: LoadTerm, lb: f64, i: f64, h: f64, af: f64, c: f64) -> f64 {
+    let c = if c > 1e-9 { c } else { 1.0 };
     let i = i.max(1e-9);
     let af = af.max(1e-9);
     let big_l = big_lambda(f);
     let big_l2 = (big_l.max(1e-9)).powi(2);
 
-    let fb1 = f * (2.0 / 3.0 - (4.0 / 15.0) * (lb / i).powi(2) / (C * big_l2));
+    let fb1 = f * (2.0 / 3.0 - (4.0 / 15.0) * (lb / i).powi(2) / (c * big_l2));
     let denom2 = lb * h / af;
     let fb2 = if denom2 > 0.0 {
         89_000.0 / denom2
@@ -232,6 +232,57 @@ pub fn steel_fb_h(f: f64, term: LoadTerm, lb: f64, i: f64, h: f64, af: f64) -> f
         LoadTerm::Long => fb_long,
         LoadTerm::Short => (fb_long * 1.5).min(f),
     }
+}
+
+/// 横座屈許容曲げ応力度 fb1 の修正係数 C（鋼構造設計規準 1973）。
+///
+/// `C = 1.75 + 1.05·(M2/M1) + 0.3·(M2/M1)² ≤ 2.3`
+///
+/// - `M1`: 座屈区間（横座屈長さ `lb` の区間）端部の強軸曲げモーメントの
+///   絶対値が大きい方、`M2`: 小さい方（[`DesignCtx::end_moments_z`]）。
+/// - `M2/M1` の符号は「複曲率（部材が S 字に曲がる、反曲点あり）なら正、
+///   単曲率（一様な向きに曲がる）なら負」というマニュアルの定義に従う。
+///   **squid-n の内力符号規約では、部材両端の `mz` の符号が同じ場合が
+///   複曲率、異なる場合が単曲率に対応する**（マニュアルでいう「端部モーメ
+///   ントが逆符号＝複曲率」は、部材の各端の局所座標系が反転している一般的
+///   な有限要素の符号規約を経ると「同符号」として観測されるため）。
+///   すなわちモーメント図 `mz(0)`, `mz(1)` が同符号＝軸をまたがず単調＝
+///   実際には反曲点を持つ複曲率、異符号＝軸をまたぐ＝実際には反曲点の無い
+///   単曲率、という対応になる。
+/// - 座屈区間中央部（[`DesignCtx::mid_moment_z`]）の絶対値が両端部の絶対値
+///   より大きい場合は、区間内の最大曲げが端部にないため安全側の `C=1.0`
+///   とする。
+/// - [`DesignCtx::end_moments_z`] が `None` の場合は、端部モーメント比の
+///   情報が無いため従来通り `C=1.0`（安全側・最も不利な等曲げ分布相当）
+///   とする。
+fn steel_lateral_buckling_c(ctx: &DesignCtx) -> f64 {
+    let Some((m_i, m_j)) = ctx.end_moments_z else {
+        return 1.0;
+    };
+    let abs_i = m_i.abs();
+    let abs_j = m_j.abs();
+    let m1 = abs_i.max(abs_j);
+    let m2 = abs_i.min(abs_j);
+
+    // 区間中央の曲げが端部より大きければ、区間内最大曲げが端部に無いため C=1.0。
+    if let Some(mid) = ctx.mid_moment_z {
+        if mid.abs() > m1 + 1e-9 {
+            return 1.0;
+        }
+    }
+
+    if m1 <= 1e-9 {
+        // 両端とも曲げがほぼ無い（M2/M1=0 相当）→ C=1.75。
+        return 1.75;
+    }
+
+    let ratio_abs = m2 / m1;
+    // 同符号（squid-n 規約で複曲率）なら正、異符号（単曲率）なら負。
+    let same_sign = abs_i <= 1e-9 || abs_j <= 1e-9 || m_i * m_j > 0.0;
+    let m2_over_m1 = if same_sign { ratio_abs } else { -ratio_abs };
+
+    let c = 1.75 + 1.05 * m2_over_m1 + 0.3 * m2_over_m1 * m2_over_m1;
+    c.min(2.3)
 }
 
 // ---------------------------------------------------------------------
@@ -352,6 +403,88 @@ fn nonzero(z: f64) -> f64 {
     }
 }
 
+// ---------------------------------------------------------------------
+// 大梁必要横補剛数（情報出力のみ。検定比には含めない）
+// ---------------------------------------------------------------------
+
+/// 大梁の必要横補剛数 n と弱軸細長比 λy を求める（マニュアル「大梁の必要
+/// 横補剛数」）。検定比には含めない参考情報。
+///
+/// `λy = L/iy_weak`（`iy_weak = √(Iz/A)`：squid-n の弱軸＝断面二次モーメント
+/// `Section.iz` に対応する断面二次半径、`L = DesignCtx.length`）として:
+/// - F値 235・215（400N/mm²級）: `n = (170 − λy)/20`
+/// - それ以外（275以上・490N/mm²級）: `n = (130 − λy)/20`
+///
+/// 負値は 0 に切り上げ、`n = ceil(max(0, 計算値))`。`length` が 0 以下の
+/// 場合は `None`（算定省略）。
+fn steel_required_lateral_bracing_count(f: f64, length: f64, sec: &Section) -> Option<(u32, f64)> {
+    if length <= 1e-9 {
+        return None;
+    }
+    let area = nonzero(sec.area);
+    let iy_weak_sq = (sec.iz / area).max(0.0);
+    let iy_weak = iy_weak_sq.sqrt();
+    let lambda_y = if iy_weak > 1e-9 {
+        length / iy_weak
+    } else {
+        0.0
+    };
+
+    let is_400_grade = (f - 235.0).abs() < 1e-6 || (f - 215.0).abs() < 1e-6;
+    let coef = if is_400_grade { 170.0 } else { 130.0 };
+
+    let n_raw = (coef - lambda_y) / 20.0;
+    let n = n_raw.max(0.0).ceil() as u32;
+    Some((n, lambda_y))
+}
+
+// ---------------------------------------------------------------------
+// たわみの検定（情報出力のみ。検定比には含めない。長期のみ）
+// ---------------------------------------------------------------------
+
+/// 大梁のたわみ S [mm] を求める（マニュアル「たわみの検定」、長期のみ）。
+///
+/// `S = (5·M0·l²)/(48·E·I) − ((ML+MR)·l²)/(16·E·I)`
+///
+/// - `ML`, `MR`: [`DesignCtx::end_moments_z`] の絶対値、`l = DesignCtx.length`、
+///   `E = Material.young`、`I = Section.iy`（強軸まわり断面二次モーメント）。
+/// - `M0`（単純梁と仮定した場合の中央モーメント）は、モーメント図が２次
+///   曲線分布（等分布荷重相当）であるという仮定の下、区間中央の実際の
+///   曲げモーメント `Mc`（[`DesignCtx::mid_moment_z`]）に「両端モーメント
+///   による中央部の低減分」を足し戻すことで近似復元する:
+///   `M0 = |Mc| + (|ML| + |MR|) / 2`。
+///   （等分布荷重・両端モーメント無しの単純梁では `Mc = M0 = wl²/8` となり、
+///   本式は `S = 5wl⁴/(384EI)` に一致する。）
+/// - マニュアル 04 章にはたわみの変形制限（例: `l/300` 等）の規定が無いため、
+///   本実装では S の算定値を情報として出力するのみで、変形量に基づく
+///   合否判定は行わない。
+///
+/// `end_moments_z` または `mid_moment_z` が `None`、`term` が長期以外、
+/// あるいは `length <= 0` の場合は `None`（算定省略）。
+fn steel_beam_deflection(ctx: &DesignCtx, sec: &Section, mat: &Material) -> Option<f64> {
+    if ctx.term != LoadTerm::Long {
+        return None;
+    }
+    let (m_i, m_j) = ctx.end_moments_z?;
+    let mc = ctx.mid_moment_z?;
+    let l = ctx.length;
+    if l <= 1e-9 {
+        return None;
+    }
+    let e = mat.young;
+    let i = sec.iy;
+    if e <= 1e-9 || i <= 1e-9 {
+        return None;
+    }
+
+    let m_l = m_i.abs();
+    let m_r = m_j.abs();
+    let m0 = mc.abs() + (m_l + m_r) / 2.0;
+
+    let s = (5.0 * m0 * l * l) / (48.0 * e * i) - ((m_l + m_r) * l * l) / (16.0 * e * i);
+    Some(s)
+}
+
 pub struct SteelDesign;
 
 impl DesignCheck for SteelDesign {
@@ -367,7 +500,7 @@ impl DesignCheck for SteelDesign {
         let term = ctx.term;
 
         match ctx.kind {
-            MemberKind::Beam => check_beam(forces, sec, ctx, f, term),
+            MemberKind::Beam => check_beam(forces, sec, mat, ctx, f, term),
             MemberKind::Column => check_column(forces, sec, ctx, f, term),
             MemberKind::Brace => check_brace(forces, sec, ctx, f, term),
         }
@@ -378,9 +511,13 @@ impl DesignCheck for SteelDesign {
 ///
 /// σb = |mz|/Z強軸 を fb（H形強軸は横座屈考慮、他は ft）で検定する。
 /// せん断は H形のみ von Mises 型（σb′, τ の合成）、他は単純 τ/fs。
+/// 検定比には含まれない参考情報として、detail 末尾に大梁の必要横補剛数
+/// （[`steel_required_lateral_bracing_count`]）とたわみ
+/// （[`steel_beam_deflection`]、長期のみ）を付記する。
 fn check_beam(
     forces: &MemberForcesAt,
     sec: &Section,
+    mat: &Material,
     ctx: &DesignCtx,
     f: f64,
     term: LoadTerm,
@@ -397,13 +534,14 @@ fn check_beam(
     let as_shear = shear_area(shape, sec, tw);
     let tau = forces.qy.abs() / safe_denom(as_shear);
 
+    let c = steel_lateral_buckling_c(ctx);
     let (fb, ratio_shear, shear_basis);
     match shape {
         ShapeCategory::H => {
             let af = b * tf;
             let i_t = steel_i_t(b, tf, h, tw);
             let lb = ctx.lb.unwrap_or(ctx.length);
-            fb = steel_fb_h(f, term, lb, i_t, h, af);
+            fb = steel_fb_h(f, term, lb, i_t, h, af, c);
             let sigma_b_prime = sigma_b * (h - 2.0 * tf).max(0.0) / safe_denom(h);
             let von_mises = (sigma_b_prime.powi(2) + 3.0 * tau.powi(2)).sqrt() / safe_denom(ft_val);
             ratio_shear = von_mises.max(tau / safe_denom(fs_val));
@@ -429,10 +567,22 @@ fn check_beam(
         matches!(shape, ShapeCategory::H),
         shear_basis
     );
-    let detail = format!(
+    let mut detail = format!(
         "σ={:.4} N/mm², fb={:.4} N/mm², τ={:.4} N/mm², fs={:.4} N/mm², 曲げ比={:.4}, せん断比={:.4}",
         sigma_b, fb, tau, fs_val, ratio_bend, ratio_shear
     );
+
+    if let Some((n, lambda_y)) = steel_required_lateral_bracing_count(f, ctx.length, sec) {
+        detail.push_str(&format!(", 必要横補剛数n={} (λy={:.3})", n, lambda_y));
+    }
+    if let Some(s) = steel_beam_deflection(ctx, sec, mat) {
+        let ratio_str = if s.abs() > 1e-9 {
+            format!("1/{:.0}", ctx.length / s.abs())
+        } else {
+            "1/∞".to_string()
+        };
+        detail.push_str(&format!(", たわみS={:.4} mm (S/l={})", s, ratio_str));
+    }
 
     CheckResult {
         ratio,
@@ -480,11 +630,14 @@ fn check_column(
     let fc_val = steel_fc(f, lambda, term);
 
     // 強軸 fb（H形のみ横座屈考慮。lb は柱の階高 = ctx.length）。
+    // 修正係数 C は梁と同様 ctx.end_moments_z/mid_moment_z から求める
+    // （柱も端部モーメント比により fb1 が変化する）。
+    let c = steel_lateral_buckling_c(ctx);
     let fb_strong = match shape {
         ShapeCategory::H => {
             let af = b * tf;
             let i_t = steel_i_t(b, tf, h, tw);
-            steel_fb_h(f, term, ctx.length, i_t, h, af)
+            steel_fb_h(f, term, ctx.length, i_t, h, af, c)
         }
         _ => ft_val,
     };
@@ -759,7 +912,7 @@ mod tests {
     #[test]
     fn test_fb_lb_zero_equals_ft() {
         let f = 235.0;
-        let fb = steel_fb_h(f, LoadTerm::Long, 0.0, 100.0, 500.0, 4000.0);
+        let fb = steel_fb_h(f, LoadTerm::Long, 0.0, 100.0, 500.0, 4000.0, 1.0);
         let ft = steel_ft(f, LoadTerm::Long);
         assert!((fb - ft).abs() < 1e-6, "fb={} ft={}", fb, ft);
     }
@@ -771,7 +924,7 @@ mod tests {
         let h = 500.0;
         let af = 4000.0;
         let lb = 20_000.0; // 十分大きい横座屈長さ
-        let fb = steel_fb_h(f, LoadTerm::Long, lb, i, h, af);
+        let fb = steel_fb_h(f, LoadTerm::Long, lb, i, h, af, 1.0);
         let fb2 = 89_000.0 / (lb * h / af);
         assert!(
             (fb - fb2).abs() < 1e-6,
@@ -1160,5 +1313,321 @@ mod tests {
         let ft = steel_ft(235.0, LoadTerm::Long);
         let expected = (100_000.0 / sec.area) / ft;
         assert!((result.ratio - expected).abs() < 1e-6);
+    }
+
+    // -------------------------------------------------------------
+    // 横座屈修正係数 C
+    // -------------------------------------------------------------
+
+    /// 複曲率（squid-n 規約で端部モーメント同符号）・等モーメント逆向き相当
+    /// （M2/M1=+1）で C=1.75+1.05+0.3=3.1 → 上限 2.3 にクランプされる。
+    #[test]
+    fn test_c_factor_double_curvature_equal_clamps_to_2_3() {
+        let ctx = DesignCtx {
+            end_moments_z: Some((100.0, 100.0)),
+            ..Default::default()
+        };
+        let c = steel_lateral_buckling_c(&ctx);
+        assert!((c - 2.3).abs() < 1e-9, "c={}", c);
+    }
+
+    /// 単曲率（端部モーメント異符号）・一様分布相当（M2/M1=-1）で
+    /// C=1.75-1.05+0.3=1.0。
+    #[test]
+    fn test_c_factor_single_curvature_uniform_is_1_0() {
+        let ctx = DesignCtx {
+            end_moments_z: Some((100.0, -100.0)),
+            ..Default::default()
+        };
+        let c = steel_lateral_buckling_c(&ctx);
+        assert!((c - 1.0).abs() < 1e-9, "c={}", c);
+    }
+
+    /// 片端モーメントが 0（M2=0）の場合は M2/M1=0 なので C=1.75。
+    #[test]
+    fn test_c_factor_m2_zero_is_1_75() {
+        let ctx = DesignCtx {
+            end_moments_z: Some((100.0, 0.0)),
+            ..Default::default()
+        };
+        let c = steel_lateral_buckling_c(&ctx);
+        assert!((c - 1.75).abs() < 1e-9, "c={}", c);
+    }
+
+    /// 座屈区間中央の曲げが両端部より大きい場合は安全側 C=1.0。
+    #[test]
+    fn test_c_factor_mid_moment_dominant_is_1_0() {
+        let ctx = DesignCtx {
+            end_moments_z: Some((50.0, 50.0)),
+            mid_moment_z: Some(200.0),
+            ..Default::default()
+        };
+        let c = steel_lateral_buckling_c(&ctx);
+        assert!((c - 1.0).abs() < 1e-9, "c={}", c);
+    }
+
+    /// end_moments_z が None の場合は従来通り C=1.0。
+    #[test]
+    fn test_c_factor_none_end_moments_is_1_0() {
+        let ctx = DesignCtx {
+            end_moments_z: None,
+            ..Default::default()
+        };
+        let c = steel_lateral_buckling_c(&ctx);
+        assert!((c - 1.0).abs() < 1e-9, "c={}", c);
+    }
+
+    /// 符号判定の検証: squid-n の内力符号規約では mz(0)/mz(1) が同符号なら
+    /// 複曲率扱い（C が大きくなる）、異符号なら単曲率扱い（C が小さくなる）。
+    /// |M2/M1| が同じでも符号が異なれば C の値が変わることを確認する。
+    #[test]
+    fn test_c_factor_same_sign_gt_diff_sign_for_same_ratio() {
+        let ctx_same = DesignCtx {
+            end_moments_z: Some((100.0, 30.0)), // 同符号（複曲率扱い）
+            ..Default::default()
+        };
+        let ctx_diff = DesignCtx {
+            end_moments_z: Some((100.0, -30.0)), // 異符号（単曲率扱い）
+            ..Default::default()
+        };
+        let c_same = steel_lateral_buckling_c(&ctx_same);
+        let c_diff = steel_lateral_buckling_c(&ctx_diff);
+        assert!(
+            c_same > c_diff,
+            "同符号(複曲率)の方が C が大きいはず: c_same={} c_diff={}",
+            c_same,
+            c_diff
+        );
+    }
+
+    /// C が増加すると fb1 の分母 `C·Λ²` が大きくなり、fb（=fb1 が支配的な
+    /// 場合）が増加することを確認する。
+    /// lb=5200 は fb1 が fb2 より大きく（fb1 が支配）、かつ長期許容引張
+    /// 上限（cap=F/1.5）未満に収まるよう選定した値（fb2, cap によるクランプ
+    /// で C の効果が隠れないようにするため）。
+    #[test]
+    fn test_fb_increases_with_c() {
+        let f = 235.0;
+        let i = 100.0;
+        let h = 500.0;
+        let af = 4000.0;
+        let lb = 5200.0;
+        let fb_c1 = steel_fb_h(f, LoadTerm::Long, lb, i, h, af, 1.0);
+        let fb_c23 = steel_fb_h(f, LoadTerm::Long, lb, i, h, af, 2.3);
+        let cap = f / 1.5;
+        assert!(
+            fb_c1 < cap - 1e-6,
+            "fb1 が cap でクランプされていない前提: fb_c1={} cap={}",
+            fb_c1,
+            cap
+        );
+        assert!(
+            fb_c23 > fb_c1,
+            "C が大きいほど fb は増えるはず: fb(C=1.0)={} fb(C=2.3)={}",
+            fb_c1,
+            fb_c23
+        );
+    }
+
+    // -------------------------------------------------------------
+    // 大梁必要横補剛数
+    // -------------------------------------------------------------
+
+    /// λy=90, 400N/mm²級（F=235）: n=(170-90)/20=4.0 → ceil=4。
+    #[test]
+    fn test_required_lateral_bracing_count_hand_calc() {
+        let sec = Section {
+            id: SectionId(0),
+            name: "H-dummy".to_string(),
+            area: 100.0,
+            iy: 0.0,
+            iz: 100.0 * 100.0_f64.powi(2), // iy_weak=√(iz/A)=100mm となるよう設定
+            j: 0.0,
+            depth: 0.0,
+            width: 0.0,
+            as_y: 0.0,
+            as_z: 0.0,
+            panel_thickness: None,
+            thickness: None,
+            shape: None,
+        };
+        let (n, lambda_y) = steel_required_lateral_bracing_count(235.0, 9000.0, &sec).unwrap();
+        assert!((lambda_y - 90.0).abs() < 1e-9, "λy={}", lambda_y);
+        assert_eq!(n, 4);
+    }
+
+    /// length=0 の場合は算定を省略する（None）。
+    #[test]
+    fn test_required_lateral_bracing_count_skipped_when_length_zero() {
+        let sec = Section {
+            id: SectionId(0),
+            name: "H-dummy".to_string(),
+            area: 100.0,
+            iy: 0.0,
+            iz: 1_000_000.0,
+            j: 0.0,
+            depth: 0.0,
+            width: 0.0,
+            as_y: 0.0,
+            as_z: 0.0,
+            panel_thickness: None,
+            thickness: None,
+            shape: None,
+        };
+        assert!(steel_required_lateral_bracing_count(235.0, 0.0, &sec).is_none());
+    }
+
+    /// 梁検定 detail 末尾に必要横補剛数が出力されることを確認する。
+    #[test]
+    fn test_beam_check_detail_contains_bracing_count() {
+        let sec = h_section(400.0, 200.0, 10.0, 15.0);
+        let mat = mat("SN400");
+        let forces = MemberForcesAt {
+            pos: 0.5,
+            n: 0.0,
+            qy: 0.0,
+            qz: 0.0,
+            my: 0.0,
+            mz: 1e7,
+        };
+        let ctx = DesignCtx {
+            term: LoadTerm::Long,
+            kind: MemberKind::Beam,
+            length: 9000.0,
+            ..Default::default()
+        };
+        let result = SteelDesign.check(&forces, &sec, &mat, &ctx);
+        assert!(
+            result.detail.contains("必要横補剛数n="),
+            "detail={}",
+            result.detail
+        );
+    }
+
+    // -------------------------------------------------------------
+    // たわみの検定
+    // -------------------------------------------------------------
+
+    /// 等分布荷重 w [N/mm] の単純梁相当（端部モーメント無し）を
+    /// M0=Mc=wl²/8 として与えると、標準公式 5wl⁴/(384EI) と一致する。
+    #[test]
+    fn test_deflection_matches_uniform_load_formula() {
+        let w = 10.0;
+        let l = 6000.0;
+        let e = 205_000.0;
+        let i = 5.0e7;
+        let mc = w * l * l / 8.0;
+
+        let sec = Section {
+            id: SectionId(0),
+            name: "dummy".to_string(),
+            area: 1.0,
+            iy: i,
+            iz: 1.0,
+            j: 0.0,
+            depth: 0.0,
+            width: 0.0,
+            as_y: 0.0,
+            as_z: 0.0,
+            panel_thickness: None,
+            thickness: None,
+            shape: None,
+        };
+        let material = mat("SN400");
+        let material = Material {
+            young: e,
+            ..material
+        };
+        let ctx = DesignCtx {
+            term: LoadTerm::Long,
+            kind: MemberKind::Beam,
+            length: l,
+            end_moments_z: Some((0.0, 0.0)),
+            mid_moment_z: Some(mc),
+            ..Default::default()
+        };
+        let s = steel_beam_deflection(&ctx, &sec, &material).unwrap();
+        let expected = 5.0 * w * l.powi(4) / (384.0 * e * i);
+        assert!(
+            (s - expected).abs() / expected.abs() < 1e-9,
+            "s={} expected={}",
+            s,
+            expected
+        );
+    }
+
+    /// 短期（term=Short）ではたわみ算定は省略される（None）。
+    #[test]
+    fn test_deflection_none_for_short_term() {
+        let sec = Section {
+            id: SectionId(0),
+            name: "dummy".to_string(),
+            area: 1.0,
+            iy: 5.0e7,
+            iz: 1.0,
+            j: 0.0,
+            depth: 0.0,
+            width: 0.0,
+            as_y: 0.0,
+            as_z: 0.0,
+            panel_thickness: None,
+            thickness: None,
+            shape: None,
+        };
+        let material = mat("SN400");
+        let ctx = DesignCtx {
+            term: LoadTerm::Short,
+            kind: MemberKind::Beam,
+            length: 6000.0,
+            end_moments_z: Some((1e6, 1e6)),
+            mid_moment_z: Some(2e6),
+            ..Default::default()
+        };
+        assert!(steel_beam_deflection(&ctx, &sec, &material).is_none());
+    }
+
+    /// 梁検定 detail に短期ではたわみ出力が無いこと（長期では出力されること）
+    /// を確認する。
+    #[test]
+    fn test_beam_check_detail_deflection_only_for_long_term() {
+        let sec = h_section(400.0, 200.0, 10.0, 15.0);
+        let mat_v = mat("SN400");
+        let forces = MemberForcesAt {
+            pos: 0.5,
+            n: 0.0,
+            qy: 0.0,
+            qz: 0.0,
+            my: 0.0,
+            mz: 1e7,
+        };
+        let ctx_long = DesignCtx {
+            term: LoadTerm::Long,
+            kind: MemberKind::Beam,
+            length: 6000.0,
+            end_moments_z: Some((5e6, 5e6)),
+            mid_moment_z: Some(1e7),
+            ..Default::default()
+        };
+        let result_long = SteelDesign.check(&forces, &sec, &mat_v, &ctx_long);
+        assert!(
+            result_long.detail.contains("たわみS="),
+            "detail={}",
+            result_long.detail
+        );
+
+        let ctx_short = DesignCtx {
+            term: LoadTerm::Short,
+            kind: MemberKind::Beam,
+            length: 6000.0,
+            end_moments_z: Some((5e6, 5e6)),
+            mid_moment_z: Some(1e7),
+            ..Default::default()
+        };
+        let result_short = SteelDesign.check(&forces, &sec, &mat_v, &ctx_short);
+        assert!(
+            !result_short.detail.contains("たわみS="),
+            "detail={}",
+            result_short.detail
+        );
     }
 }

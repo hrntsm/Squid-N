@@ -4,6 +4,8 @@
 //! （許容応力度検定）」の計算方法に準拠する:
 //! - 鋼構造: `steel`（S梁・S柱・鉄骨ブレース、鋼構造設計規準 1973）
 //! - RC 造: `rc`（RC梁・RC柱、RC規準 1999/2010・構造規定）
+pub mod joint;
+pub mod joint_wiring;
 pub mod rc;
 pub mod steel;
 

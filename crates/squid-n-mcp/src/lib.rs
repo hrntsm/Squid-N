@@ -1366,11 +1366,35 @@ fn compute_design_check_job(model: &Model, load_case: Option<u32>) -> Result<Job
         }
     }
 
+    // 節点単位の検定（RC 柱梁接合部・S パネルゾーン・冷間成形耐力比・耐震壁）。
+    let mf_slices: Vec<(
+        squid_n_core::ids::ElemId,
+        squid_n_design_jp::joint_wiring::ForcesAt,
+    )> = result
+        .member_forces
+        .iter()
+        .map(|(id, mf)| (*id, mf.at.as_slice()))
+        .collect();
+    let joint_checks = squid_n_design_jp::joint_wiring::collect_joint_checks(
+        model,
+        &mf_slices,
+        squid_n_design_jp::LoadTerm::Long,
+    );
+    let n_joint_checks = joint_checks.len();
+    let n_joint_ng = joint_checks.iter().filter(|(_, _, cr)| !cr.ok).count();
+    for (_, _, cr) in &joint_checks {
+        if cr.ratio > max_ratio {
+            max_ratio = cr.ratio;
+        }
+    }
+
     let summary = serde_json::json!({
         "kind": "DesignCheck",
         "case": lc_id,
         "n_checks": n_checks,
         "n_ng": n_ng,
+        "n_joint_checks": n_joint_checks,
+        "n_joint_ng": n_joint_ng,
         "max_ratio": max_ratio,
     });
     Ok(JobOutcome::DesignCheck {

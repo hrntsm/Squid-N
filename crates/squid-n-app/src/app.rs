@@ -1341,8 +1341,20 @@ impl App {
                 checks.push((*elem_id, *pos, cr));
             }
         }
+        // 節点単位の検定（RC 柱梁接合部・S パネルゾーン・冷間成形耐力比・耐震壁）。
+        let mf_slices: Vec<(ElemId, squid_n_design_jp::joint_wiring::ForcesAt)> = results
+            .member_forces
+            .iter()
+            .map(|(id, mf)| (*id, mf.at.as_slice()))
+            .collect();
+        let joint_checks = squid_n_design_jp::joint_wiring::collect_joint_checks(
+            &self.model,
+            &mf_slices,
+            self.design_term,
+        );
         if let Some(bundle) = self.results.as_mut() {
             bundle.checks = checks;
+            bundle.joint_checks = joint_checks;
         }
     }
 
