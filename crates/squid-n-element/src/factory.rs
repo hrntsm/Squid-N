@@ -121,6 +121,15 @@ pub fn build_behavior(data: &ElementData, model: &Model) -> (Box<dyn ElementBeha
             Box::new(crate::beam::BeamElement::new(data, model)),
             ElemState::default(),
         ),
+        // 一般ブレース：KB = factor·E·A/L（RESP-D マニュアル計算編02）。
+        // 引張専用ブレースは弾性解析で剛性を1/2にモデル化する（factor=0.5）。
+        ElementKind::Brace { tension_only } => {
+            let factor = if tension_only { 0.5 } else { 1.0 };
+            (
+                Box::new(crate::truss::TrussElement::new(data, model, factor)),
+                ElemState::default(),
+            )
+        }
     }
 }
 
@@ -163,6 +172,13 @@ pub fn build_nonlinear_behavior(
         // MS 要素: 端部バネ断面 + 中央弾性の非線形要素（P5.5 §3）
         ElementKind::Ms => (
             Box::new(crate::ms::MsElement::new(data, model)),
+            ElemState::default(),
+        ),
+        // 一般ブレース：マニュアル「弾塑性解析の場合は初期剛性は1倍とする」に従い、
+        // tension_only の値によらず factor=1.0 で生成する（引張専用の非対称剛性・
+        // 圧縮側座屈等を反映する真の非線形挙動は未実装。将来課題）。
+        ElementKind::Brace { .. } => (
+            Box::new(crate::truss::TrussElement::new(data, model, 1.0)),
             ElemState::default(),
         ),
         // PanelZone / Shell / Wall は現状の挙動（弾性ベース）を踏襲。
@@ -498,5 +514,108 @@ mod tests {
             )>()
             .is_some();
         assert!(is_fiber, "nonlinear Fiber should be FiberBeam");
+    }
+
+    /// ブレース要素の生成モデル用（2 節点・軸方向 4000mm・断面積 2000mm2）。
+    fn make_brace_model(tension_only: bool) -> (Model, ElementData) {
+        let model = Model {
+            nodes: vec![
+                Node {
+                    id: NodeId(0),
+                    coord: [0.0, 0.0, 0.0],
+                    restraint: Dof6Mask::FIXED,
+                    mass: None,
+                    story: None,
+                },
+                Node {
+                    id: NodeId(1),
+                    coord: [4000.0, 0.0, 0.0],
+                    restraint: Dof6Mask::FREE,
+                    mass: None,
+                    story: None,
+                },
+            ],
+            sections: vec![Section {
+                id: SectionId(0),
+                name: "brace".into(),
+                area: 2000.0,
+                iy: 0.0,
+                iz: 0.0,
+                j: 0.0,
+                depth: 100.0,
+                width: 100.0,
+                as_y: 0.0,
+                as_z: 0.0,
+                panel_thickness: None,
+                thickness: None,
+                shape: None,
+            }],
+            materials: vec![Material {
+                id: MaterialId(0),
+                name: "steel".into(),
+                young: 205000.0,
+                poisson: 0.3,
+                density: 0.0,
+                shear: None,
+                fc: None,
+                fy: Some(235.0),
+            }],
+            ..Default::default()
+        };
+        let elem = ElementData {
+            id: ElemId(0),
+            kind: ElementKind::Brace { tension_only },
+            nodes: smallvec::smallvec![NodeId(0), NodeId(1)],
+            section: Some(SectionId(0)),
+            material: Some(MaterialId(0)),
+            local_axis: LocalAxis {
+                ref_vector: [0.0, 0.0, 1.0],
+            },
+            end_cond: [EndCondition::Pinned, EndCondition::Pinned],
+            force_regime: ForceRegime::Auto,
+            rigid_zone: Default::default(),
+            plastic_zone: None,
+        };
+        (model, elem)
+    }
+
+    /// 一般ブレース（引張専用でない）: build_behavior は factor=1.0 の TrussElement
+    /// を生成し、軸剛性 K = E·A/L に一致する（RESP-D マニュアル計算編02）。
+    #[test]
+    fn test_build_behavior_brace_normal_full_stiffness() {
+        let (model, elem) = make_brace_model(false);
+        let (behavior, state) = build_behavior(&elem, &model);
+        let ctx = crate::behavior::Ctx { model: &model };
+        let k = behavior.tangent_stiffness(&state, &ctx);
+        let ea_l = 205000.0 * 2000.0 / 4000.0;
+        assert!((k.get(0, 0) - ea_l).abs() < 1e-6, "k00={}", k.get(0, 0));
+    }
+
+    /// 引張専用ブレース: 弾性解析（build_behavior）では剛性を1/2にモデル化する
+    /// （マニュアル「引張と圧縮が対で存在するとみなし、弾性解析では剛性を1/2」）。
+    #[test]
+    fn test_build_behavior_brace_tension_only_half_stiffness() {
+        let (model, elem) = make_brace_model(true);
+        let (behavior, state) = build_behavior(&elem, &model);
+        let ctx = crate::behavior::Ctx { model: &model };
+        let k = behavior.tangent_stiffness(&state, &ctx);
+        let ea_l = 205000.0 * 2000.0 / 4000.0;
+        assert!(
+            (k.get(0, 0) - 0.5 * ea_l).abs() < 1e-6,
+            "k00={}",
+            k.get(0, 0)
+        );
+    }
+
+    /// 引張専用ブレース: 弾塑性解析（build_nonlinear_behavior）では初期剛性を
+    /// 1倍とする（マニュアル「弾塑性解析の場合は初期剛性は1倍とする」）。
+    #[test]
+    fn test_build_nonlinear_behavior_brace_tension_only_full_stiffness() {
+        let (model, elem) = make_brace_model(true);
+        let (behavior, state) = build_nonlinear_behavior(&elem, &model);
+        let ctx = crate::behavior::Ctx { model: &model };
+        let k = behavior.tangent_stiffness(&state, &ctx);
+        let ea_l = 205000.0 * 2000.0 / 4000.0;
+        assert!((k.get(0, 0) - ea_l).abs() < 1e-6, "k00={}", k.get(0, 0));
     }
 }

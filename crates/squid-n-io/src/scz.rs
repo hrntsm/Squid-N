@@ -340,4 +340,38 @@ mod tests {
         assert!(model.eq_ignoring_dofmap(&back));
         let _ = std::fs::remove_file(&path);
     }
+
+    /// RESP-D マニュアル計算編02「一般ブレースの剛性」対応: `ElementKind::Brace`
+    /// （構造体バリアント `tension_only`）を持つ要素が保存→読込で完全一致すること。
+    #[test]
+    fn test_roundtrip_preserves_brace_element() {
+        let mut model = make_3node_model();
+        model.elements.push(ElementData {
+            id: ElemId(0),
+            kind: ElementKind::Brace { tension_only: true },
+            nodes: smallvec::smallvec![NodeId(0), NodeId(2)],
+            section: None,
+            material: None,
+            local_axis: LocalAxis {
+                ref_vector: [0.0, 0.0, 1.0],
+            },
+            end_cond: [EndCondition::Pinned, EndCondition::Pinned],
+            force_regime: ForceRegime::Auto,
+            rigid_zone: RigidZone::default(),
+            plastic_zone: None,
+        });
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("p_brace_roundtrip.scz");
+        save_scz(&path, &model).unwrap();
+        let back = load_scz(&path).unwrap();
+
+        assert_eq!(back.elements.len(), 1);
+        assert_eq!(
+            back.elements[0].kind,
+            ElementKind::Brace { tension_only: true }
+        );
+        assert!(model.eq_ignoring_dofmap(&back));
+        let _ = std::fs::remove_file(&path);
+    }
 }

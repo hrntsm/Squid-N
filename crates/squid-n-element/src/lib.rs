@@ -11,6 +11,7 @@ pub mod panel;
 pub mod shear_spring;
 pub mod shell;
 pub mod transform;
+pub mod truss;
 
 pub use behavior::*;
 pub use factory::*;

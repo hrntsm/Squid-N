@@ -19,6 +19,13 @@ pub enum ElementKind {
     Ms,
     Wall,
     PanelZone,
+    /// 一般ブレース（RESP-D マニュアル計算編02「剛性計算」§一般ブレースの剛性）。
+    /// `tension_only`: 引張専用ブレースか（true の場合、弾性解析では剛性を1/2に
+    /// モデル化する。弾塑性解析では初期剛性は1倍。マニュアル既定の「引張と圧縮が
+    /// 対で存在するとみなす」モデル化）。
+    Brace {
+        tension_only: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
