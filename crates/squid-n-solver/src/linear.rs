@@ -216,6 +216,7 @@ mod tests {
                 fy: None,
             }],
             load_cases: vec![LoadCase {
+                kind: Default::default(),
                 id: LoadCaseId(1),
                 name: "udl".into(),
                 nodal: vec![],
@@ -325,6 +326,7 @@ mod tests {
                 fy: None,
             }],
             load_cases: vec![LoadCase {
+                kind: Default::default(),
                 id: LoadCaseId(1),
                 name: "lc".into(),
                 nodal: vec![],
@@ -465,6 +467,7 @@ mod tests {
                 fy: None,
             }],
             load_cases: vec![LoadCase {
+                kind: Default::default(),
                 id: LoadCaseId(1),
                 name: "axial".to_string(),
                 nodal: vec![NodalLoad {
@@ -627,6 +630,7 @@ mod tests {
                 fy: None,
             }],
             load_cases: vec![LoadCase {
+                kind: Default::default(),
                 id: LoadCaseId(1),
                 name: "h".to_string(),
                 nodal: vec![NodalLoad {
@@ -720,6 +724,7 @@ mod tests {
                 fy: None,
             }],
             load_cases: vec![LoadCase {
+                kind: Default::default(),
                 id: LoadCaseId(1),
                 name: "shell_load".to_string(),
                 nodal: vec![NodalLoad {
@@ -940,6 +945,7 @@ mod tests {
                 fy: None,
             }],
             load_cases: vec![LoadCase {
+                kind: Default::default(),
                 id: LoadCaseId(1),
                 name: "patch".to_string(),
                 nodal: vec![NodalLoad {
@@ -1029,6 +1035,7 @@ mod tests {
                 fy: None,
             }],
             load_cases: vec![LoadCase {
+                kind: Default::default(),
                 id: LoadCaseId(1),
                 name: "shell_load".to_string(),
                 nodal: vec![NodalLoad {
@@ -1043,11 +1050,15 @@ mod tests {
         // but do NOT add a model.constraints entry, so the global DOFs remain free.
         use squid_n_core::model::{DiaphragmDef, Story};
         model.stories.push(Story {
+            level_kind: Default::default(),
+            structure: Default::default(),
             id: StoryId(0),
             name: "floor".to_string(),
             elevation: 0.0,
             node_ids: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)],
             diaphragms: vec![DiaphragmDef {
+                ci_override: None,
+                weight: None,
                 master: NodeId(0),
                 slaves: vec![NodeId(1), NodeId(2), NodeId(3)],
                 rigid: true,
@@ -1135,11 +1146,15 @@ mod tests {
                 fy: None,
             }],
             stories: vec![Story {
+                level_kind: Default::default(),
+                structure: Default::default(),
                 id: StoryId(0),
                 name: "floor".to_string(),
                 elevation: 0.0,
                 node_ids: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)],
                 diaphragms: vec![DiaphragmDef {
+                    ci_override: None,
+                    weight: None,
                     master: NodeId(0),
                     slaves: vec![NodeId(1), NodeId(2), NodeId(3)],
                     rigid: true,
@@ -1152,6 +1167,7 @@ mod tests {
                 slaves: vec![NodeId(1), NodeId(2), NodeId(3)],
             }],
             load_cases: vec![LoadCase {
+                kind: Default::default(),
                 id: LoadCaseId(1),
                 name: "load".to_string(),
                 nodal: vec![NodalLoad {
@@ -1274,6 +1290,7 @@ mod tests {
                 fy: None,
             }],
             load_cases: vec![LoadCase {
+                kind: Default::default(),
                 id: LoadCaseId(1),
                 name: "q".into(),
                 nodal,

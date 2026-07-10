@@ -1,7 +1,45 @@
 use crate::app::App;
 
+/// 柱の積載荷重低減（令85条2項）の参考表示。
+/// `Model.load_cfg.live_load_reduction == true` のときのみ表示する。
+/// 支持床数・低減率の集計は `crate::app::column_live_load_factors` による。
+/// **検定の長期軸力への実適用は残課題**（表示のみ。荷重計算条件のツールチップにも明記）。
+fn live_load_reduction_section(ui: &mut egui::Ui, app: &App) {
+    if !app
+        .model
+        .load_cfg
+        .as_ref()
+        .is_some_and(|c| c.live_load_reduction)
+    {
+        return;
+    }
+    egui::CollapsingHeader::new("柱の積載荷重低減（令85条2項・参考表示）")
+        .id_salt("live_load_reduction_section")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.colored_label(
+                crate::theme::GRAY_600,
+                "支える床の数に応じた低減率の集計値です。断面検定の長期軸力への実適用は未対応（残課題）。",
+            );
+            let factors = crate::app::column_live_load_factors(&app.model);
+            if factors.is_empty() {
+                ui.label("柱要素（鉛直材）がありません。階の自動生成後に所属階が設定されると床数を集計できます。");
+                return;
+            }
+            for (elem, floors, factor) in factors {
+                ui.label(format!(
+                    "柱#{}: 支持床数 {} → 低減率 {:.2}",
+                    elem.0, floors, factor
+                ));
+            }
+        });
+    ui.add_space(6.0);
+}
+
 pub fn design_table(ui: &mut egui::Ui, app: &mut App) {
     use egui_extras::{Column, TableBuilder};
+
+    live_load_reduction_section(ui, app);
 
     // ── 一次設計: 部材検定表 ─────────────────────────────────────
     ui.strong("部材検定（許容応力度）");

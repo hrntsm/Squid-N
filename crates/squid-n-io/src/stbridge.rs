@@ -231,6 +231,8 @@ pub fn import_stbridge(xml: &str) -> Result<Model, StbError> {
                     }
                     "StbStory" => {
                         model.stories.push(Story {
+                            level_kind: Default::default(),
+                            structure: Default::default(),
                             id: StoryId(get_u32(&a, "id")?),
                             name: a.get("name").cloned().unwrap_or_default(),
                             elevation: get_f64(&a, "height")?,
@@ -281,6 +283,7 @@ pub fn import_stbridge(xml: &str) -> Result<Model, StbError> {
                     }
                     "StbLoadCase" => {
                         load_cases.push(LoadCase {
+                            kind: Default::default(),
                             id: LoadCaseId(get_u32(&a, "id")?),
                             name: a.get("name").cloned().unwrap_or_default(),
                             nodal: vec![],
@@ -420,6 +423,8 @@ mod tests {
             });
         }
         m.stories.push(Story {
+            level_kind: Default::default(),
+            structure: Default::default(),
             id: StoryId(0),
             name: "1F".into(),
             elevation: 3000.0,
@@ -496,6 +501,7 @@ mod tests {
             plastic_zone: None,
         });
         m.load_cases.push(LoadCase {
+            kind: Default::default(),
             id: LoadCaseId(0),
             name: "L1".into(),
             nodal: vec![NodalLoad {

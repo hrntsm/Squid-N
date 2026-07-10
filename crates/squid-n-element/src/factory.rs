@@ -121,6 +121,11 @@ pub fn build_behavior(data: &ElementData, model: &Model) -> (Box<dyn ElementBeha
             Box::new(crate::beam::BeamElement::new(data, model)),
             ElemState::default(),
         ),
+        // Brace 要素：軸材。剛性は当面 BeamElement スタブ（両端条件で軸材化は呼び出し側）
+        ElementKind::Brace => (
+            Box::new(crate::beam::BeamElement::new(data, model)),
+            ElemState::default(),
+        ),
     }
 }
 

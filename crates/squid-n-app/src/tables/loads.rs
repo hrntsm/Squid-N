@@ -1,10 +1,35 @@
 use crate::app::App;
 use squid_n_core::ids::{ElemId, LoadCaseId, NodeId};
-use squid_n_core::model::{ElementKind, MemberLoad, MemberLoadKind};
+use squid_n_core::model::{ElementKind, LoadCaseKind, MemberLoad, MemberLoadKind};
 use squid_n_edit::{
     AddCombination, AddLoadCase, AddMemberLoad, DeleteCombination, DeleteLoadCase,
-    DeleteMemberLoad, DeleteNodalLoad, SetLoadCaseName, SetNodalLoad,
+    DeleteMemberLoad, DeleteNodalLoad, SetLoadCaseKind, SetLoadCaseName, SetNodalLoad,
 };
+
+/// `LoadCaseKind` の全種別（UI の選択肢一覧・順序を1箇所に集約する）。
+const LOAD_CASE_KINDS: [LoadCaseKind; 7] = [
+    LoadCaseKind::Dead,
+    LoadCaseKind::Live,
+    LoadCaseKind::LiveSeismic,
+    LoadCaseKind::Snow,
+    LoadCaseKind::Wind,
+    LoadCaseKind::Seismic,
+    LoadCaseKind::Other,
+];
+
+/// `LoadCaseKind` の表示ラベル（レビュー §1.7: 地震用重量の集計に使う種別を
+/// 荷重タブから明示的に選べるようにする）。
+fn load_case_kind_label(kind: LoadCaseKind) -> &'static str {
+    match kind {
+        LoadCaseKind::Dead => "固定荷重",
+        LoadCaseKind::Live => "積載荷重(長期)",
+        LoadCaseKind::LiveSeismic => "積載荷重(地震用)",
+        LoadCaseKind::Snow => "積雪荷重",
+        LoadCaseKind::Wind => "風荷重",
+        LoadCaseKind::Seismic => "地震荷重",
+        LoadCaseKind::Other => "その他/未設定",
+    }
+}
 
 #[derive(Clone)]
 struct MemberLoadDraft {
@@ -60,6 +85,7 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
     });
     let n_lc = app.model.load_cases.len();
     let mut pending_name: Vec<(usize, String)> = Vec::new();
+    let mut pending_kind: Vec<(LoadCaseId, LoadCaseKind)> = Vec::new();
     let mut pending_delete: Option<LoadCaseId> = None;
     let mut name_bufs: Vec<String> = app
         .model
@@ -72,10 +98,11 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
         .striped(true)
         .column(Column::auto())
         .column(Column::initial(120.0))
+        .column(Column::initial(130.0))
         .column(Column::initial(60.0))
         .column(Column::auto())
         .header(20.0, |mut h| {
-            for t in &["ID", "名称", "荷重数", ""] {
+            for t in &["ID", "名称", "種別", "荷重数", ""] {
                 h.col(|ui| {
                     ui.strong(*t);
                 });
@@ -116,6 +143,21 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
                     }
                 });
                 row.col(|ui| {
+                    egui::ComboBox::from_id_salt(("load_case_kind", lc.id.0))
+                        .selected_text(load_case_kind_label(lc.kind))
+                        .show_ui(ui, |ui| {
+                            for kind in LOAD_CASE_KINDS {
+                                if ui
+                                    .selectable_label(lc.kind == kind, load_case_kind_label(kind))
+                                    .clicked()
+                                    && lc.kind != kind
+                                {
+                                    pending_kind.push((lc.id, kind));
+                                }
+                            }
+                        });
+                });
+                row.col(|ui| {
                     ui.label((lc.nodal.len() + lc.member.len()).to_string());
                 });
                 row.col(|ui| {
@@ -137,13 +179,17 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
             });
         });
 
-    let had_name = !pending_name.is_empty() || pending_delete.is_some();
+    let had_name = !pending_name.is_empty() || !pending_kind.is_empty() || pending_delete.is_some();
     for (i, name) in pending_name {
         let lc_id = LoadCaseId(app.model.load_cases[i].id.0);
         app.undo.run(
             &mut app.model,
             Box::new(SetLoadCaseName { id: lc_id, name }),
         );
+    }
+    for (id, kind) in pending_kind {
+        app.undo
+            .run(&mut app.model, Box::new(SetLoadCaseKind { id, kind }));
     }
     if let Some(lc_id) = pending_delete {
         app.undo
@@ -167,6 +213,14 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
     combinations_section(ui, app);
 
     ui.add_space(8.0);
+    egui::CollapsingHeader::new("荷重計算条件")
+        .id_salt("load_cfg_section")
+        .default_open(false)
+        .show(ui, |ui| {
+            crate::tables::load_cfg::load_cfg_panel(ui, app);
+        });
+
+    ui.add_space(8.0);
 
     // --- 節点荷重詳細（選択中の荷重ケース） ---
     ui.strong("節点荷重");
@@ -181,12 +235,13 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
         .and_then(|id| app.model.load_cases.iter().position(|lc| lc.id == id))
         .or_else(|| {
             app.last_static.and_then(|key| match key {
-                // 地震静的(Seismic)はユーザー荷重ケースに対応しないため None
-                // （呼び出し元のフォールバックで先頭ケースが選ばれる）。
+                // 地震静的(Seismic)・風静的(Wind)はユーザー荷重ケースに対応しないため
+                // None（呼び出し元のフォールバックで先頭ケースが選ばれる）。
                 crate::app::StaticKey::Case(crate::app::StaticCaseKey::User(id)) => {
                     app.model.load_cases.iter().position(|lc| lc.id == id)
                 }
                 crate::app::StaticKey::Case(crate::app::StaticCaseKey::Seismic(_))
+                | crate::app::StaticKey::Case(crate::app::StaticCaseKey::Wind(_))
                 | crate::app::StaticKey::Combo(_) => None,
             })
         })
@@ -652,25 +707,49 @@ fn combinations_section(ui: &mut egui::Ui, app: &mut App) {
         true,
     );
 
+    ui.checkbox(&mut app.analysis_cfg.heavy_snow_zone, "多雪区域")
+        .on_hover_text("有効にすると長期 G+P+0.7S、短期地震/暴風 G+P+0.35S±K/W の組合せも生成します（施行令86条・82条）");
+
     let can_generate = app.combo_draft.dl.is_some() && app.combo_draft.ll.is_some();
-    if ui
-        .add_enabled(can_generate, egui::Button::new("⚙ 標準組合せを生成"))
-        .on_hover_text("DL/LL（必須）と地震X/Y・積雪（任意）から長期・短期の標準組合せを生成します")
-        .clicked()
-    {
-        if let (Some(dl), Some(ll)) = (app.combo_draft.dl, app.combo_draft.ll) {
-            let combos = squid_n_load::combo::auto_combinations(
-                dl,
-                ll,
-                app.combo_draft.seismic_x,
-                app.combo_draft.seismic_y,
-                app.combo_draft.snow,
-            );
-            for combo in combos {
-                app.undo
-                    .run(&mut app.model, Box::new(AddCombination { combo }));
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(can_generate, egui::Button::new("⚙ 標準組合せを生成"))
+            .on_hover_text(
+                "DL/LL（必須）と地震X/Y・積雪（任意）から長期・短期の標準組合せを生成します",
+            )
+            .clicked()
+        {
+            if let (Some(dl), Some(ll)) = (app.combo_draft.dl, app.combo_draft.ll) {
+                let input = squid_n_load::combo::ComboInput {
+                    dl,
+                    ll,
+                    seismic_x: app.combo_draft.seismic_x,
+                    seismic_y: app.combo_draft.seismic_y,
+                    wind_x: None,
+                    wind_y: None,
+                    snow: app.combo_draft.snow,
+                    heavy_snow_zone: app.analysis_cfg.heavy_snow_zone,
+                };
+                let combos = squid_n_load::combo::standard_combinations(&input);
+                for combo in combos {
+                    app.undo
+                        .run(&mut app.model, Box::new(AddCombination { combo }));
+                }
+                app.staleness.mark_edited();
             }
-            app.staleness.mark_edited();
         }
+        if ui
+            .button("⚙ 種別から自動生成")
+            .on_hover_text(
+                "荷重ケースの種別から固定(必須)・積載(必須)・積雪・風を各先頭1件選んで標準組合せを生成します。\
+                 種別が特定できない場合はエラーになります",
+            )
+            .clicked()
+        {
+            app.auto_generate_combinations_action();
+        }
+    });
+    if let Some(err) = &app.last_error {
+        ui.colored_label(crate::theme::ERROR_RED, err);
     }
 }

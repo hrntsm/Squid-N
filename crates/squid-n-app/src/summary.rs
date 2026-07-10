@@ -169,6 +169,8 @@ pub fn build_report_csv(app: &App) -> String {
                 .unwrap_or_else(|| format!("LC {}", lc_id.0)),
             StaticCaseKey::Seismic(SeismicDir::X) => "地震静的 X".to_string(),
             StaticCaseKey::Seismic(SeismicDir::Y) => "地震静的 Y".to_string(),
+            StaticCaseKey::Wind(SeismicDir::X) => "風静的 X".to_string(),
+            StaticCaseKey::Wind(SeismicDir::Y) => "風静的 Y".to_string(),
         };
         let max_d = st
             .disp

@@ -100,6 +100,7 @@ pub fn portal_frame() -> Model {
 
     // 荷重ケース
     model.load_cases.push(LoadCase {
+        kind: Default::default(),
         id: LoadCaseId(0),
         name: "長期".into(),
         nodal: Vec::new(),
@@ -115,6 +116,7 @@ pub fn portal_frame() -> Model {
         }],
     });
     model.load_cases.push(LoadCase {
+        kind: Default::default(),
         id: LoadCaseId(1),
         name: "地震X".into(),
         nodal: vec![

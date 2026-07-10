@@ -27,6 +27,10 @@ pub enum ModelTab {
     Sections,
     Materials,
     Slabs,
+    /// 壁属性（開口・三方スリット）
+    WallAttrs,
+    /// フレーム外雑壁
+    MiscWalls,
 }
 
 /// 結果タブ内の切替（3D 各種図・時刻歴グラフ・プッシュオーバー曲線）。
@@ -69,6 +73,8 @@ pub enum StaticCaseKey {
     User(LoadCaseId),
     /// 地震静的(Ai 分布)。方向別に共存できる
     Seismic(SeismicDir),
+    /// 風荷重静的解析。方向別に共存できる
+    Wind(SeismicDir),
 }
 
 /// 表示対象の静的解析結果を指すキー。荷重ケース単体（ユーザー／地震静的）か
@@ -168,6 +174,14 @@ pub struct AnalysisSettings {
     pub th_h2: f64,
     /// 時刻歴の積分法
     pub th_integrator: ThIntegrator,
+    /// 荷重組合せ自動生成（種別ベース）の多雪区域フラグ（施行令86条・82条）。
+    pub heavy_snow_zone: bool,
+    /// 風荷重静的解析の基準風速 V0 [m/s]。
+    pub v0: f64,
+    /// 風荷重静的解析の地表面粗度区分。
+    pub roughness: squid_n_load::wind::TerrainRoughness,
+    /// 風荷重静的解析のパラペット高さ [mm]。
+    pub parapet_mm: f64,
 }
 
 /// 時刻歴の入力方向選択（UI 用）。X・Y に加え、同一波形を両方向へ同時入力する
@@ -215,6 +229,10 @@ impl Default for AnalysisSettings {
             th_damping_model: ThDampingModel::StiffnessProportional,
             th_h2: 0.02,
             th_integrator: ThIntegrator::NewmarkBeta,
+            heavy_snow_zone: false,
+            v0: 34.0,
+            roughness: squid_n_load::wind::TerrainRoughness::III,
+            parapet_mm: 0.0,
         }
     }
 }
@@ -346,6 +364,21 @@ pub struct App {
     /// true の間は model 値での上書きを止めて入力中の値を保つ。
     #[cfg(feature = "gui")]
     pub story_weight_active: Vec<bool>,
+    /// 地震地域係数 Z の市町村別ローダ（CSV読込結果）。ヘッドレスでも使うため
+    /// gui 限定にしない（`load_z_table_from_csv`/`apply_z_from_municipality` から参照）。
+    pub z_table: Option<squid_n_load::z_table::ZTable>,
+    /// Z表 CSV 読込 UI の市町村名入力バッファ。
+    #[cfg(feature = "gui")]
+    pub z_table_municipality: String,
+    /// モデルタブ「壁属性」フォームのドラフト状態
+    #[cfg(feature = "gui")]
+    pub wall_attr_draft: crate::tables::wall_attrs::WallAttrDraft,
+    /// モデルタブ「雑壁」追加フォームのドラフト状態
+    #[cfg(feature = "gui")]
+    pub misc_wall_draft: crate::tables::misc_walls::MiscWallDraft,
+    /// 荷重タブ「荷重計算条件」フォームのドラフト状態
+    #[cfg(feature = "gui")]
+    pub load_cfg_draft: crate::tables::load_cfg::LoadCfgDraft,
 }
 
 /// 荷重組合せ自動生成 UI のドラフト（GUI 専用）。DL/LL は必須、地震X/Y・積雪は任意。
@@ -426,6 +459,15 @@ impl Default for App {
             story_weight_edit: Vec::new(),
             #[cfg(feature = "gui")]
             story_weight_active: Vec::new(),
+            z_table: None,
+            #[cfg(feature = "gui")]
+            z_table_municipality: String::new(),
+            #[cfg(feature = "gui")]
+            wall_attr_draft: crate::tables::wall_attrs::WallAttrDraft::default(),
+            #[cfg(feature = "gui")]
+            misc_wall_draft: crate::tables::misc_walls::MiscWallDraft::default(),
+            #[cfg(feature = "gui")]
+            load_cfg_draft: crate::tables::load_cfg::LoadCfgDraft::default(),
         }
     }
 }
@@ -590,8 +632,11 @@ impl App {
 
     /// T3: 線形静的解析を実行し、結果を `self.results` に格納する。
     /// 指定した荷重ケースが存在しない場合はエラーメッセージをセット。
+    ///
+    /// 解析準備前にスラブ荷重を「床荷重(自動)」ケースへ同期する（レビュー §1.1）。
     pub fn run_linear_static(&mut self, lc: LoadCaseId) {
         self.last_error = None;
+        self.sync_slab_loads_action();
         self.apply_rigid_zones_for_analysis();
         match Analysis::prepare(&self.model) {
             Ok(analysis) => match analysis.linear_static(lc) {
@@ -615,8 +660,11 @@ impl App {
 
     /// T7: 荷重組合せ解析を実行し、結果を `bundle.combos` に格納する。
     /// 指定インデックスの荷重組合せが存在しない場合はエラーメッセージをセット。
+    ///
+    /// 解析準備前にスラブ荷重を「床荷重(自動)」ケースへ同期する（レビュー §1.1）。
     pub fn run_combination(&mut self, index: usize) {
         self.last_error = None;
+        self.sync_slab_loads_action();
         let Some(combo) = self.model.combinations.get(index).cloned() else {
             self.last_error = Some(format!("荷重組合せ #{} が存在しません", index));
             return;
@@ -779,9 +827,13 @@ impl App {
                 // story のうち最大値）に算入される。
                 let mut per_story: Vec<Vec<MemberRank>> = vec![Vec::new(); n_stories];
                 let mut computed: Vec<(ElemId, MemberRank)> = Vec::new();
-                // 長期軸力の簡易近似として使う先頭荷重ケースの id
-                // （`generate_stories_action` の gravity_lc と同じ規則）。
-                let gravity_lc = self.model.load_cases.first().map(|c| c.id);
+                // 長期軸力の簡易近似として使う荷重ケースの id
+                // （`generate_stories_action` の gravity_lcs と同じ規則。§1.7:
+                // kind による選択の先頭を採用。従来の「先頭ケース」規則は
+                // 種別が未設定のモデルに対する後方互換フォールバックとして残る）。
+                let gravity_lc = gravity_cases_for_seismic_weight(&self.model)
+                    .first()
+                    .copied();
                 for elem in &self.model.elements {
                     let Some(sec) = elem
                         .section
@@ -916,11 +968,15 @@ impl App {
     }
 
     /// 階(Story)を節点標高から自動生成して適用する（undo 可能）。
-    /// 地震重量には最初の荷重ケースの鉛直下向き荷重＋自重を用いる。
+    /// 地震重量には kind=Dead/LiveSeismic（無ければ Dead+Live、種別未設定なら
+    /// 先頭ケース）の荷重ケースの鉛直下向き荷重＋自重を用いる（レビュー §1.7）。
+    /// 先立ってスラブ荷重を「床荷重(自動)」ケースへ同期する（レビュー §1.1）ため、
+    /// 面荷重も地震用重量に反映される。
     pub fn generate_stories_action(&mut self) {
         self.last_error = None;
-        let gravity_lc = self.model.load_cases.first().map(|c| c.id);
-        match squid_n_load::story_gen::generate_stories(&self.model, gravity_lc) {
+        self.sync_slab_loads_action();
+        let gravity_lcs = gravity_cases_for_seismic_weight(&self.model);
+        match squid_n_load::story_gen::generate_stories_multi(&self.model, &gravity_lcs) {
             Ok(gen) => {
                 self.undo.run(
                     &mut self.model,
@@ -970,6 +1026,127 @@ impl App {
             },
             Err(e) => self.last_error = Some(format!("解析準備エラー: {:?}", e)),
         }
+    }
+
+    /// 風荷重の静的解析を実行し、結果を `StaticCaseKey::Wind(dir)` に格納する
+    /// （`run_seismic` と同じパターン。X/Y 双方の結果および他の静的結果と共存できる）。
+    /// 基準風速・地表面粗度区分・パラペット高さは `analysis_cfg` を用いる。
+    pub fn run_wind(&mut self, dir: SeismicDir) {
+        self.last_error = None;
+        let cfg = squid_n_solver::analysis::WindStaticCfg {
+            dir,
+            v0: self.analysis_cfg.v0,
+            roughness: self.analysis_cfg.roughness,
+            cpi: 0.0,
+            parapet_mm: self.analysis_cfg.parapet_mm,
+        };
+        self.apply_rigid_zones_for_analysis();
+        match Analysis::prepare(&self.model) {
+            Ok(analysis) => match analysis.wind_static(cfg) {
+                Ok(res) => {
+                    let member_forces = res.member_forces.clone();
+                    let mut bundle = self.results.take().unwrap_or_default();
+                    let key = StaticCaseKey::Wind(dir);
+                    bundle.statics.retain(|(id, _)| *id != key);
+                    bundle.statics.push((key, res));
+                    bundle.member_forces = member_forces;
+                    self.results = Some(bundle);
+                    self.last_static = Some(StaticKey::Case(key));
+                    self.staleness.mark_fresh();
+                    self.run_design_check();
+                }
+                Err(e) => self.last_error = Some(format!("風荷重解析エラー: {:?}", e)),
+            },
+            Err(e) => self.last_error = Some(format!("解析準備エラー: {:?}", e)),
+        }
+    }
+
+    /// Z表 CSV（`squid_n_load::z_table::ZTable::from_csv`）を読み込み `self.z_table`
+    /// に格納する（ヘッドレス可、UI 側のファイル選択とは独立にテストできる）。
+    pub fn load_z_table_from_csv(&mut self, csv: &str) {
+        match squid_n_load::z_table::ZTable::from_csv(csv) {
+            Ok(table) => {
+                self.z_table = Some(table);
+                self.last_error = None;
+            }
+            Err(e) => self.last_error = Some(format!("Z表読込エラー: {}", e)),
+        }
+    }
+
+    /// 読み込み済みの Z表（`self.z_table`）から市町村名を引き、`analysis_cfg.z`
+    /// へ反映する。Z表が未読込／該当市町村が無い場合は `last_error` を設定して
+    /// `false` を返す。
+    pub fn apply_z_from_municipality(&mut self, municipality: &str) -> bool {
+        let Some(table) = &self.z_table else {
+            self.last_error = Some("Z表が読み込まれていません".to_string());
+            return false;
+        };
+        match table.lookup(municipality) {
+            Some(z) => {
+                self.analysis_cfg.z = z;
+                self.last_error = None;
+                true
+            }
+            None => {
+                self.last_error = Some(format!("Z表に「{}」が見つかりません", municipality));
+                false
+            }
+        }
+    }
+
+    /// 荷重ケースの種別（`LoadCaseKind`）から Dead（必須）/Live（必須）/Snow（任意）/
+    /// Wind（任意）を各先頭1件選び、`squid_n_load::combo::standard_combinations` で
+    /// 標準組合せを生成し、undo 可能に一括追加する（`AddCombination` を使用）。
+    ///
+    /// 地震（Seismic 種別）は対象外とする: Kx/Ky の正確な組合せは方向別の地震静的
+    /// 解析（`run_seismic`）が別途扱うため、`kind` だけでは方向を判別できない
+    /// 単一の LoadCase から機械的に Kx/Ky を割り当てることは行わない
+    /// （既存の手動選択 UI [`combinations_section`] が方向を明示して生成する経路を持つ）。
+    /// 同じ理由により、Wind も見つかった先頭1件は `wind_x` にのみ割り当てる
+    /// （`wind_y` は常に `None`）。
+    ///
+    /// Dead/Live のいずれかが見つからない場合は組合せを生成せず `last_error` を設定する。
+    pub fn auto_generate_combinations_action(&mut self) {
+        use squid_n_core::model::LoadCaseKind;
+
+        self.last_error = None;
+        let find_first = |kind: LoadCaseKind| {
+            self.model
+                .load_cases
+                .iter()
+                .find(|lc| lc.kind == kind)
+                .map(|lc| lc.id)
+        };
+        let Some(dl) = find_first(LoadCaseKind::Dead) else {
+            self.last_error = Some("種別「固定荷重」の荷重ケースが見つかりません".to_string());
+            return;
+        };
+        let Some(ll) = find_first(LoadCaseKind::Live) else {
+            self.last_error =
+                Some("種別「積載荷重(長期)」の荷重ケースが見つかりません".to_string());
+            return;
+        };
+        let snow = find_first(LoadCaseKind::Snow);
+        let wind = find_first(LoadCaseKind::Wind);
+
+        let input = squid_n_load::combo::ComboInput {
+            dl,
+            ll,
+            seismic_x: None,
+            seismic_y: None,
+            wind_x: wind,
+            wind_y: None,
+            snow,
+            heavy_snow_zone: self.analysis_cfg.heavy_snow_zone,
+        };
+        let combos = squid_n_load::combo::standard_combinations(&input);
+        for combo in combos {
+            self.undo.run(
+                &mut self.model,
+                Box::new(squid_n_edit::AddCombination { combo }),
+            );
+        }
+        self.staleness.mark_edited();
     }
 
     /// プッシュオーバー解析の純粋計算部分。所有権を取り `&self` を使わないため、
@@ -1408,39 +1585,278 @@ impl App {
         }
     }
 
-    /// 全スラブの床荷重を大梁へ分配し、辺インデックスを実部材IDへ対応付けて
+    /// 全スラブの床荷重を大梁（および小梁経由の節点反力）へ分配し、
     /// `self.beam_loads` を更新する。対応する梁が無い辺の荷重は捨てる。
     ///
-    /// `squid_n_load::floor::distribute_slab` が返す `BeamLoad.elem` は実部材ID
-    /// ではなく、スラブ境界の辺インデックス（`ElemId(i)`, i=0..4、辺 i は
-    /// `boundary[i]` → `boundary[(i+1)%4]`）である。ここでその節点対を両端に
-    /// 持つ `Beam` 要素を探し、実 ElemId に置き換える（ノード順は不問）。
+    /// `squid_n_load::floor::distribute_slab` が返す `BeamLoad.target` は
+    /// `LoadTarget::Edge(i)`（スラブ境界の辺 i、`boundary[i]` → `boundary[(i+1)%n]`、
+    /// n = 境界頂点数。矩形に限らず三角形・五角形以上の多角形にも対応）または
+    /// `LoadTarget::Node(id)`（小梁反力などの節点集中荷重）。`Edge` はここで
+    /// その節点対を両端に持つ `Beam` 要素を探し、実 `ElemId` に置き換える
+    /// （ノード順は不問）。`Node` はそのまま（`elem` は番兵 `ElemId(u32::MAX)`
+    /// のまま）保持する（部材マッピング不要。`sync_slab_loads_action` が
+    /// `NodalLoad` へ変換する。CMQ 図描画側は `elem` で梁を引くため、この番兵は
+    /// 単に描画対象外になるだけで安全）。
     pub fn refresh_beam_loads(&mut self) {
         let mut beam_loads = Vec::new();
         for slab in &self.model.slabs {
-            if slab.boundary.len() < 4 {
+            let n = slab.boundary.len();
+            if n < 3 {
                 continue;
             }
             for mut bl in squid_n_load::floor::distribute_slab(&self.model, slab) {
-                let k = bl.elem.0 as usize;
-                if k >= 4 {
-                    continue;
+                match bl.target {
+                    squid_n_load::floor::LoadTarget::Node(_) => {
+                        beam_loads.push(bl);
+                    }
+                    squid_n_load::floor::LoadTarget::Edge(k) => {
+                        if k >= n {
+                            continue;
+                        }
+                        let n0 = slab.boundary[k];
+                        let n1 = slab.boundary[(k + 1) % n];
+                        let found = self.model.elements.iter().find(|e| {
+                            e.kind == squid_n_core::model::ElementKind::Beam
+                                && e.nodes.len() == 2
+                                && ((e.nodes[0] == n0 && e.nodes[1] == n1)
+                                    || (e.nodes[0] == n1 && e.nodes[1] == n0))
+                        });
+                        let Some(elem) = found else { continue };
+                        bl.elem = elem.id;
+                        beam_loads.push(bl);
+                    }
                 }
-                let n0 = slab.boundary[k];
-                let n1 = slab.boundary[(k + 1) % 4];
-                let found = self.model.elements.iter().find(|e| {
-                    e.kind == squid_n_core::model::ElementKind::Beam
-                        && e.nodes.len() == 2
-                        && ((e.nodes[0] == n0 && e.nodes[1] == n1)
-                            || (e.nodes[0] == n1 && e.nodes[1] == n0))
-                });
-                let Some(elem) = found else { continue };
-                bl.elem = elem.id;
-                beam_loads.push(bl);
             }
         }
         self.beam_loads = beam_loads;
     }
+
+    /// `self.beam_loads`（`refresh_beam_loads` 適用後の値）を荷重ケースへ書き込める
+    /// `NodalLoad`/`MemberLoad` へ変換する（レビュー §1.1）。作用方向は常に
+    /// 鉛直下向き `[0,0,-1]`（面荷重は重力方向のみを扱う既存の前提を踏襲）。
+    ///
+    /// - `LoadShape::Uniform{w}` → 全長等分布 `Distributed{a:0,b:L,w1:w,w2:w}`
+    /// - `LoadShape::Triangle{w0}`（中央 `L/2` で頂点を持つ左右対称三角形）→
+    ///   2 区間の線形分布`[0,L/2]: 0→w0` / `[L/2,L]: w0→0` に分割
+    ///   （`MemberLoadKind::Distributed` は線形区間しか表現できないため）
+    /// - `LoadShape::Trapezoid{w0,a,b}`（両端で `a` ずつ立ち上がり、中央 `b` が
+    ///   フラット、`2a+b=L`）→ 3 区間 `[0,a]:0→w0` / `[a,a+b]:w0→w0` /
+    ///   `[a+b,L]:w0→0`
+    /// - `LoadShape::Point{p,x}` → 中間集中荷重 `MemberLoadKind::Point{a:x,p}`
+    /// - `LoadTarget::Node(n)`（小梁反力）→ `NodalLoad{node:n, values:[0,0,-p,0,0,0]}`
+    ///
+    /// `L` は対応する部材の節点間距離（`elem_geometric_length`。剛域補正なしの
+    /// 簡易値。仕様上「部材の節点間距離」を使う規則のため、剛域を考慮する
+    /// 設計検定側の `clear_span` とは別物）。
+    fn slab_load_case_content(
+        &self,
+    ) -> (
+        Vec<squid_n_core::model::NodalLoad>,
+        Vec<squid_n_core::model::MemberLoad>,
+    ) {
+        use squid_n_core::model::{MemberLoad, MemberLoadKind, NodalLoad};
+        use squid_n_load::floor::{LoadShape, LoadTarget};
+
+        const DIR: [f64; 3] = [0.0, 0.0, -1.0];
+        let mut nodal = Vec::new();
+        let mut member = Vec::new();
+
+        fn push_dist(member: &mut Vec<MemberLoad>, elem: ElemId, a: f64, b: f64, w1: f64, w2: f64) {
+            if b - a <= 1e-9 {
+                return;
+            }
+            member.push(MemberLoad {
+                elem,
+                dir: DIR,
+                kind: MemberLoadKind::Distributed { a, b, w1, w2 },
+            });
+        }
+
+        for bl in &self.beam_loads {
+            match bl.target {
+                LoadTarget::Node(n) => {
+                    let LoadShape::Point { p, .. } = bl.shape else {
+                        continue;
+                    };
+                    nodal.push(NodalLoad {
+                        node: n,
+                        values: [0.0, 0.0, -p, 0.0, 0.0, 0.0],
+                    });
+                }
+                LoadTarget::Edge(_) => {
+                    let Some(elem) = self.model.elements.iter().find(|e| e.id == bl.elem) else {
+                        continue;
+                    };
+                    let l = elem_geometric_length(elem, &self.model);
+                    if l <= 1e-9 {
+                        continue;
+                    }
+                    match bl.shape {
+                        LoadShape::Uniform { w } => {
+                            push_dist(&mut member, elem.id, 0.0, l, w, w);
+                        }
+                        LoadShape::Triangle { w0 } => {
+                            let mid = l / 2.0;
+                            push_dist(&mut member, elem.id, 0.0, mid, 0.0, w0);
+                            push_dist(&mut member, elem.id, mid, l, w0, 0.0);
+                        }
+                        LoadShape::Trapezoid { w0, a, b } => {
+                            push_dist(&mut member, elem.id, 0.0, a, 0.0, w0);
+                            push_dist(&mut member, elem.id, a, a + b, w0, w0);
+                            push_dist(&mut member, elem.id, a + b, l, w0, 0.0);
+                        }
+                        LoadShape::Point { p, x } => {
+                            member.push(MemberLoad {
+                                elem: elem.id,
+                                dir: DIR,
+                                kind: MemberLoadKind::Point { a: x, p },
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        (nodal, member)
+    }
+
+    /// スラブ荷重を専用の荷重ケース「床荷重(自動)」（kind=Dead）へ同期する
+    /// （レビュー §1.1: 面荷重→大梁分配の結果を応力解析へ接続する最重要修正）。
+    ///
+    /// `refresh_beam_loads` → `slab_load_case_content` で現在のスラブ荷重を
+    /// 計算し、既存の「床荷重(自動)」ケースの内容と一致するなら何もしない
+    /// （undo 履歴・stale フラグを汚さない）。差分があれば
+    /// `SyncSlabLoadsToCase`（全置換、undo 対応）を発行する。
+    /// スラブが無く既存ケースも無い場合は空ケースを作らない。
+    ///
+    /// 解析実行系（`run_linear_static`/`run_combination`）・`generate_stories_action`
+    /// の入口で毎回呼ぶことを想定した冪等な同期アクション。
+    pub fn sync_slab_loads_action(&mut self) {
+        self.refresh_beam_loads();
+        let (nodal, member) = self.slab_load_case_content();
+
+        let existing = self
+            .model
+            .load_cases
+            .iter()
+            .find(|lc| lc.name == SLAB_AUTO_LOAD_CASE_NAME);
+        let needs_create = existing.is_none() && !(nodal.is_empty() && member.is_empty());
+        let needs_update = existing
+            .map(|lc| {
+                lc.kind != squid_n_core::model::LoadCaseKind::Dead
+                    || lc.nodal != nodal
+                    || lc.member != member
+            })
+            .unwrap_or(false);
+        if !needs_create && !needs_update {
+            return;
+        }
+
+        self.undo.run(
+            &mut self.model,
+            Box::new(squid_n_edit::SyncSlabLoadsToCase {
+                name: SLAB_AUTO_LOAD_CASE_NAME.to_string(),
+                nodal,
+                member,
+            }),
+        );
+        self.staleness.mark_edited();
+    }
+}
+
+/// `sync_slab_loads_action` が同期先とする専用荷重ケース名（レビュー §1.1）。
+pub const SLAB_AUTO_LOAD_CASE_NAME: &str = "床荷重(自動)";
+
+/// 節点ペアが鉛直材（柱）かどうかを判定する。両端の水平距離（XY平面）が
+/// 1mm 未満なら鉛直とみなす（`squid_n_load::story_gen::is_vertical_pair` と
+/// 同じ判定規則。あちらは非公開のためここで同じ規則を再実装する）。
+fn is_vertical_pair(a: [f64; 3], b: [f64; 3]) -> bool {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt() < 1.0
+}
+
+/// 柱要素ごとの「支持する床数」と「積載荷重低減率」（令85条2項）を一覧する。
+///
+/// `Model.load_cfg.live_load_reduction == true` のときに UI 側で参考表示する
+/// ための集計ヘルパー（`squid_n_load::live_load::{floors_supported_by_column,
+/// column_live_load_reduction}` を薄くラップする）。**断面検定の長期軸力への
+/// 実適用はまだ行っていない**（解析パイプラインへの侵襲が大きいため残課題。
+/// 本関数は表示用の集計のみを提供する）。
+///
+/// 柱の判定は `ElementKind::Beam` の部材のうち両端節点の水平距離が 1mm 未満
+/// （鉛直材）のものとする。所属階は `Node.story`（`ApplyStories`/階の自動生成で
+/// 設定される）を用いるため、階が未生成のモデルでは全部材が 0 層扱いになる。
+pub fn column_live_load_factors(model: &squid_n_core::model::Model) -> Vec<(ElemId, usize, f64)> {
+    use squid_n_core::model::ElementKind;
+
+    let node_story: Vec<Option<squid_n_core::ids::StoryId>> =
+        model.nodes.iter().map(|n| n.story).collect();
+
+    model
+        .elements
+        .iter()
+        .filter(|e| e.kind == ElementKind::Beam && e.nodes.len() >= 2)
+        .filter_map(|e| {
+            let ni = e.nodes[0].index();
+            let nj = e.nodes[1].index();
+            if ni >= model.nodes.len() || nj >= model.nodes.len() {
+                return None;
+            }
+            if !is_vertical_pair(model.nodes[ni].coord, model.nodes[nj].coord) {
+                return None;
+            }
+            let floors = squid_n_load::live_load::floors_supported_by_column(model, e, &node_story);
+            let factor = squid_n_load::live_load::column_live_load_reduction(floors);
+            Some((e.id, floors, factor))
+        })
+        .collect()
+}
+
+/// 地震用重量に算入する重力ケースを `LoadCaseKind` から選択する（レビュー §1.7）。
+///
+/// - `kind == Dead` の全ケースを対象とする。
+/// - `kind == LiveSeismic`（地震用積載）のケースがあれば併せて対象とする。
+///   無ければ `kind == Live`（長期用積載）で代用する
+///   （マニュアル「床の積載荷重は地震用の値とします」の趣旨。地震用の値が
+///   個別に定義されていなければ長期用の値をそのまま使う）。
+/// - いずれのケースも `kind` が設定されていない（全ケースが既定値 `Other`）
+///   場合は、旧スキーマ・後方互換のため先頭ケースのみを返す
+///   （並び順に依存する旧規約。新規モデルは kind 設定を推奨）。
+fn gravity_cases_for_seismic_weight(model: &squid_n_core::model::Model) -> Vec<LoadCaseId> {
+    use squid_n_core::model::LoadCaseKind;
+
+    let any_kind_set = model
+        .load_cases
+        .iter()
+        .any(|lc| lc.kind != LoadCaseKind::Other);
+    if !any_kind_set {
+        return model.load_cases.first().map(|c| c.id).into_iter().collect();
+    }
+
+    let mut result: Vec<LoadCaseId> = model
+        .load_cases
+        .iter()
+        .filter(|lc| lc.kind == LoadCaseKind::Dead)
+        .map(|lc| lc.id)
+        .collect();
+
+    let live_seismic: Vec<LoadCaseId> = model
+        .load_cases
+        .iter()
+        .filter(|lc| lc.kind == LoadCaseKind::LiveSeismic)
+        .map(|lc| lc.id)
+        .collect();
+    if !live_seismic.is_empty() {
+        result.extend(live_seismic);
+    } else {
+        result.extend(
+            model
+                .load_cases
+                .iter()
+                .filter(|lc| lc.kind == LoadCaseKind::Live)
+                .map(|lc| lc.id),
+        );
+    }
+    result
 }
 
 /// 波形 CSV/テキストの内容を解析する（ヘッドレステスト可能な純粋関数）。
@@ -2144,6 +2560,8 @@ impl App {
                                 StaticCaseKey::Seismic(SeismicDir::Y) => {
                                     "地震静的 (Y方向)".to_string()
                                 }
+                                StaticCaseKey::Wind(SeismicDir::X) => "風静的 (X方向)".to_string(),
+                                StaticCaseKey::Wind(SeismicDir::Y) => "風静的 (Y方向)".to_string(),
                             };
                             let is_sel = self.nav.focus_result == Some(StaticKey::Case(*key));
                             if ui.selectable_label(is_sel, label).clicked() {
@@ -2216,6 +2634,8 @@ impl App {
                 ("断面", ModelTab::Sections),
                 ("材料", ModelTab::Materials),
                 ("スラブ", ModelTab::Slabs),
+                ("壁属性", ModelTab::WallAttrs),
+                ("雑壁", ModelTab::MiscWalls),
             ];
             for (label, sub) in &subs {
                 let sel = self.model_tab == *sub;
@@ -2240,6 +2660,8 @@ impl App {
             }
             ModelTab::Materials => crate::tables::materials::materials_table(ui, self),
             ModelTab::Slabs => crate::tables::slabs::slabs_table(ui, self),
+            ModelTab::WallAttrs => crate::tables::wall_attrs::wall_attrs_table(ui, self),
+            ModelTab::MiscWalls => crate::tables::misc_walls::misc_walls_table(ui, self),
         }
     }
 
@@ -2277,25 +2699,37 @@ impl App {
                     "未定義（地震静的・プッシュオーバーには階が必要です）",
                 );
             } else {
+                use squid_n_core::model::{StoryLevelKind, StoryStructure};
                 // model.stories を借用したまま undo.run（model の可変借用）はできないため、
                 // 行データを先に複製してから描画・編集確定を行う。
-                let story_rows: Vec<(squid_n_core::ids::StoryId, String, f64, usize, Option<f64>)> =
-                    self.model
-                        .stories
-                        .iter()
-                        .map(|s| {
-                            (
-                                s.id,
-                                s.name.clone(),
-                                s.elevation,
-                                s.node_ids.len(),
-                                s.seismic_weight,
-                            )
-                        })
-                        .collect();
+                #[allow(clippy::type_complexity)]
+                let story_rows: Vec<(
+                    squid_n_core::ids::StoryId,
+                    String,
+                    f64,
+                    usize,
+                    Option<f64>,
+                    StoryStructure,
+                    StoryLevelKind,
+                )> = self
+                    .model
+                    .stories
+                    .iter()
+                    .map(|s| {
+                        (
+                            s.id,
+                            s.name.clone(),
+                            s.elevation,
+                            s.node_ids.len(),
+                            s.seismic_weight,
+                            s.structure,
+                            s.level_kind,
+                        )
+                    })
+                    .collect();
                 self.story_weight_edit.resize(story_rows.len(), 0.0);
                 self.story_weight_active.resize(story_rows.len(), false);
-                for (i, (story, name, elevation, n_nodes, weight)) in
+                for (i, (story, name, elevation, n_nodes, weight, structure, level_kind)) in
                     story_rows.into_iter().enumerate()
                 {
                     if !self.story_weight_active[i] {
@@ -2327,6 +2761,116 @@ impl App {
                                 );
                                 self.staleness.mark_edited();
                             }
+                        }
+
+                        ui.separator();
+                        ui.label("構造:");
+                        for (label, st) in [
+                            ("RC", StoryStructure::Rc),
+                            ("S", StoryStructure::S),
+                            ("SRC", StoryStructure::Src),
+                        ] {
+                            if ui.selectable_label(structure == st, label).clicked()
+                                && structure != st
+                            {
+                                self.undo.run(
+                                    &mut self.model,
+                                    Box::new(squid_n_edit::SetStoryStructure {
+                                        story,
+                                        structure: st,
+                                    }),
+                                );
+                                self.staleness.mark_edited();
+                            }
+                        }
+
+                        ui.separator();
+                        ui.label("種別:");
+                        let level_label = match level_kind {
+                            StoryLevelKind::Normal => "一般".to_string(),
+                            StoryLevelKind::Penthouse { k } => format!("PH k={:.2}", k),
+                            StoryLevelKind::Basement { depth_m } => {
+                                format!("地下 depth={:.1}m", depth_m)
+                            }
+                        };
+                        let mut new_level_kind: Option<StoryLevelKind> = None;
+                        egui::ComboBox::from_id_salt(("story_level_kind", story.0))
+                            .selected_text(level_label)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        matches!(level_kind, StoryLevelKind::Normal),
+                                        "一般",
+                                    )
+                                    .clicked()
+                                {
+                                    new_level_kind = Some(StoryLevelKind::Normal);
+                                }
+                                if ui
+                                    .selectable_label(
+                                        matches!(level_kind, StoryLevelKind::Penthouse { .. }),
+                                        "PH(塔屋)",
+                                    )
+                                    .clicked()
+                                {
+                                    let k = if let StoryLevelKind::Penthouse { k } = level_kind {
+                                        k
+                                    } else {
+                                        0.5
+                                    };
+                                    new_level_kind = Some(StoryLevelKind::Penthouse { k });
+                                }
+                                if ui
+                                    .selectable_label(
+                                        matches!(level_kind, StoryLevelKind::Basement { .. }),
+                                        "地下",
+                                    )
+                                    .clicked()
+                                {
+                                    let depth_m =
+                                        if let StoryLevelKind::Basement { depth_m } = level_kind {
+                                            depth_m
+                                        } else {
+                                            3.0
+                                        };
+                                    new_level_kind = Some(StoryLevelKind::Basement { depth_m });
+                                }
+                            });
+                        if let StoryLevelKind::Penthouse { k } = level_kind {
+                            let mut kv = k;
+                            let resp = ui.add(
+                                egui::DragValue::new(&mut kv)
+                                    .speed(0.05)
+                                    .range(0.0..=2.0)
+                                    .prefix("k="),
+                            );
+                            if (resp.drag_stopped() || resp.lost_focus()) && (kv - k).abs() > 1e-9 {
+                                new_level_kind = Some(StoryLevelKind::Penthouse { k: kv });
+                            }
+                        }
+                        if let StoryLevelKind::Basement { depth_m } = level_kind {
+                            let mut dv = depth_m;
+                            let resp = ui.add(
+                                egui::DragValue::new(&mut dv)
+                                    .speed(0.1)
+                                    .range(0.0..=100.0)
+                                    .suffix("m"),
+                            );
+                            if (resp.drag_stopped() || resp.lost_focus())
+                                && (dv - depth_m).abs() > 1e-9
+                            {
+                                new_level_kind = Some(StoryLevelKind::Basement { depth_m: dv });
+                            }
+                        }
+                        if let Some(lk) = new_level_kind {
+                            self.undo.run(
+                                &mut self.model,
+                                Box::new(squid_n_edit::SetStoryLevelKind {
+                                    story,
+                                    level_kind: lk,
+                                }),
+                            );
+                            self.staleness.mark_edited();
                         }
                     });
                 }
@@ -2510,6 +3054,46 @@ impl App {
                         .range(0.05..=1.0),
                 );
             });
+            // Z表（告示1793号別表第2、市町村名→Z のCSV）からの参照
+            ui.horizontal(|ui| {
+                if ui
+                    .button("📂 Z表CSV読込…")
+                    .on_hover_text("「市町村名,Z値」形式のCSVを読み込みます（#始まりはコメント行）")
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Z表 (CSV)", &["csv", "txt"])
+                        .pick_file()
+                    {
+                        match std::fs::read_to_string(&path) {
+                            Ok(csv) => self.load_z_table_from_csv(&csv),
+                            Err(e) => self.last_error = Some(format!("Z表読込エラー: {}", e)),
+                        }
+                    }
+                }
+                match &self.z_table {
+                    Some(t) => {
+                        ui.label(format!("{} 市町村", t.len()));
+                    }
+                    None => {
+                        ui.colored_label(crate::theme::GRAY_600, "（未読込）");
+                    }
+                }
+                ui.label("市町村:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.z_table_municipality).desired_width(130.0),
+                );
+                let can_lookup =
+                    self.z_table.is_some() && !self.z_table_municipality.trim().is_empty();
+                if ui
+                    .add_enabled(can_lookup, egui::Button::new("Z参照"))
+                    .on_hover_text("市町村名（完全一致）でZ表を引き、Zへ反映します")
+                    .clicked()
+                {
+                    let name = self.z_table_municipality.trim().to_string();
+                    self.apply_z_from_municipality(&name);
+                }
+            });
             if ui
                 .add_enabled(!running, egui::Button::new("▶ 実行"))
                 .clicked()
@@ -2520,6 +3104,58 @@ impl App {
                     self.results_view = ResultsView::Spatial;
                 }
             }
+        });
+        ui.add_space(6.0);
+
+        // ── 風荷重静的 ─────────────────────────────────────────
+        ui.group(|ui| {
+            ui.strong("風荷重静的");
+            ui.horizontal(|ui| {
+                ui.label("V0[m/s]:");
+                ui.add(
+                    egui::DragValue::new(&mut self.analysis_cfg.v0)
+                        .speed(0.5)
+                        .range(30.0..=46.0),
+                );
+                ui.label("粗度区分:");
+                use squid_n_load::wind::TerrainRoughness;
+                for (label, r) in [
+                    ("I", TerrainRoughness::I),
+                    ("II", TerrainRoughness::II),
+                    ("III", TerrainRoughness::III),
+                    ("IV", TerrainRoughness::IV),
+                ] {
+                    ui.selectable_value(&mut self.analysis_cfg.roughness, r, label);
+                }
+                ui.label("パラペット[mm]:");
+                ui.add(
+                    egui::DragValue::new(&mut self.analysis_cfg.parapet_mm)
+                        .speed(10.0)
+                        .range(0.0..=5000.0),
+                );
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!running, egui::Button::new("▶ 風荷重解析 (X)"))
+                    .clicked()
+                {
+                    self.run_wind(SeismicDir::X);
+                    if self.last_error.is_none() {
+                        self.active_tab = Tab::Results;
+                        self.results_view = ResultsView::Spatial;
+                    }
+                }
+                if ui
+                    .add_enabled(!running, egui::Button::new("▶ 風荷重解析 (Y)"))
+                    .clicked()
+                {
+                    self.run_wind(SeismicDir::Y);
+                    if self.last_error.is_none() {
+                        self.active_tab = Tab::Results;
+                        self.results_view = ResultsView::Spatial;
+                    }
+                }
+            });
         });
         ui.add_space(6.0);
 
@@ -3169,6 +3805,7 @@ mod tests {
         }
 
         model.load_cases.push(LoadCase {
+            kind: Default::default(),
             id: LoadCaseId(0),
             name: "長期".into(),
             nodal: Vec::new(),
@@ -4143,6 +4780,7 @@ mod tests {
             });
         }
         model.load_cases.push(LoadCase {
+            kind: Default::default(),
             id: LoadCaseId(0),
             name: "長期".into(),
             nodal: Vec::new(),
@@ -4158,6 +4796,7 @@ mod tests {
             }],
         });
         model.load_cases.push(LoadCase {
+            kind: Default::default(),
             id: LoadCaseId(1),
             name: "地震X".into(),
             nodal: vec![
@@ -4339,6 +4978,7 @@ mod tests {
                 plastic_zone: None,
             }],
             load_cases: vec![LoadCase {
+                kind: Default::default(),
                 id: LoadCaseId(0),
                 name: "圧縮".into(),
                 nodal: vec![NodalLoad {
@@ -4482,6 +5122,7 @@ mod tests {
             }],
             load_cases: vec![
                 LoadCase {
+                    kind: Default::default(),
                     id: LoadCaseId(0),
                     name: "長期".into(),
                     nodal: vec![NodalLoad {
@@ -4491,6 +5132,7 @@ mod tests {
                     member: Vec::new(),
                 },
                 LoadCase {
+                    kind: Default::default(),
                     id: LoadCaseId(1),
                     name: "地震".into(),
                     nodal: vec![NodalLoad {
@@ -4589,6 +5231,9 @@ mod tests {
             mk_beam(3, 3, 0),
         ];
         let slab = Slab {
+            edge_supported: None,
+            kind: Default::default(),
+            one_way: None,
             id: SlabId(0),
             boundary: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)],
             joists: vec![],
@@ -4642,5 +5287,514 @@ mod tests {
         app.model = missing;
         app.refresh_beam_loads();
         assert_eq!(app.beam_loads.len(), 3);
+    }
+
+    /// 正方形スラブ（4000×4000）+ 外周4本の梁を持つモデル
+    /// （`make_slab_test_model` の正方形版。正方形は `TriTrapezoid` で全辺
+    /// 三角形分布になるため §1.1 のスラブ→荷重ケース同期の検算がしやすい）。
+    fn make_square_slab_test_model() -> squid_n_core::model::Model {
+        use squid_n_core::ids::SlabId;
+        use squid_n_core::model::{
+            AreaLoad, DistributionMethod, ElementData, ElementKind, EndCondition, ForceRegime,
+            LocalAxis, Node, Slab,
+        };
+
+        let mk_node = |id: u32, x: f64, y: f64| Node {
+            id: NodeId(id),
+            coord: [x, y, 0.0],
+            restraint: Default::default(),
+            mass: None,
+            story: None,
+        };
+        let nodes = vec![
+            mk_node(0, 0.0, 0.0),
+            mk_node(1, 4000.0, 0.0),
+            mk_node(2, 4000.0, 4000.0),
+            mk_node(3, 0.0, 4000.0),
+        ];
+        let mk_beam = |id: u32, i: u32, j: u32| ElementData {
+            id: ElemId(id),
+            kind: ElementKind::Beam,
+            nodes: [NodeId(i), NodeId(j)].into_iter().collect(),
+            section: None,
+            material: None,
+            local_axis: LocalAxis {
+                ref_vector: [0.0, 0.0, 1.0],
+            },
+            end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+            force_regime: ForceRegime::Auto,
+            rigid_zone: Default::default(),
+            plastic_zone: None,
+        };
+        let elements = vec![
+            mk_beam(0, 0, 1),
+            mk_beam(1, 1, 2),
+            mk_beam(2, 2, 3),
+            mk_beam(3, 3, 0),
+        ];
+        let slab = Slab {
+            edge_supported: None,
+            kind: Default::default(),
+            one_way: None,
+            id: SlabId(0),
+            boundary: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)],
+            joists: vec![],
+            loads: vec![AreaLoad {
+                kind: "DL".into(),
+                value: 0.005,
+            }],
+            method: DistributionMethod::TriTrapezoid,
+        };
+        squid_n_core::model::Model {
+            nodes,
+            elements,
+            slabs: vec![slab],
+            ..Default::default()
+        }
+    }
+
+    /// レビュー §1.1（最重要）: スラブ荷重が `sync_slab_loads_action` で
+    /// 「床荷重(自動)」荷重ケースへ実際に書き込まれ、応力解析から参照可能に
+    /// なることを確認する。正方形スラブは全辺三角形分布（2区間）になるため
+    /// `MemberLoadKind::Distributed` への変換規則を直接検算できる。
+    #[test]
+    fn test_sync_slab_loads_action_square_slab_triangle_distribution() {
+        use squid_n_core::model::{LoadCaseKind, MemberLoadKind};
+
+        let model = make_square_slab_test_model();
+        model
+            .validate()
+            .expect("テストモデルは validate を通るはず");
+        let mut app = App {
+            model,
+            ..App::default()
+        };
+
+        app.sync_slab_loads_action();
+
+        let case = app
+            .model
+            .load_cases
+            .iter()
+            .find(|lc| lc.name == SLAB_AUTO_LOAD_CASE_NAME)
+            .expect("床荷重(自動)ケースが作られるはず");
+        assert_eq!(case.kind, LoadCaseKind::Dead);
+        assert_eq!(case.member.len(), 8, "4辺 × 2区間（三角形分布）= 8件");
+        assert!(case.nodal.is_empty(), "小梁が無いので節点荷重は空のはず");
+
+        // 各梁にちょうど2区間ずつ入っていることを確認
+        for elem_id in 0..4u32 {
+            let n_segs = case
+                .member
+                .iter()
+                .filter(|m| m.elem == ElemId(elem_id))
+                .count();
+            assert_eq!(n_segs, 2, "梁#{elem_id} には三角形分布の2区間が入るはず");
+            for m in case.member.iter().filter(|m| m.elem == ElemId(elem_id)) {
+                assert_eq!(m.dir, [0.0, 0.0, -1.0], "作用方向は鉛直下向き固定のはず");
+            }
+        }
+
+        // 鉛直合計 = w × 面積（保存則）
+        let total: f64 = case
+            .member
+            .iter()
+            .map(|m| match m.kind {
+                MemberLoadKind::Distributed { a, b, w1, w2 } => (w1 + w2) / 2.0 * (b - a),
+                MemberLoadKind::Point { p, .. } => p,
+            })
+            .sum();
+        let expected = 0.005 * 4000.0 * 4000.0;
+        assert!(
+            (total - expected).abs() < 1e-6,
+            "total={total} expected={expected}"
+        );
+
+        // 再同期しても重複しない（全置換）
+        app.sync_slab_loads_action();
+        let cases: Vec<_> = app
+            .model
+            .load_cases
+            .iter()
+            .filter(|lc| lc.name == SLAB_AUTO_LOAD_CASE_NAME)
+            .collect();
+        assert_eq!(cases.len(), 1, "再同期でケースが重複してはいけない");
+        assert_eq!(cases[0].member.len(), 8, "再同期で荷重が重複してはいけない");
+
+        // undo で元に戻る（新規作成だったケースが丸ごと消える）
+        app.undo.undo(&mut app.model);
+        assert!(
+            !app.model
+                .load_cases
+                .iter()
+                .any(|lc| lc.name == SLAB_AUTO_LOAD_CASE_NAME),
+            "undo で「床荷重(自動)」ケースが消えるはず"
+        );
+    }
+
+    /// レビュー §1.7: 地震用重量に使う荷重ケースの選択が、並び順ではなく
+    /// `LoadCaseKind` に基づくことを確認する（Dead+LiveSeismic 優先、
+    /// LiveSeismic が無ければ Dead+Live、種別が一つも設定されていなければ
+    /// 従来互換で先頭ケースのみ）。
+    #[test]
+    fn test_gravity_cases_for_seismic_weight_selection() {
+        use squid_n_core::model::{LoadCase, LoadCaseKind};
+
+        let mk_lc = |i: u32, name: &str, kind: LoadCaseKind| LoadCase {
+            id: LoadCaseId(i),
+            name: name.to_string(),
+            nodal: Vec::new(),
+            member: Vec::new(),
+            kind,
+        };
+
+        // 種別が一つも設定されていない（全て既定値 Other） → 先頭ケースのみ
+        let model_no_kind = squid_n_core::model::Model {
+            load_cases: vec![
+                mk_lc(0, "LC0", LoadCaseKind::Other),
+                mk_lc(1, "LC1", LoadCaseKind::Other),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            gravity_cases_for_seismic_weight(&model_no_kind),
+            vec![LoadCaseId(0)],
+            "種別未設定モデルは従来互換で先頭ケースのみ"
+        );
+
+        // LiveSeismic が無い → Dead + Live
+        let model_dead_live = squid_n_core::model::Model {
+            load_cases: vec![
+                mk_lc(0, "固定", LoadCaseKind::Dead),
+                mk_lc(1, "積載(長期)", LoadCaseKind::Live),
+                mk_lc(2, "積雪", LoadCaseKind::Snow),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            gravity_cases_for_seismic_weight(&model_dead_live),
+            vec![LoadCaseId(0), LoadCaseId(1)],
+            "LiveSeismic が無ければ Dead+Live"
+        );
+
+        // LiveSeismic があれば Live ではなく LiveSeismic を優先
+        let model_dead_live_seismic = squid_n_core::model::Model {
+            load_cases: vec![
+                mk_lc(0, "固定", LoadCaseKind::Dead),
+                mk_lc(1, "積載(長期)", LoadCaseKind::Live),
+                mk_lc(2, "積載(地震用)", LoadCaseKind::LiveSeismic),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            gravity_cases_for_seismic_weight(&model_dead_live_seismic),
+            vec![LoadCaseId(0), LoadCaseId(2)],
+            "LiveSeismic があれば Live ではなく LiveSeismic を採用"
+        );
+
+        // 複数 Dead ケースも全て対象
+        let model_multi_dead = squid_n_core::model::Model {
+            load_cases: vec![
+                mk_lc(0, "固定1", LoadCaseKind::Dead),
+                mk_lc(1, "固定2", LoadCaseKind::Dead),
+                mk_lc(2, "地震荷重", LoadCaseKind::Seismic),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            gravity_cases_for_seismic_weight(&model_multi_dead),
+            vec![LoadCaseId(0), LoadCaseId(1)],
+            "複数の Dead ケースは全て対象、Seismic は対象外"
+        );
+    }
+
+    /// テスト用の荷重ケース（種別付き）を作る。
+    fn kind_lc(
+        i: u32,
+        name: &str,
+        kind: squid_n_core::model::LoadCaseKind,
+    ) -> squid_n_core::model::LoadCase {
+        squid_n_core::model::LoadCase {
+            id: LoadCaseId(i),
+            name: name.to_string(),
+            nodal: Vec::new(),
+            member: Vec::new(),
+            kind,
+        }
+    }
+
+    /// 種別から組合せを自動生成: Dead/Live/Snow/Wind の種別を設定したモデルで
+    /// 標準組合せ（長期・短期積雪・短期暴風±）が undo 可能に一括生成されること。
+    #[test]
+    fn test_auto_generate_combinations_from_kinds() {
+        use squid_n_core::model::LoadCaseKind;
+
+        let mut app = App::default();
+        app.model.load_cases = vec![
+            kind_lc(0, "固定", LoadCaseKind::Dead),
+            kind_lc(1, "積載", LoadCaseKind::Live),
+            kind_lc(2, "積雪", LoadCaseKind::Snow),
+            kind_lc(3, "風", LoadCaseKind::Wind),
+        ];
+
+        app.auto_generate_combinations_action();
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
+
+        // 多雪区域=false: G+P(1) + G+P+S(1) + 風±(2) = 4 ケース
+        // （地震(Kx/Ky)は kind だけでは方向を判別できないため対象外の仕様）。
+        let names: Vec<&str> = app
+            .model
+            .combinations
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["G + P", "G + P + S", "G + P + Wx", "G + P - Wx"]
+        );
+
+        // G+P の中身は Dead(0)+Live(1) を各1.0で参照する。
+        assert_eq!(
+            app.model.combinations[0].terms,
+            vec![(LoadCaseId(0), 1.0), (LoadCaseId(1), 1.0)]
+        );
+
+        // 各組合せは個別コマンドで追加されているため、全 undo で消える。
+        for _ in 0..app.model.combinations.len() {
+            app.undo.undo(&mut app.model);
+        }
+        assert!(app.model.combinations.is_empty());
+    }
+
+    /// 多雪区域フラグ（AnalysisSettings::heavy_snow_zone）を立てると
+    /// 0.7S・0.35S 系の組合せも生成されること。
+    #[test]
+    fn test_auto_generate_combinations_heavy_snow() {
+        use squid_n_core::model::LoadCaseKind;
+
+        let mut app = App::default();
+        app.analysis_cfg.heavy_snow_zone = true;
+        app.model.load_cases = vec![
+            kind_lc(0, "固定", LoadCaseKind::Dead),
+            kind_lc(1, "積載", LoadCaseKind::Live),
+            kind_lc(2, "積雪", LoadCaseKind::Snow),
+            kind_lc(3, "風", LoadCaseKind::Wind),
+        ];
+
+        app.auto_generate_combinations_action();
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
+
+        let names: Vec<&str> = app
+            .model
+            .combinations
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(names.contains(&"G + P + 0.7S"), "{names:?}");
+        assert!(names.contains(&"G + P + 0.35S + Wx"), "{names:?}");
+        assert!(names.contains(&"G + P + 0.35S - Wx"), "{names:?}");
+    }
+
+    /// Dead ケースが無い場合はエラーメッセージが設定され、組合せは生成されないこと。
+    /// Live 欠如も同様。
+    #[test]
+    fn test_auto_generate_combinations_missing_dead_or_live_is_error() {
+        use squid_n_core::model::LoadCaseKind;
+
+        // Dead 無し
+        let mut app = App::default();
+        app.model.load_cases = vec![kind_lc(0, "積載", LoadCaseKind::Live)];
+        app.auto_generate_combinations_action();
+        assert!(app.last_error.as_deref().unwrap().contains("固定荷重"));
+        assert!(app.model.combinations.is_empty());
+
+        // Live 無し
+        let mut app = App::default();
+        app.model.load_cases = vec![kind_lc(0, "固定", LoadCaseKind::Dead)];
+        app.auto_generate_combinations_action();
+        assert!(app.last_error.as_deref().unwrap().contains("積載荷重"));
+        assert!(app.model.combinations.is_empty());
+    }
+
+    /// SetLoadCfg が App の undo スタック経由で機能すること
+    /// （荷重計算条件タブの編集経路のヘッドレス確認）。
+    #[test]
+    fn test_set_load_cfg_via_app_undo() {
+        use squid_n_core::model::{KBraceWeightRule, LoadCfg};
+
+        let mut app = App::default();
+        assert!(app.model.load_cfg.is_none());
+
+        let cfg = LoadCfg {
+            steel_weight_factor: 1.1,
+            k_brace_rule: KBraceWeightRule::BaseNodesOnly,
+            live_load_reduction: true,
+            ..Default::default()
+        };
+        app.undo.run(
+            &mut app.model,
+            Box::new(squid_n_edit::SetLoadCfg {
+                cfg: Some(cfg.clone()),
+            }),
+        );
+        assert_eq!(app.model.load_cfg, Some(cfg));
+
+        app.undo.undo(&mut app.model);
+        assert!(app.model.load_cfg.is_none());
+    }
+
+    /// 3層1本柱のモデルで `column_live_load_factors` が
+    /// 支持床数（3,2,1）と低減率（0.90,0.95,1.00）を返すこと（令85条2項）。
+    #[test]
+    fn test_column_live_load_factors_three_story() {
+        use squid_n_core::ids::StoryId;
+        use squid_n_core::model::{
+            ElementData, ElementKind, EndCondition, ForceRegime, LocalAxis, Node,
+        };
+
+        let mut model = squid_n_core::model::Model::default();
+        // 4節点(z=0,3000,6000,9000)。z>0 の節点に所属階(1F=story0..3F=story2)を設定。
+        for (i, z) in [0.0, 3000.0, 6000.0, 9000.0].iter().enumerate() {
+            model.nodes.push(Node {
+                id: NodeId(i as u32),
+                coord: [0.0, 0.0, *z],
+                restraint: if i == 0 {
+                    squid_n_core::dof::Dof6Mask::FIXED
+                } else {
+                    squid_n_core::dof::Dof6Mask::FREE
+                },
+                mass: None,
+                story: if i == 0 {
+                    None
+                } else {
+                    Some(StoryId(i as u32 - 1))
+                },
+            });
+        }
+        // 柱3本（各階1本）＋ 水平の梁1本（柱でないため集計対象外の確認用）
+        let mut push_elem = |id: u32, a: u32, b: u32| {
+            model.elements.push(ElementData {
+                id: ElemId(id),
+                kind: ElementKind::Beam,
+                nodes: [NodeId(a), NodeId(b)].into_iter().collect(),
+                section: None,
+                material: None,
+                local_axis: LocalAxis {
+                    ref_vector: [1.0, 0.0, 0.0],
+                },
+                end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+                force_regime: ForceRegime::Auto,
+                rigid_zone: Default::default(),
+                plastic_zone: None,
+            });
+        };
+        push_elem(0, 0, 1);
+        push_elem(1, 1, 2);
+        push_elem(2, 2, 3);
+        // 水平材（同一 Z の節点を追加して繋ぐ）
+        model.nodes.push(Node {
+            id: NodeId(4),
+            coord: [4000.0, 0.0, 9000.0],
+            restraint: squid_n_core::dof::Dof6Mask::FREE,
+            mass: None,
+            story: Some(StoryId(2)),
+        });
+        model.elements.push(ElementData {
+            id: ElemId(3),
+            kind: ElementKind::Beam,
+            nodes: [NodeId(3), NodeId(4)].into_iter().collect(),
+            section: None,
+            material: None,
+            local_axis: LocalAxis {
+                ref_vector: [0.0, 0.0, 1.0],
+            },
+            end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+            force_regime: ForceRegime::Auto,
+            rigid_zone: Default::default(),
+            plastic_zone: None,
+        });
+
+        let factors = column_live_load_factors(&model);
+        // 水平梁(ElemId(3))は含まれない。
+        assert_eq!(
+            factors,
+            vec![
+                (ElemId(0), 3, 0.90),
+                (ElemId(1), 2, 0.95),
+                (ElemId(2), 1, 1.00),
+            ]
+        );
+    }
+
+    /// Z表 CSV の読込と市町村名参照 → analysis_cfg.z への反映（ヘッドレス）。
+    #[test]
+    fn test_z_table_load_and_apply() {
+        let mut app = App::default();
+
+        // 未読込での参照はエラー
+        assert!(!app.apply_z_from_municipality("那覇市"));
+        assert!(app.last_error.as_deref().unwrap().contains("Z表"));
+
+        // 不正な Z 値（0.85 は告示1793号の値でない）はエラー
+        app.load_z_table_from_csv("変な市,0.85\n");
+        assert!(app.last_error.is_some());
+        assert!(app.z_table.is_none());
+
+        // 正常読込 → 参照で z が反映される
+        app.load_z_table_from_csv(
+            "# 出典: 告示1793号 別表第2\n東京都千代田区,1.0\n沖縄県那覇市,0.7\n",
+        );
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
+        assert_eq!(app.z_table.as_ref().unwrap().len(), 2);
+
+        assert!(app.apply_z_from_municipality("沖縄県那覇市"));
+        assert_eq!(app.analysis_cfg.z, 0.7);
+
+        // 見つからない市町村はエラー、z は変わらない
+        assert!(!app.apply_z_from_municipality("存在しない市"));
+        assert!(app
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("見つかりません"));
+        assert_eq!(app.analysis_cfg.z, 0.7);
+    }
+
+    /// 風荷重静的解析（run_wind）: 階の定義後に実行でき、結果が
+    /// `StaticCaseKey::Wind(dir)` に格納されること。
+    ///
+    /// サンプルの門型ラーメンは XZ 平面内の平面架構のため、Y 方向の風
+    /// （見付け幅 = X 方向の座標範囲 4000mm）のみ解析できる。X 方向の風は
+    /// 見付け幅（Y 範囲）が 0 のため明示エラーになることも併せて確認する。
+    #[test]
+    fn test_run_wind_static() {
+        let mut app = App::default();
+        app.load_model(crate::sample::portal_frame());
+
+        // 階なし → 明示エラー
+        app.run_wind(SeismicDir::Y);
+        assert!(app.last_error.is_some());
+
+        app.generate_stories_action();
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
+
+        // 平面架構の面外（X風）は見付け幅 0 の明示エラー
+        app.run_wind(SeismicDir::X);
+        assert!(app.last_error.is_some());
+
+        app.run_wind(SeismicDir::Y);
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
+        let r = app.results.as_ref().unwrap();
+        let wind = r
+            .statics
+            .iter()
+            .find(|(k, _)| *k == StaticCaseKey::Wind(SeismicDir::Y))
+            .expect("風静的Yの結果が格納されるはず");
+        // 柱頭が Y 方向へ変位している（風方向の水平力が作用した証拠）
+        assert!(wind.1.disp[2][1].abs() > 1e-9, "{}", wind.1.disp[2][1]);
+        assert_eq!(
+            app.last_static,
+            Some(StaticKey::Case(StaticCaseKey::Wind(SeismicDir::Y)))
+        );
     }
 }

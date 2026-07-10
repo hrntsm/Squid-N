@@ -587,6 +587,8 @@ mod tests {
         // 層
         let s0 = StoryId(0);
         let story = Story {
+            level_kind: Default::default(),
+            structure: Default::default(),
             id: s0,
             name: "1F".to_string(),
             elevation: 3000.0,

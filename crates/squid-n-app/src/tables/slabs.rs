@@ -1,7 +1,7 @@
 use crate::app::App;
 use squid_n_core::ids::{NodeId, SlabId};
-use squid_n_core::model::{AreaLoad, DistributionMethod};
-use squid_n_edit::{AddSlab, DeleteSlab};
+use squid_n_core::model::{AreaLoad, DistributionMethod, OneWayDir, SlabKind};
+use squid_n_edit::{AddSlab, DeleteSlab, SetSlabKind, SetSlabOneWay};
 
 /// スラブ追加フォームのドラフト状態（GUI 専用）。
 /// `nodes` は境界4節点（頂点0→1→2→3→0 の順で外周を辿る）の選択状態。
@@ -34,6 +34,22 @@ fn method_label(m: DistributionMethod) -> &'static str {
     }
 }
 
+fn kind_label(k: SlabKind) -> &'static str {
+    match k {
+        SlabKind::Interior => "一般",
+        SlabKind::Cantilever => "片持ち",
+        SlabKind::Corner => "出隅",
+    }
+}
+
+fn one_way_label(o: Option<OneWayDir>) -> &'static str {
+    match o {
+        None => "なし",
+        Some(OneWayDir::X) => "X",
+        Some(OneWayDir::Y) => "Y",
+    }
+}
+
 pub fn slabs_table(ui: &mut egui::Ui, app: &mut App) {
     use egui_extras::{Column, TableBuilder};
 
@@ -45,6 +61,8 @@ pub fn slabs_table(ui: &mut egui::Ui, app: &mut App) {
     // ── 一覧表 ──────────────────────────────────────────
     let n = app.model.slabs.len();
     let mut pending_delete: Option<SlabId> = None;
+    let mut pending_kind: Vec<(SlabId, SlabKind)> = Vec::new();
+    let mut pending_one_way: Vec<(SlabId, Option<OneWayDir>)> = Vec::new();
 
     TableBuilder::new(ui)
         .striped(true)
@@ -52,9 +70,11 @@ pub fn slabs_table(ui: &mut egui::Ui, app: &mut App) {
         .column(Column::initial(140.0))
         .column(Column::initial(200.0))
         .column(Column::initial(140.0))
+        .column(Column::initial(90.0))
+        .column(Column::initial(90.0))
         .column(Column::auto())
         .header(20.0, |mut h| {
-            for t in &["ID", "境界節点", "荷重", "分配法", ""] {
+            for t in &["ID", "境界節点", "荷重", "分配法", "種別", "一方向", ""] {
                 h.col(|ui| {
                     ui.strong(*t);
                 });
@@ -89,6 +109,37 @@ pub fn slabs_table(ui: &mut egui::Ui, app: &mut App) {
                     ui.label(method_label(slab.method));
                 });
                 row.col(|ui| {
+                    egui::ComboBox::from_id_salt(("slab_kind", slab.id.0))
+                        .selected_text(kind_label(slab.kind))
+                        .show_ui(ui, |ui| {
+                            for kind in [SlabKind::Interior, SlabKind::Cantilever, SlabKind::Corner]
+                            {
+                                if ui
+                                    .selectable_label(slab.kind == kind, kind_label(kind))
+                                    .clicked()
+                                    && slab.kind != kind
+                                {
+                                    pending_kind.push((slab.id, kind));
+                                }
+                            }
+                        });
+                });
+                row.col(|ui| {
+                    egui::ComboBox::from_id_salt(("slab_one_way", slab.id.0))
+                        .selected_text(one_way_label(slab.one_way))
+                        .show_ui(ui, |ui| {
+                            for ow in [None, Some(OneWayDir::X), Some(OneWayDir::Y)] {
+                                if ui
+                                    .selectable_label(slab.one_way == ow, one_way_label(ow))
+                                    .clicked()
+                                    && slab.one_way != ow
+                                {
+                                    pending_one_way.push((slab.id, ow));
+                                }
+                            }
+                        });
+                });
+                row.col(|ui| {
                     if ui.button("🗑").on_hover_text("このスラブを削除").clicked() {
                         pending_delete = Some(slab.id);
                     }
@@ -96,8 +147,20 @@ pub fn slabs_table(ui: &mut egui::Ui, app: &mut App) {
             });
         });
 
+    let had_pending =
+        !pending_kind.is_empty() || !pending_one_way.is_empty() || pending_delete.is_some();
+    for (id, kind) in pending_kind {
+        app.undo
+            .run(&mut app.model, Box::new(SetSlabKind { id, kind }));
+    }
+    for (id, one_way) in pending_one_way {
+        app.undo
+            .run(&mut app.model, Box::new(SetSlabOneWay { id, one_way }));
+    }
     if let Some(id) = pending_delete {
         app.undo.run(&mut app.model, Box::new(DeleteSlab { id }));
+    }
+    if had_pending {
         app.staleness.mark_edited();
     }
 

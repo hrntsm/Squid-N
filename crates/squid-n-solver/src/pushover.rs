@@ -1,4 +1,4 @@
-use crate::analysis::SeismicDir;
+use crate::analysis::{distribute_pi_over_diaphragms, steel_height_ratio, SeismicDir};
 use crate::arc_length::ArcLengthSolver;
 use crate::constraint::Reducer;
 use crate::transaction::{StateSnapshot, StatefulModel};
@@ -253,7 +253,10 @@ pub fn pushover_analysis(
         return Err("no stories defined".into());
     }
     let height_m = stories.last().map(|s| s.elevation).unwrap_or(0.0) / 1000.0;
-    let t = squid_n_load::ai::approx_t(height_m, 0.0);
+    // 略算周期の鉄骨造比 α（レビュー §1.5）。steel_height_ratio は analysis.rs の
+    // seismic_static_with と共有する実装。
+    let steel_ratio = steel_height_ratio(model);
+    let t = squid_n_load::ai::approx_t(height_m, steel_ratio);
     let z = 1.0;
     let tc = squid_n_load::ai::tc_of(squid_n_load::ai::SoilClass::II);
     let rt_val = squid_n_load::ai::rt(t, tc);
@@ -277,12 +280,14 @@ pub fn pushover_analysis(
         if pi == 0.0 {
             continue;
         }
-        for dia in &story.diaphragms {
-            let ni = dia.master.index();
+        // 多剛床の階では重量比で按分する（レビュー §1.6、analysis.rs と同じ規則。
+        // 従来は各剛床へ pi をそのまま重複して載せていた）。
+        for (master, share) in distribute_pi_over_diaphragms(story, pi) {
+            let ni = master.index();
             for d in 0..6 {
                 let g = ni * 6 + d;
                 if let Some(a) = dofmap.active(g) {
-                    q[a as usize] += dir_vec[d] * pi;
+                    q[a as usize] += dir_vec[d] * share;
                 }
             }
         }
@@ -886,11 +891,15 @@ mod tests {
                 fy: Some(fy),
             }],
             stories: vec![Story {
+                level_kind: Default::default(),
+                structure: Default::default(),
                 id: StoryId(0),
                 name: "1F".to_string(),
                 elevation: 3000.0,
                 node_ids: vec![NodeId(1)],
                 diaphragms: vec![DiaphragmDef {
+                    ci_override: None,
+                    weight: None,
                     master: NodeId(1),
                     slaves: vec![],
                     rigid: true,
@@ -1089,6 +1098,8 @@ mod tests {
             materials: vec![mat],
             stories: vec![
                 Story {
+                    level_kind: Default::default(),
+                    structure: Default::default(),
                     id: StoryId(0),
                     name: "1F".to_string(),
                     elevation: 3000.0,
@@ -1097,6 +1108,8 @@ mod tests {
                     seismic_weight: None,
                 },
                 Story {
+                    level_kind: Default::default(),
+                    structure: Default::default(),
                     id: StoryId(1),
                     name: "2F".to_string(),
                     elevation: 6000.0,
@@ -1261,6 +1274,8 @@ mod tests {
                 fy: Some(235.0),
             }],
             stories: vec![Story {
+                level_kind: Default::default(),
+                structure: Default::default(),
                 id: StoryId(0),
                 name: "1F".to_string(),
                 elevation: 3000.0,
@@ -1446,11 +1461,15 @@ mod tests {
                 fy: Some(fy),
             }],
             stories: vec![Story {
+                level_kind: Default::default(),
+                structure: Default::default(),
                 id: StoryId(0),
                 name: "1F".to_string(),
                 elevation: 3000.0,
                 node_ids: vec![NodeId(1), NodeId(2)],
                 diaphragms: vec![DiaphragmDef {
+                    ci_override: None,
+                    weight: None,
                     master: NodeId(1),
                     slaves: vec![NodeId(2)],
                     rigid: true,

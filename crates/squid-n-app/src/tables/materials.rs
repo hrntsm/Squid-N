@@ -4,16 +4,67 @@ use squid_n_edit::{AddMaterial, DeleteMaterial, MaterialField, SetMaterialField,
 /// (名称, E [N/mm²], ν, 密度 [ton/mm³], Fc, Fy)
 type MaterialPreset = (&'static str, f64, f64, f64, Option<f64>, Option<f64>);
 
-/// 材料プリセット（JIS 主要鋼種と普通コンクリート）。
-/// 密度は内部単位系 N-mm-s の質量密度 [ton/mm³]（鋼 7.85e-9、RC 2.4e-9）。
-const PRESETS: &[MaterialPreset] = &[
-    ("SN400B", 205000.0, 0.3, 7.85e-9, None, Some(235.0)),
-    ("SS400", 205000.0, 0.3, 7.85e-9, None, Some(235.0)),
-    ("SM490A", 205000.0, 0.3, 7.85e-9, None, Some(325.0)),
-    ("Fc21", 21500.0, 0.2, 2.4e-9, Some(21.0), None),
-    ("Fc24", 22700.0, 0.2, 2.4e-9, Some(24.0), None),
-    ("Fc30", 24800.0, 0.2, 2.4e-9, Some(30.0), None),
-];
+/// コンクリートの質量密度 [ton/mm³] を単位体積重量表（γC/γRC/γSRC）から導出する。
+///
+/// レビュー §1.9: 旧実装は Fc・構造区分によらず `2.4e-9`（γ≈23.5 kN/m³）固定
+/// だったが、マニュアルの表は Fc・普通/軽量・無筋/RC/SRC ごとに
+/// 17.0〜26.5 kN/m³ の範囲で規定する。普通コンクリート・Fc≤36 の場合、
+/// 気乾単位体積重量 γC=23.0、鉄筋込み γRC=γC+1.0=24.0、
+/// 鉄骨鉄筋込み γSRC=γC+2.0=25.0 kN/m³（`squid_n_core::units::concrete_unit_weight_kn_m3`
+/// の表そのもの）。Fc21/24/30 はいずれも Fc≤36 帯のため γRC/γSRC は Fc に依らず
+/// 同一値になる（Fc>36 で初めて変化する）。
+fn concrete_density(fc: f64, comp: squid_n_core::units::ConcreteComposition) -> f64 {
+    use squid_n_core::units::{concrete_unit_weight_kn_m3, to_internal, ConcreteClass};
+    let gamma = concrete_unit_weight_kn_m3(fc, ConcreteClass::Normal, comp);
+    to_internal::mass_density_from_unit_weight_kn_m3(gamma)
+}
+
+/// 材料プリセット（JIS 主要鋼種と普通/SRC コンクリート）を実行時に生成する。
+/// コンクリートの密度は `concrete_density`（γ表からの導出）を用いるため
+/// `const` にできず、呼び出しのたびに構築する（UI 描画1回あたり数件のみで
+/// コストは無視できる）。密度は内部単位系 N-mm-s の質量密度 [ton/mm³]
+/// （鋼は慣用値 γs=77kN/m³ 相当の 7.85e-9 を維持）。
+fn material_presets() -> Vec<MaterialPreset> {
+    use squid_n_core::units::ConcreteComposition::{Rc, Src};
+    vec![
+        ("SN400B", 205000.0, 0.3, 7.85e-9, None, Some(235.0)),
+        ("SS400", 205000.0, 0.3, 7.85e-9, None, Some(235.0)),
+        ("SM490A", 205000.0, 0.3, 7.85e-9, None, Some(325.0)),
+        (
+            "Fc21",
+            21500.0,
+            0.2,
+            concrete_density(21.0, Rc),
+            Some(21.0),
+            None,
+        ),
+        (
+            "Fc24",
+            22700.0,
+            0.2,
+            concrete_density(24.0, Rc),
+            Some(24.0),
+            None,
+        ),
+        (
+            "Fc30",
+            24800.0,
+            0.2,
+            concrete_density(30.0, Rc),
+            Some(30.0),
+            None,
+        ),
+        // SRC 造（鉄骨鉄筋コンクリート）用: γSRC = γC + 2.0（レビュー §1.9）。
+        (
+            "Fc24(SRC)",
+            22700.0,
+            0.2,
+            concrete_density(24.0, Src),
+            Some(24.0),
+            None,
+        ),
+    ]
+}
 
 /// 材料タブ：プリセット追加・カスタム追加・一覧編集・削除。
 pub fn materials_table(ui: &mut egui::Ui, app: &mut App) {
@@ -22,17 +73,17 @@ pub fn materials_table(ui: &mut egui::Ui, app: &mut App) {
     // ── プリセット追加 ─────────────────────────────────────────
     ui.label("プリセット追加:");
     ui.horizontal_wrapped(|ui| {
-        for (name, e, nu, rho, fc, fy) in PRESETS {
-            if ui.button(*name).clicked() {
+        for (name, e, nu, rho, fc, fy) in material_presets() {
+            if ui.button(name).clicked() {
                 app.undo.run(
                     &mut app.model,
                     Box::new(AddMaterial {
                         name: name.to_string(),
-                        young: *e,
-                        poisson: *nu,
-                        density: *rho,
-                        fc: *fc,
-                        fy: *fy,
+                        young: e,
+                        poisson: nu,
+                        density: rho,
+                        fc,
+                        fy,
                     }),
                 );
                 app.staleness.mark_edited();
@@ -228,5 +279,54 @@ pub fn materials_table(ui: &mut egui::Ui, app: &mut App) {
     }
     if edited {
         app.staleness.mark_edited();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// レビュー §1.9: コンクリートプリセットの密度が単位体積重量表（γ表）から
+    /// 導出されていることを確認する（Fc・種別に応じた 24.0/25.0 kN/m³ 等）。
+    #[test]
+    fn test_concrete_presets_match_unit_weight_table() {
+        use squid_n_core::units::to_internal::mass_density_from_unit_weight_kn_m3;
+
+        let presets = material_presets();
+        let find = |name: &str| {
+            presets
+                .iter()
+                .find(|p| p.0 == name)
+                .unwrap_or_else(|| panic!("preset {name} not found"))
+                .clone()
+        };
+
+        // Fc21/24/30 は全て Fc<=36 帯のため γRC=24.0 kN/m³ で共通。
+        let rc_density = mass_density_from_unit_weight_kn_m3(24.0);
+        for name in ["Fc21", "Fc24", "Fc30"] {
+            let p = find(name);
+            assert!(
+                (p.3 - rc_density).abs() < 1e-15,
+                "{name}: density={} expected={}",
+                p.3,
+                rc_density
+            );
+        }
+
+        // SRC 用プリセットは γSRC=25.0 kN/m³。
+        let src_density = mass_density_from_unit_weight_kn_m3(25.0);
+        let src = find("Fc24(SRC)");
+        assert!((src.3 - src_density).abs() < 1e-15);
+
+        // 旧実装の固定値 2.4e-9 より正しい値の方が大きい（γ=24.0 が実際の表の値）。
+        assert!(rc_density > 2.4e-9);
+        assert!(
+            (rc_density - 2.4473e-9).abs() < 1e-13,
+            "rc_density={rc_density}"
+        );
+
+        // 鋼材の密度は据え置き。
+        let steel = find("SN400B");
+        assert!((steel.3 - 7.85e-9).abs() < 1e-18);
     }
 }
