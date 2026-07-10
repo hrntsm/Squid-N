@@ -9,7 +9,9 @@ use std::collections::HashSet;
 pub type StaticResult = StaticOnce;
 use squid_n_core::dof::DofMap;
 use squid_n_core::ids::{LoadCaseId, NodeId};
-use squid_n_core::model::{LoadCombination, Model, Story, StoryLevelKind, StoryStructure};
+use squid_n_core::model::{
+    DiaphragmDef, LoadCombination, Model, Story, StoryLevelKind, StoryStructure,
+};
 use squid_n_element::factory::build_behavior;
 use squid_n_math::solver::{make_solver, LinearSolver, SolveError, SolverBackend};
 
@@ -60,6 +62,12 @@ pub struct WindStaticCfg {
     /// 内圧係数 Cpi（現行の `wind_forces` 実装では風上・風下合算で相殺され
     /// 結果に影響しない。将来の片面評価用に保持する）。
     pub cpi: f64,
+    /// パラペット高さ [mm]（既定 0）。マニュアル「建築物の高さと軒の高さとの
+    /// 平均」= GLからPH階を除く最上階の床高さ + パラペット高さの半分、に
+    /// 対応する。建物高さ H にはこの半分のみを算入するが、見付面積の算定では
+    /// 最上層の負担区間上端をパラペット天端（最上階床高さ + `parapet_mm`）まで
+    /// 延長する（実壁はパラペット天端まで存在するため）。
+    pub parapet_mm: f64,
 }
 
 /// 建物の基部レベル（elevation の基準 0）を求める。
@@ -116,6 +124,28 @@ pub fn steel_height_ratio(model: &Model) -> f64 {
     }
 }
 
+/// [`distribute_pi_over_diaphragms`] の中核ロジック。剛床定義の列（階全体、
+/// または主系統サブセットのいずれか）を受け取り Pi を重量比で分配する。
+fn distribute_pi_over_slice(diaphragms: &[DiaphragmDef], pi: f64) -> Vec<(NodeId, f64)> {
+    let n = diaphragms.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return vec![(diaphragms[0].master, pi)];
+    }
+    let total_weight: f64 = diaphragms.iter().filter_map(|d| d.weight).sum();
+    if total_weight > 0.0 {
+        diaphragms
+            .iter()
+            .map(|d| (d.master, pi * d.weight.unwrap_or(0.0) / total_weight))
+            .collect()
+    } else {
+        let share = pi / n as f64;
+        diaphragms.iter().map(|d| (d.master, share)).collect()
+    }
+}
+
 /// 階の水平力 Pi を階内の剛床（ダイアフラム）ごとに分配する
 /// （RESP-D マニュアル「多剛床の設計用せん断力」：水平力を剛床ごとの重量比で
 /// 分配する）。
@@ -125,25 +155,177 @@ pub fn steel_height_ratio(model: &Model) -> f64 {
 ///   重量の合計が 0（すべて未設定を含む）の場合は等分割する
 ///   （レビュー §1.6：従来は各剛床へ Pi をそのまま重複して載せており、
 ///   多剛床の階では地震力が剛床数倍に水増しされるバグだった）。
+///
+/// `ci_override`（副剛床の Ci 直接入力）は考慮しない。風荷重など Ci の
+/// 概念が無い荷重ケースはこの関数をそのまま使う。地震荷重は
+/// [`distribute_seismic_forces`] を使う。
 pub(crate) fn distribute_pi_over_diaphragms(story: &Story, pi: f64) -> Vec<(NodeId, f64)> {
-    let n = story.diaphragms.len();
-    if n == 0 {
-        return Vec::new();
+    distribute_pi_over_slice(&story.diaphragms, pi)
+}
+
+/// 階の主系統（Ai 分布）に用いる地震用重量（RESP-D マニュアル「副剛床の Ci を
+/// 直接入力した場合」）。`ci_override` を持つ剛床の重量は主系統の Ai 分布から
+/// 除外する（主剛床は全剛床の Ci に従うが、副剛床は指定 Ci で別途計算するため）。
+/// `ci_override` を持つ剛床が無ければ `story.seismic_weight` をそのまま返す
+/// （既存挙動と厳密一致）。
+fn main_system_weight(story: &Story) -> f64 {
+    let total = story.seismic_weight.unwrap_or(0.0);
+    let ci_override_weight: f64 = story
+        .diaphragms
+        .iter()
+        .filter(|d| d.ci_override.is_some())
+        .map(|d| d.weight.unwrap_or(0.0))
+        .sum();
+    total - ci_override_weight
+}
+
+/// 階の水平力 Pi を剛床へ分配する（地震荷重版。副剛床の Ci 直接入力に対応）。
+///
+/// - `ci_override` を持たない剛床（主系統）: Pi を重量比で分配する
+///   （[`distribute_pi_over_diaphragms`] と同じ規則）。
+/// - `ci_override` を持つ剛床（副剛床）: Pi の分配対象から除外し、代わりに
+///   水平力 = `ci_override` × その剛床の `weight`（`weight=None` なら 0）を
+///   別途作用させる（等価震度扱い。上階に同一系統の剛床が積み上がらない
+///   副剛床を想定。RESP-D マニュアル「副剛床の Ci を直接入力した場合」）。
+///
+/// 全剛床が `ci_override` 無しなら [`distribute_pi_over_diaphragms`] と
+/// 厳密に一致する。
+pub(crate) fn distribute_seismic_forces(story: &Story, pi: f64) -> Vec<(NodeId, f64)> {
+    let main_diaphragms: Vec<DiaphragmDef> = story
+        .diaphragms
+        .iter()
+        .filter(|d| d.ci_override.is_none())
+        .cloned()
+        .collect();
+    let mut result = distribute_pi_over_slice(&main_diaphragms, pi);
+    for d in &story.diaphragms {
+        if let Some(ci) = d.ci_override {
+            result.push((d.master, ci * d.weight.unwrap_or(0.0)));
+        }
     }
-    if n == 1 {
-        return vec![(story.diaphragms[0].master, pi)];
+    result
+}
+
+/// 階の見付け幅（風向直交方向の座標範囲）。その階の構造節点（`node_ids`、
+/// `generated_masters` 除く）の座標範囲(max−min)を用いる（マニュアル
+/// 「風荷重の計算」の見付面積算定に対応する階別の精緻化）。
+///
+/// 該当する構造節点が 1 点以下、または座標範囲が 0（全節点が同一座標）の
+/// 階は、階別の見付け幅を決定できないため `fallback`（建物全体の構造節点
+/// 座標範囲）を用いる。
+fn story_wind_width(
+    story: &Story,
+    model: &Model,
+    axis: usize,
+    excluded: &HashSet<NodeId>,
+    fallback: f64,
+) -> f64 {
+    let mut min_c = f64::INFINITY;
+    let mut max_c = f64::NEG_INFINITY;
+    let mut count = 0usize;
+    for nid in &story.node_ids {
+        if excluded.contains(nid) {
+            continue;
+        }
+        if let Some(n) = model.nodes.get(nid.index()) {
+            let c = n.coord[axis];
+            min_c = min_c.min(c);
+            max_c = max_c.max(c);
+            count += 1;
+        }
     }
-    let total_weight: f64 = story.diaphragms.iter().filter_map(|d| d.weight).sum();
-    if total_weight > 0.0 {
-        story
-            .diaphragms
-            .iter()
-            .map(|d| (d.master, pi * d.weight.unwrap_or(0.0) / total_weight))
-            .collect()
+    if count <= 1 {
+        return fallback;
+    }
+    let w = max_c - min_c;
+    if w <= 0.0 {
+        fallback
     } else {
-        let share = pi / n as f64;
-        story.diaphragms.iter().map(|d| (d.master, share)).collect()
+        w
     }
+}
+
+/// 風荷重の建物高さ H・各層の負担区間（`squid_n_load::wind::WindStory`）を
+/// 算定する（RESP-D マニュアル「風荷重の計算」節。`Analysis::wind_static` から
+/// solve 抜きでテストできるよう分離）。
+///
+/// - `H`（建物高さ）= GLからPH階を除く最上階の床高さ + `parapet_mm`/2
+///   （マニュアル「建築物の高さと軒の高さとの平均」）。
+/// - 最上層の負担区間上端は、`H` とは別に最上階床高さ + `parapet_mm`
+///   （パラペット天端）まで延長し、見付面積に算入する（実壁はパラペット
+///   天端まで存在するため。`H` にはマニュアルの定義どおり半分のみ算入する）。
+/// - 見付け幅は [`story_wind_width`] により階ごとに算定する（フォールバックは
+///   建物全体の構造節点座標範囲）。
+///
+/// `normal_stories` は PH階を除いた一般階・地下階を下から上へ並べたもの
+/// （呼び出し側でフィルタ済みであること）。空の場合は呼び出し側で弾く前提。
+fn wind_story_geometry(
+    model: &Model,
+    normal_stories: &[&Story],
+    base: f64,
+    axis: usize,
+    excluded: &HashSet<NodeId>,
+    parapet_mm: f64,
+) -> Result<(f64, Vec<squid_n_load::wind::WindStory>), SolveError> {
+    let top_floor_mm = normal_stories.last().unwrap().elevation - base;
+    let h_mm = top_floor_mm + parapet_mm / 2.0;
+    if h_mm <= 0.0 {
+        return Err(SolveError::InvalidInput(
+            "建物高さが 0 以下です。階の標高(elevation)設定を確認してください。".into(),
+        ));
+    }
+
+    // 建物全体の構造節点座標範囲（階別見付け幅が決定できない場合のフォールバック）。
+    let mut min_c = f64::INFINITY;
+    let mut max_c = f64::NEG_INFINITY;
+    for n in &model.nodes {
+        if excluded.contains(&n.id) {
+            continue;
+        }
+        let c = n.coord[axis];
+        min_c = min_c.min(c);
+        max_c = max_c.max(c);
+    }
+    if !min_c.is_finite() || !max_c.is_finite() {
+        return Err(SolveError::InvalidInput(
+            "見付け幅を算定できる構造節点がありません。".into(),
+        ));
+    }
+    let fallback_width = max_c - min_c;
+    if fallback_width <= 0.0 {
+        return Err(SolveError::InvalidInput(
+            "見付け幅が 0 以下です。構造節点の座標を確認してください。".into(),
+        ));
+    }
+
+    // 層の負担高さ区間（GL＝基部レベル基準）。層 i の負担区間は
+    // [中間高さ(i-1,i), 中間高さ(i,i+1)]、最下層は基部から、最上層は
+    // パラペット天端まで。
+    let elevations: Vec<f64> = normal_stories.iter().map(|s| s.elevation - base).collect();
+    let n = elevations.len();
+    let parapet_top_mm = top_floor_mm + parapet_mm;
+    let wind_stories: Vec<squid_n_load::wind::WindStory> = (0..n)
+        .map(|i| {
+            let z_bottom = if i == 0 {
+                0.0
+            } else {
+                0.5 * (elevations[i - 1] + elevations[i])
+            };
+            let z_top = if i == n - 1 {
+                parapet_top_mm
+            } else {
+                0.5 * (elevations[i] + elevations[i + 1])
+            };
+            let width = story_wind_width(normal_stories[i], model, axis, excluded, fallback_width);
+            squid_n_load::wind::WindStory {
+                z_bottom,
+                z_top,
+                width,
+            }
+        })
+        .collect();
+
+    Ok((h_mm, wind_stories))
 }
 
 pub struct Analysis<'m> {
@@ -409,10 +591,12 @@ impl<'m> Analysis<'m> {
 
         // PH（塔屋）階・地下階を含む階種別ごとの層せん断力算定式に対応する
         // （seismic_shear_distribution。全階 Normal なら ai_distribution と厳密一致）。
+        // 主系統の重量は ci_override（副剛床の Ci 直接入力）を持つ剛床の重量を
+        // 除外する（main_system_weight。§副剛床のCi直接入力）。
         let specs: Vec<squid_n_load::ai::StorySeismicSpec> = stories
             .iter()
             .map(|s| squid_n_load::ai::StorySeismicSpec {
-                weight: s.seismic_weight.unwrap_or(0.0),
+                weight: main_system_weight(s),
                 level_kind: s.level_kind,
             })
             .collect();
@@ -426,7 +610,8 @@ impl<'m> Analysis<'m> {
         };
 
         // Attach Pi forces to master nodes of each story's diaphragms（多剛床の階
-        // では重量比で按分する。§1.6、distribute_pi_over_diaphragms 参照）。
+        // では重量比で按分し、ci_override を持つ副剛床には指定 Ci による力を
+        // 別途作用させる。§1.6・distribute_seismic_forces 参照）。
         let mut lc = squid_n_core::model::LoadCase {
             kind: Default::default(),
             id: lc_id,
@@ -437,10 +622,10 @@ impl<'m> Analysis<'m> {
 
         for (i, story) in stories.iter().enumerate() {
             let pi = ai.pi.get(i).copied().unwrap_or(0.0);
-            if pi == 0.0 {
-                continue;
-            }
-            for (master, share) in distribute_pi_over_diaphragms(story, pi) {
+            for (master, share) in distribute_seismic_forces(story, pi) {
+                if share == 0.0 {
+                    continue;
+                }
                 let f = [dir_vec[0] * share, dir_vec[1] * share, 0.0, 0.0, 0.0, 0.0];
                 lc.nodal.push(squid_n_core::model::NodalLoad {
                     node: master,
@@ -465,12 +650,8 @@ impl<'m> Analysis<'m> {
 
     /// 風荷重の静的解析（RESP-D マニュアル「風荷重の計算」節）。
     ///
-    /// - 建物高さ H: 最上階（PH階を除く）の床位置 − 基部レベル
-    ///   （[`base_elevation`]。パラペットの割増しは未対応）。
-    /// - 見付け幅: 風向に直交する水平方向の構造節点（`generated_masters` 除く）
-    ///   全体の座標範囲(max−min)を建物全高にわたって一定として用いる簡易化
-    ///   （マニュアル「セットバックや軸振れなどの節点移動を無視した垂直面」に
-    ///   相当。dir=X の風であれば見付け幅は Y 方向の座標範囲）。
+    /// - 建物高さ H・各層の負担区間・見付け幅は [`wind_story_geometry`] を
+    ///   参照（パラペット割増し・階別見付け幅の詳細はそちらのドキュメント）。
     /// - PH階は建物高さの算定・風荷重の負担層のいずれからも除外する
     ///   （PH階への風荷重接続は未対応。残課題）。
     /// - 層の水平力は §1.6 と同じ規則で階内の剛床へ重量比按分する。
@@ -494,65 +675,13 @@ impl<'m> Analysis<'m> {
         }
 
         let base = base_elevation(model);
-        let h_mm = normal_stories.last().unwrap().elevation - base;
-        if h_mm <= 0.0 {
-            return Err(SolveError::InvalidInput(
-                "建物高さが 0 以下です。階の標高(elevation)設定を確認してください。".into(),
-            ));
-        }
-
-        // 見付け幅: 風向に直交する水平座標の構造節点全体の範囲(max-min)。
         let axis = match cfg.dir {
             SeismicDir::X => 1, // X方向の風 → 見付け幅はY方向の座標範囲
             SeismicDir::Y => 0,
         };
         let excluded: HashSet<NodeId> = model.generated_masters.iter().copied().collect();
-        let mut min_c = f64::INFINITY;
-        let mut max_c = f64::NEG_INFINITY;
-        for n in &model.nodes {
-            if excluded.contains(&n.id) {
-                continue;
-            }
-            let c = n.coord[axis];
-            min_c = min_c.min(c);
-            max_c = max_c.max(c);
-        }
-        if !min_c.is_finite() || !max_c.is_finite() {
-            return Err(SolveError::InvalidInput(
-                "見付け幅を算定できる構造節点がありません。".into(),
-            ));
-        }
-        let width = max_c - min_c;
-        if width <= 0.0 {
-            return Err(SolveError::InvalidInput(
-                "見付け幅が 0 以下です。構造節点の座標を確認してください。".into(),
-            ));
-        }
-
-        // 層の負担高さ区間（GL＝基部レベル基準）。層 i の負担区間は
-        // [中間高さ(i-1,i), 中間高さ(i,i+1)]、最下層は基部から、最上層は
-        // 自身の床位置(=H)まで。
-        let elevations: Vec<f64> = normal_stories.iter().map(|s| s.elevation - base).collect();
-        let n = elevations.len();
-        let wind_stories: Vec<squid_n_load::wind::WindStory> = (0..n)
-            .map(|i| {
-                let z_bottom = if i == 0 {
-                    0.0
-                } else {
-                    0.5 * (elevations[i - 1] + elevations[i])
-                };
-                let z_top = if i == n - 1 {
-                    h_mm
-                } else {
-                    0.5 * (elevations[i] + elevations[i + 1])
-                };
-                squid_n_load::wind::WindStory {
-                    z_bottom,
-                    z_top,
-                    width,
-                }
-            })
-            .collect();
+        let (h_mm, wind_stories) =
+            wind_story_geometry(model, &normal_stories, base, axis, &excluded, cfg.parapet_mm)?;
 
         let wcfg = squid_n_load::wind::WindCfg {
             v0: cfg.v0,
@@ -1245,6 +1374,7 @@ mod tests {
             v0: 34.0,
             roughness: squid_n_load::wind::TerrainRoughness::III,
             cpi: 0.0,
+            parapet_mm: 0.0,
         };
         let result = analysis.wind_static(cfg).unwrap();
 
@@ -1309,9 +1439,360 @@ mod tests {
             v0: 30.0,
             roughness: squid_n_load::wind::TerrainRoughness::II,
             cpi: 0.0,
+            parapet_mm: 0.0,
         };
         let err = analysis.wind_static(cfg).err().unwrap();
         let msg = format!("{}", err);
         assert!(msg.contains("階"), "{}", msg);
+    }
+
+    // ---- §4 追補: 副剛床のCi直接入力・パラペット・階別見付け幅 ----
+
+    #[test]
+    fn test_main_system_weight_excludes_ci_override_diaphragm() {
+        let story = make_diaphragm_story(vec![
+            DiaphragmDef {
+                ci_override: None,
+                master: NodeId(10),
+                slaves: vec![],
+                rigid: true,
+                weight: Some(300.0),
+            },
+            DiaphragmDef {
+                ci_override: Some(0.3),
+                master: NodeId(11),
+                slaves: vec![],
+                rigid: true,
+                weight: Some(100.0),
+            },
+        ]);
+        // make_diaphragm_story は seismic_weight=400.0 固定（主300+副100）。
+        // 主系統重量は ci_override を持つ副剛床の重量(100)を除いた 300 になる。
+        let w = main_system_weight(&story);
+        assert!((w - 300.0).abs() < 1e-9, "main_system_weight={}", w);
+    }
+
+    #[test]
+    fn test_distribute_seismic_forces_ci_override_adds_separate_force() {
+        let story = make_diaphragm_story(vec![
+            DiaphragmDef {
+                ci_override: None,
+                master: NodeId(10),
+                slaves: vec![],
+                rigid: true,
+                weight: Some(300.0),
+            },
+            DiaphragmDef {
+                ci_override: Some(0.3),
+                master: NodeId(11),
+                slaves: vec![],
+                rigid: true,
+                weight: Some(100.0),
+            },
+        ]);
+        // 主系統(重量300ベースで別途算定済み)の Pi として 60.0 を渡す。
+        // 主剛床(唯一の ci_override 無し剛床)が全量を受け、副剛床には
+        // 0.3×100=30 が別途載る。
+        let pi = 60.0;
+        let shares = distribute_seismic_forces(&story, pi);
+        let s10 = shares.iter().find(|(n, _)| *n == NodeId(10)).unwrap().1;
+        let s11 = shares.iter().find(|(n, _)| *n == NodeId(11)).unwrap().1;
+        assert!((s10 - 60.0).abs() < 1e-9, "s10={}", s10);
+        assert!((s11 - 30.0).abs() < 1e-9, "s11={}", s11);
+    }
+
+    #[test]
+    fn test_distribute_seismic_forces_matches_pi_distribution_without_ci_override() {
+        // 全剛床が ci_override 無しなら distribute_pi_over_diaphragms と厳密一致。
+        let story = make_diaphragm_story(vec![
+            DiaphragmDef {
+                ci_override: None,
+                master: NodeId(10),
+                slaves: vec![],
+                rigid: true,
+                weight: Some(300.0),
+            },
+            DiaphragmDef {
+                ci_override: None,
+                master: NodeId(11),
+                slaves: vec![],
+                rigid: true,
+                weight: Some(100.0),
+            },
+        ]);
+        let pi = 40.0;
+        let expected = distribute_pi_over_diaphragms(&story, pi);
+        let actual = distribute_seismic_forces(&story, pi);
+        assert_eq!(expected, actual);
+    }
+
+    /// 単純な `Model`（構造節点のみ、部材・拘束なし）を組み立てるテスト用ヘルパ。
+    fn make_node_only_model(coords: &[[f64; 3]]) -> Model {
+        let nodes = coords
+            .iter()
+            .enumerate()
+            .map(|(i, c)| Node {
+                id: NodeId(i as u32),
+                coord: *c,
+                restraint: Dof6Mask::FREE,
+                mass: None,
+                story: None,
+            })
+            .collect();
+        Model {
+            nodes,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_story_wind_width_uses_story_node_range() {
+        let model = make_node_only_model(&[[0.0, 0.0, 0.0], [6000.0, 0.0, 0.0]]);
+        let story = make_diaphragm_story(vec![]);
+        let mut story = story;
+        story.node_ids = vec![NodeId(0), NodeId(1)];
+        let excluded = HashSet::new();
+        let w = story_wind_width(&story, &model, 0, &excluded, 999.0);
+        assert!((w - 6000.0).abs() < 1e-9, "w={}", w);
+    }
+
+    #[test]
+    fn test_story_wind_width_fallback_when_single_node() {
+        let model = make_node_only_model(&[[0.0, 0.0, 0.0], [6000.0, 0.0, 0.0]]);
+        let mut story = make_diaphragm_story(vec![]);
+        story.node_ids = vec![NodeId(0)];
+        let excluded = HashSet::new();
+        let w = story_wind_width(&story, &model, 0, &excluded, 999.0);
+        assert!((w - 999.0).abs() < 1e-9, "w={}", w);
+    }
+
+    #[test]
+    fn test_story_wind_width_fallback_when_zero_range() {
+        let model = make_node_only_model(&[[3000.0, 0.0, 0.0], [3000.0, 5000.0, 0.0]]);
+        let mut story = make_diaphragm_story(vec![]);
+        story.node_ids = vec![NodeId(0), NodeId(1)];
+        let excluded = HashSet::new();
+        // 両節点とも X=3000 なので axis=0(X) の範囲は 0 → フォールバック。
+        let w = story_wind_width(&story, &model, 0, &excluded, 999.0);
+        assert!((w - 999.0).abs() < 1e-9, "w={}", w);
+    }
+
+    #[test]
+    fn test_wind_story_geometry_parapet_increases_h_and_extends_top_interval() {
+        let mut model = two_story_wind_model();
+        let gen = squid_n_load::story_gen::generate_stories(&model, Some(LoadCaseId(0))).unwrap();
+        apply_story_gen(&mut model, gen);
+        let normal_stories: Vec<&Story> = model.stories.iter().collect();
+        let base = base_elevation(&model);
+        let excluded: HashSet<NodeId> = model.generated_masters.iter().copied().collect();
+
+        let (h0, ws0) =
+            wind_story_geometry(&model, &normal_stories, base, 0, &excluded, 0.0).unwrap();
+        let (h1, ws1) =
+            wind_story_geometry(&model, &normal_stories, base, 0, &excluded, 1000.0).unwrap();
+
+        // パラペット無し: H=7000mm、最上層区間上端=7000mm(=H)。
+        assert!((h0 - 7000.0).abs() < 1e-9, "h0={}", h0);
+        assert!(
+            (ws0.last().unwrap().z_top - 7000.0).abs() < 1e-9,
+            "z_top0={}",
+            ws0.last().unwrap().z_top
+        );
+
+        // パラペット1000mm: H=7000+500=7500mm、最上層区間上端=7000+1000=8000mm
+        // （H には半分のみ、区間上端にはパラペット天端まで全量算入）。
+        assert!((h1 - 7500.0).abs() < 1e-9, "h1={}", h1);
+        assert!(
+            (ws1.last().unwrap().z_top - 8000.0).abs() < 1e-9,
+            "z_top1={}",
+            ws1.last().unwrap().z_top
+        );
+    }
+
+    #[test]
+    fn test_wind_story_geometry_setback_gives_narrower_upper_story_width() {
+        // 1階(0〜3500mm): X=0〜6000(幅6000)、2階(3500〜7000mm): セットバックで
+        // X=1000〜4000(幅3000)のみ柱がある平面フレームを組み立てる。
+        let mut model = Model::default();
+        let coords = [
+            [0.0, 0.0, 0.0],       // 0: 基部
+            [6000.0, 0.0, 0.0],    // 1: 基部
+            [0.0, 0.0, 3500.0],    // 2: 1階床（幅6000端）
+            [6000.0, 0.0, 3500.0], // 3: 1階床（幅6000端）
+            [1000.0, 0.0, 3500.0], // 4: 2階柱脚（セットバック開始）
+            [4000.0, 0.0, 3500.0], // 5: 2階柱脚（セットバック開始）
+            [1000.0, 0.0, 7000.0], // 6: 2階床（幅3000端）
+            [4000.0, 0.0, 7000.0], // 7: 2階床（幅3000端）
+        ];
+        for (i, c) in coords.iter().enumerate() {
+            model.nodes.push(Node {
+                id: NodeId(i as u32),
+                coord: *c,
+                restraint: if i < 2 {
+                    Dof6Mask::FIXED
+                } else {
+                    Dof6Mask::FREE
+                },
+                mass: None,
+                story: None,
+            });
+        }
+        model.sections.push(Section {
+            id: SectionId(0),
+            name: "S".into(),
+            area: 10000.0,
+            iy: 1.0e8,
+            iz: 1.0e8,
+            j: 1.0e8,
+            depth: 300.0,
+            width: 300.0,
+            as_y: 8000.0,
+            as_z: 8000.0,
+            panel_thickness: None,
+            thickness: None,
+            shape: None,
+        });
+        model.materials.push(Material {
+            id: MaterialId(0),
+            name: "SN400B".into(),
+            young: 205000.0,
+            poisson: 0.3,
+            density: 7.85e-9,
+            shear: None,
+            fc: None,
+            fy: None,
+        });
+        // 柱: 0-2, 1-3（1階）、4-6, 5-7（2階、セットバック柱脚）。
+        // 梁: 2-3（1階床）、6-7（2階床）、4-2, 5-3（セットバックの水平つなぎ、
+        // 2階柱脚(4,5)を1階床(2,3)へ接続して構造を連続させる）。
+        let conn: [(u32, u32); 6] = [(0, 2), (1, 3), (4, 6), (5, 7), (2, 3), (6, 7)];
+        for (i, (a, b)) in conn.iter().enumerate() {
+            model.elements.push(ElementData {
+                id: ElemId(i as u32),
+                kind: ElementKind::Beam,
+                nodes: [NodeId(*a), NodeId(*b)].into_iter().collect(),
+                section: Some(SectionId(0)),
+                material: Some(MaterialId(0)),
+                local_axis: LocalAxis {
+                    ref_vector: [0.0, 0.0, 1.0],
+                },
+                end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+                force_regime: ForceRegime::Auto,
+                rigid_zone: Default::default(),
+                plastic_zone: None,
+            });
+        }
+        // 2階柱脚(4,5)を1階床(2,3)へ接続する水平つなぎ梁。
+        model.elements.push(ElementData {
+            id: ElemId(6),
+            kind: ElementKind::Beam,
+            nodes: [NodeId(2), NodeId(4)].into_iter().collect(),
+            section: Some(SectionId(0)),
+            material: Some(MaterialId(0)),
+            local_axis: LocalAxis {
+                ref_vector: [0.0, 0.0, 1.0],
+            },
+            end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+            force_regime: ForceRegime::Auto,
+            rigid_zone: Default::default(),
+            plastic_zone: None,
+        });
+        model.elements.push(ElementData {
+            id: ElemId(7),
+            kind: ElementKind::Beam,
+            nodes: [NodeId(3), NodeId(5)].into_iter().collect(),
+            section: Some(SectionId(0)),
+            material: Some(MaterialId(0)),
+            local_axis: LocalAxis {
+                ref_vector: [0.0, 0.0, 1.0],
+            },
+            end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+            force_regime: ForceRegime::Auto,
+            rigid_zone: Default::default(),
+            plastic_zone: None,
+        });
+
+        let gen = squid_n_load::story_gen::generate_stories(&model, None).unwrap();
+        apply_story_gen(&mut model, gen);
+        assert_eq!(model.stories.len(), 2, "stories={:?}", model.stories.len());
+
+        let normal_stories: Vec<&Story> = model.stories.iter().collect();
+        let base = base_elevation(&model);
+        let excluded: HashSet<NodeId> = model.generated_masters.iter().copied().collect();
+        // dir=Y の風 → axis=0(X方向の座標範囲)。
+        let (_h, wind_stories) =
+            wind_story_geometry(&model, &normal_stories, base, 0, &excluded, 0.0).unwrap();
+
+        assert_eq!(wind_stories.len(), 2);
+        assert!(
+            (wind_stories[0].width - 6000.0).abs() < 1e-6,
+            "story0 width={}",
+            wind_stories[0].width
+        );
+        assert!(
+            (wind_stories[1].width - 3000.0).abs() < 1e-6,
+            "story1 width={}",
+            wind_stories[1].width
+        );
+        assert!(
+            wind_stories[1].width < wind_stories[0].width,
+            "上層(セットバック)の見付け幅は下層より小さいはず"
+        );
+    }
+
+    #[test]
+    fn test_wind_static_excludes_penthouse_story_from_height_and_load() {
+        let mut model = two_story_wind_model();
+        let gen = squid_n_load::story_gen::generate_stories(&model, Some(LoadCaseId(0))).unwrap();
+        apply_story_gen(&mut model, gen);
+        // 最上階(7000mm)をPH階に変更 → 建物高さ・負担層は1階(3500mm)のみになる。
+        model.stories[1].level_kind = StoryLevelKind::Penthouse { k: 0.6 };
+
+        let analysis = Analysis::prepare(&model).unwrap();
+        let cfg = WindStaticCfg {
+            dir: SeismicDir::Y,
+            v0: 34.0,
+            roughness: squid_n_load::wind::TerrainRoughness::III,
+            cpi: 0.0,
+            parapet_mm: 0.0,
+        };
+        let result = analysis.wind_static(cfg).unwrap();
+
+        // H=3500mm・幅6000mmの1層構成として独立に風荷重を再計算する。
+        let wcfg = squid_n_load::wind::WindCfg {
+            v0: 34.0,
+            roughness: squid_n_load::wind::TerrainRoughness::III,
+            cpe_windward: 0.8,
+            cpe_leeward: -0.4,
+            cpi: 0.0,
+        };
+        let wind_stories = vec![squid_n_load::wind::WindStory {
+            z_bottom: 0.0,
+            z_top: 3500.0,
+            width: 6000.0,
+        }];
+        let dist = squid_n_load::wind::wind_forces(3500.0, &wind_stories, &wcfg);
+        let total_force: f64 = dist.force.iter().sum();
+        assert!(total_force > 0.0, "total_force={}", total_force);
+
+        let reaction_y: f64 = result
+            .member_forces
+            .iter()
+            .filter(|(id, _)| id.0 == 0 || id.0 == 1)
+            .map(|(_, mf)| {
+                mf.at
+                    .iter()
+                    .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
+                    .unwrap()
+                    .1[2]
+            })
+            .sum();
+
+        assert!(
+            (reaction_y.abs() - total_force.abs()).abs() < total_force.abs() * 1e-6 + 1e-6,
+            "reaction_y={} total_force={}",
+            reaction_y,
+            total_force
+        );
     }
 }
