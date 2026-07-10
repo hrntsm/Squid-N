@@ -204,10 +204,9 @@ pub fn generate_stories_multi(
                 let ni = elem.nodes[0].index();
                 let nj = elem.nodes[1].index();
                 let (ci, cj) = (model.nodes[ni].coord, model.nodes[nj].coord);
-                let len = ((cj[0] - ci[0]).powi(2)
-                    + (cj[1] - ci[1]).powi(2)
-                    + (cj[2] - ci[2]).powi(2))
-                .sqrt();
+                let len =
+                    ((cj[0] - ci[0]).powi(2) + (cj[1] - ci[1]).powi(2) + (cj[2] - ci[2]).powi(2))
+                        .sqrt();
                 let is_concrete = mat.fc.is_some();
                 let eff_len = if is_concrete {
                     (len - elem.rigid_zone.face_i - elem.rigid_zone.face_j).max(0.0)
@@ -283,10 +282,8 @@ pub fn generate_stories_multi(
             let ni = elem.nodes[0].index();
             let nj = elem.nodes[1].index();
             let (ci, cj) = (model.nodes[ni].coord, model.nodes[nj].coord);
-            let len = ((cj[0] - ci[0]).powi(2)
-                + (cj[1] - ci[1]).powi(2)
-                + (cj[2] - ci[2]).powi(2))
-            .sqrt();
+            let len = ((cj[0] - ci[0]).powi(2) + (cj[1] - ci[1]).powi(2) + (cj[2] - ci[2]).powi(2))
+                .sqrt();
             let (ri, rj) = static_reactions(&ml.kind, len);
             let scale = -dz;
             node_weight[ni] += ri * scale;
@@ -439,8 +436,8 @@ mod tests {
     use squid_n_core::dof::Dof6Mask;
     use squid_n_core::ids::{ElemId, MaterialId, SectionId};
     use squid_n_core::model::{
-        ElementData, EndCondition, ForceRegime, LoadCase, LoadCfg, LocalAxis, Material,
-        MemberLoad, NodalLoad, Node, RigidZone, Section,
+        ElementData, EndCondition, ForceRegime, LoadCase, LoadCfg, LocalAxis, Material, MemberLoad,
+        NodalLoad, Node, RigidZone, Section,
     };
 
     /// 2 層 × 1 スパンの平面ラーメン（各レベル 2 節点）。
@@ -922,8 +919,14 @@ mod tests {
             extra_line_weight: vec![],
         };
 
-        let steel_model =
-            single_beam_model(len, density, area, None, RigidZone::default(), Some(cfg.clone()));
+        let steel_model = single_beam_model(
+            len,
+            density,
+            area,
+            None,
+            RigidZone::default(),
+            Some(cfg.clone()),
+        );
         let steel = generate_stories(&steel_model, None).unwrap();
         let expected_steel = density * area * len * GRAVITY_MM_S2 * 1.3 / 2.0;
         assert!(
@@ -932,7 +935,14 @@ mod tests {
             steel.stories[0].seismic_weight.unwrap()
         );
 
-        let rc_model = single_beam_model(len, density, area, Some(24.0), RigidZone::default(), Some(cfg));
+        let rc_model = single_beam_model(
+            len,
+            density,
+            area,
+            Some(24.0),
+            RigidZone::default(),
+            Some(cfg),
+        );
         let rc = generate_stories(&rc_model, None).unwrap();
         let expected_rc = density * area * len * GRAVITY_MM_S2 / 2.0;
         assert!(
@@ -1065,8 +1075,7 @@ mod tests {
 
         // 重複 ID は 1 回だけ処理される（二重計上しない）
         let gen_dup =
-            generate_stories_multi(&model, &[LoadCaseId(0), LoadCaseId(0), LoadCaseId(1)])
-                .unwrap();
+            generate_stories_multi(&model, &[LoadCaseId(0), LoadCaseId(0), LoadCaseId(1)]).unwrap();
         assert_eq!(gen_dup.stories[0].seismic_weight, Some(410000.0));
     }
 }

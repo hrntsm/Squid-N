@@ -583,8 +583,11 @@ impl App {
 
     /// T3: 線形静的解析を実行し、結果を `self.results` に格納する。
     /// 指定した荷重ケースが存在しない場合はエラーメッセージをセット。
+    ///
+    /// 解析準備前にスラブ荷重を「床荷重(自動)」ケースへ同期する（レビュー §1.1）。
     pub fn run_linear_static(&mut self, lc: LoadCaseId) {
         self.last_error = None;
+        self.sync_slab_loads_action();
         self.apply_rigid_zones_for_analysis();
         match Analysis::prepare(&self.model) {
             Ok(analysis) => match analysis.linear_static(lc) {
@@ -608,8 +611,11 @@ impl App {
 
     /// T7: 荷重組合せ解析を実行し、結果を `bundle.combos` に格納する。
     /// 指定インデックスの荷重組合せが存在しない場合はエラーメッセージをセット。
+    ///
+    /// 解析準備前にスラブ荷重を「床荷重(自動)」ケースへ同期する（レビュー §1.1）。
     pub fn run_combination(&mut self, index: usize) {
         self.last_error = None;
+        self.sync_slab_loads_action();
         let Some(combo) = self.model.combinations.get(index).cloned() else {
             self.last_error = Some(format!("荷重組合せ #{} が存在しません", index));
             return;
@@ -765,9 +771,13 @@ impl App {
                 // story のうち最大値）に算入される。
                 let mut per_story: Vec<Vec<MemberRank>> = vec![Vec::new(); n_stories];
                 let mut computed: Vec<(ElemId, MemberRank)> = Vec::new();
-                // 長期軸力の簡易近似として使う先頭荷重ケースの id
-                // （`generate_stories_action` の gravity_lc と同じ規則）。
-                let gravity_lc = self.model.load_cases.first().map(|c| c.id);
+                // 長期軸力の簡易近似として使う荷重ケースの id
+                // （`generate_stories_action` の gravity_lcs と同じ規則。§1.7:
+                // kind による選択の先頭を採用。従来の「先頭ケース」規則は
+                // 種別が未設定のモデルに対する後方互換フォールバックとして残る）。
+                let gravity_lc = gravity_cases_for_seismic_weight(&self.model)
+                    .first()
+                    .copied();
                 for elem in &self.model.elements {
                     let Some(sec) = elem
                         .section
@@ -900,11 +910,15 @@ impl App {
     }
 
     /// 階(Story)を節点標高から自動生成して適用する（undo 可能）。
-    /// 地震重量には最初の荷重ケースの鉛直下向き荷重＋自重を用いる。
+    /// 地震重量には kind=Dead/LiveSeismic（無ければ Dead+Live、種別未設定なら
+    /// 先頭ケース）の荷重ケースの鉛直下向き荷重＋自重を用いる（レビュー §1.7）。
+    /// 先立ってスラブ荷重を「床荷重(自動)」ケースへ同期する（レビュー §1.1）ため、
+    /// 面荷重も地震用重量に反映される。
     pub fn generate_stories_action(&mut self) {
         self.last_error = None;
-        let gravity_lc = self.model.load_cases.first().map(|c| c.id);
-        match squid_n_load::story_gen::generate_stories(&self.model, gravity_lc) {
+        self.sync_slab_loads_action();
+        let gravity_lcs = gravity_cases_for_seismic_weight(&self.model);
+        match squid_n_load::story_gen::generate_stories_multi(&self.model, &gravity_lcs) {
             Ok(gen) => {
                 self.undo.run(
                     &mut self.model,
@@ -1338,39 +1352,234 @@ impl App {
         }
     }
 
-    /// 全スラブの床荷重を大梁へ分配し、辺インデックスを実部材IDへ対応付けて
+    /// 全スラブの床荷重を大梁（および小梁経由の節点反力）へ分配し、
     /// `self.beam_loads` を更新する。対応する梁が無い辺の荷重は捨てる。
     ///
-    /// `squid_n_load::floor::distribute_slab` が返す `BeamLoad.elem` は実部材ID
-    /// ではなく、スラブ境界の辺インデックス（`ElemId(i)`, i=0..4、辺 i は
-    /// `boundary[i]` → `boundary[(i+1)%4]`）である。ここでその節点対を両端に
-    /// 持つ `Beam` 要素を探し、実 ElemId に置き換える（ノード順は不問）。
+    /// `squid_n_load::floor::distribute_slab` が返す `BeamLoad.target` は
+    /// `LoadTarget::Edge(i)`（スラブ境界の辺 i、`boundary[i]` → `boundary[(i+1)%n]`、
+    /// n = 境界頂点数。矩形に限らず三角形・五角形以上の多角形にも対応）または
+    /// `LoadTarget::Node(id)`（小梁反力などの節点集中荷重）。`Edge` はここで
+    /// その節点対を両端に持つ `Beam` 要素を探し、実 `ElemId` に置き換える
+    /// （ノード順は不問）。`Node` はそのまま（`elem` は番兵 `ElemId(u32::MAX)`
+    /// のまま）保持する（部材マッピング不要。`sync_slab_loads_action` が
+    /// `NodalLoad` へ変換する。CMQ 図描画側は `elem` で梁を引くため、この番兵は
+    /// 単に描画対象外になるだけで安全）。
     pub fn refresh_beam_loads(&mut self) {
         let mut beam_loads = Vec::new();
         for slab in &self.model.slabs {
-            if slab.boundary.len() < 4 {
+            let n = slab.boundary.len();
+            if n < 3 {
                 continue;
             }
             for mut bl in squid_n_load::floor::distribute_slab(&self.model, slab) {
-                let k = bl.elem.0 as usize;
-                if k >= 4 {
-                    continue;
+                match bl.target {
+                    squid_n_load::floor::LoadTarget::Node(_) => {
+                        beam_loads.push(bl);
+                    }
+                    squid_n_load::floor::LoadTarget::Edge(k) => {
+                        if k >= n {
+                            continue;
+                        }
+                        let n0 = slab.boundary[k];
+                        let n1 = slab.boundary[(k + 1) % n];
+                        let found = self.model.elements.iter().find(|e| {
+                            e.kind == squid_n_core::model::ElementKind::Beam
+                                && e.nodes.len() == 2
+                                && ((e.nodes[0] == n0 && e.nodes[1] == n1)
+                                    || (e.nodes[0] == n1 && e.nodes[1] == n0))
+                        });
+                        let Some(elem) = found else { continue };
+                        bl.elem = elem.id;
+                        beam_loads.push(bl);
+                    }
                 }
-                let n0 = slab.boundary[k];
-                let n1 = slab.boundary[(k + 1) % 4];
-                let found = self.model.elements.iter().find(|e| {
-                    e.kind == squid_n_core::model::ElementKind::Beam
-                        && e.nodes.len() == 2
-                        && ((e.nodes[0] == n0 && e.nodes[1] == n1)
-                            || (e.nodes[0] == n1 && e.nodes[1] == n0))
-                });
-                let Some(elem) = found else { continue };
-                bl.elem = elem.id;
-                beam_loads.push(bl);
             }
         }
         self.beam_loads = beam_loads;
     }
+
+    /// `self.beam_loads`（`refresh_beam_loads` 適用後の値）を荷重ケースへ書き込める
+    /// `NodalLoad`/`MemberLoad` へ変換する（レビュー §1.1）。作用方向は常に
+    /// 鉛直下向き `[0,0,-1]`（面荷重は重力方向のみを扱う既存の前提を踏襲）。
+    ///
+    /// - `LoadShape::Uniform{w}` → 全長等分布 `Distributed{a:0,b:L,w1:w,w2:w}`
+    /// - `LoadShape::Triangle{w0}`（中央 `L/2` で頂点を持つ左右対称三角形）→
+    ///   2 区間の線形分布`[0,L/2]: 0→w0` / `[L/2,L]: w0→0` に分割
+    ///   （`MemberLoadKind::Distributed` は線形区間しか表現できないため）
+    /// - `LoadShape::Trapezoid{w0,a,b}`（両端で `a` ずつ立ち上がり、中央 `b` が
+    ///   フラット、`2a+b=L`）→ 3 区間 `[0,a]:0→w0` / `[a,a+b]:w0→w0` /
+    ///   `[a+b,L]:w0→0`
+    /// - `LoadShape::Point{p,x}` → 中間集中荷重 `MemberLoadKind::Point{a:x,p}`
+    /// - `LoadTarget::Node(n)`（小梁反力）→ `NodalLoad{node:n, values:[0,0,-p,0,0,0]}`
+    ///
+    /// `L` は対応する部材の節点間距離（`elem_geometric_length`。剛域補正なしの
+    /// 簡易値。仕様上「部材の節点間距離」を使う規則のため、剛域を考慮する
+    /// 設計検定側の `clear_span` とは別物）。
+    fn slab_load_case_content(
+        &self,
+    ) -> (
+        Vec<squid_n_core::model::NodalLoad>,
+        Vec<squid_n_core::model::MemberLoad>,
+    ) {
+        use squid_n_core::model::{MemberLoad, MemberLoadKind, NodalLoad};
+        use squid_n_load::floor::{LoadShape, LoadTarget};
+
+        const DIR: [f64; 3] = [0.0, 0.0, -1.0];
+        let mut nodal = Vec::new();
+        let mut member = Vec::new();
+
+        fn push_dist(member: &mut Vec<MemberLoad>, elem: ElemId, a: f64, b: f64, w1: f64, w2: f64) {
+            if b - a <= 1e-9 {
+                return;
+            }
+            member.push(MemberLoad {
+                elem,
+                dir: DIR,
+                kind: MemberLoadKind::Distributed { a, b, w1, w2 },
+            });
+        }
+
+        for bl in &self.beam_loads {
+            match bl.target {
+                LoadTarget::Node(n) => {
+                    let LoadShape::Point { p, .. } = bl.shape else {
+                        continue;
+                    };
+                    nodal.push(NodalLoad {
+                        node: n,
+                        values: [0.0, 0.0, -p, 0.0, 0.0, 0.0],
+                    });
+                }
+                LoadTarget::Edge(_) => {
+                    let Some(elem) = self.model.elements.iter().find(|e| e.id == bl.elem) else {
+                        continue;
+                    };
+                    let l = elem_geometric_length(elem, &self.model);
+                    if l <= 1e-9 {
+                        continue;
+                    }
+                    match bl.shape {
+                        LoadShape::Uniform { w } => {
+                            push_dist(&mut member, elem.id, 0.0, l, w, w);
+                        }
+                        LoadShape::Triangle { w0 } => {
+                            let mid = l / 2.0;
+                            push_dist(&mut member, elem.id, 0.0, mid, 0.0, w0);
+                            push_dist(&mut member, elem.id, mid, l, w0, 0.0);
+                        }
+                        LoadShape::Trapezoid { w0, a, b } => {
+                            push_dist(&mut member, elem.id, 0.0, a, 0.0, w0);
+                            push_dist(&mut member, elem.id, a, a + b, w0, w0);
+                            push_dist(&mut member, elem.id, a + b, l, w0, 0.0);
+                        }
+                        LoadShape::Point { p, x } => {
+                            member.push(MemberLoad {
+                                elem: elem.id,
+                                dir: DIR,
+                                kind: MemberLoadKind::Point { a: x, p },
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        (nodal, member)
+    }
+
+    /// スラブ荷重を専用の荷重ケース「床荷重(自動)」（kind=Dead）へ同期する
+    /// （レビュー §1.1: 面荷重→大梁分配の結果を応力解析へ接続する最重要修正）。
+    ///
+    /// `refresh_beam_loads` → `slab_load_case_content` で現在のスラブ荷重を
+    /// 計算し、既存の「床荷重(自動)」ケースの内容と一致するなら何もしない
+    /// （undo 履歴・stale フラグを汚さない）。差分があれば
+    /// `SyncSlabLoadsToCase`（全置換、undo 対応）を発行する。
+    /// スラブが無く既存ケースも無い場合は空ケースを作らない。
+    ///
+    /// 解析実行系（`run_linear_static`/`run_combination`）・`generate_stories_action`
+    /// の入口で毎回呼ぶことを想定した冪等な同期アクション。
+    pub fn sync_slab_loads_action(&mut self) {
+        self.refresh_beam_loads();
+        let (nodal, member) = self.slab_load_case_content();
+
+        let existing = self
+            .model
+            .load_cases
+            .iter()
+            .find(|lc| lc.name == SLAB_AUTO_LOAD_CASE_NAME);
+        let needs_create = existing.is_none() && !(nodal.is_empty() && member.is_empty());
+        let needs_update = existing
+            .map(|lc| {
+                lc.kind != squid_n_core::model::LoadCaseKind::Dead
+                    || lc.nodal != nodal
+                    || lc.member != member
+            })
+            .unwrap_or(false);
+        if !needs_create && !needs_update {
+            return;
+        }
+
+        self.undo.run(
+            &mut self.model,
+            Box::new(squid_n_edit::SyncSlabLoadsToCase {
+                name: SLAB_AUTO_LOAD_CASE_NAME.to_string(),
+                nodal,
+                member,
+            }),
+        );
+        self.staleness.mark_edited();
+    }
+}
+
+/// `sync_slab_loads_action` が同期先とする専用荷重ケース名（レビュー §1.1）。
+pub const SLAB_AUTO_LOAD_CASE_NAME: &str = "床荷重(自動)";
+
+/// 地震用重量に算入する重力ケースを `LoadCaseKind` から選択する（レビュー §1.7）。
+///
+/// - `kind == Dead` の全ケースを対象とする。
+/// - `kind == LiveSeismic`（地震用積載）のケースがあれば併せて対象とする。
+///   無ければ `kind == Live`（長期用積載）で代用する
+///   （マニュアル「床の積載荷重は地震用の値とします」の趣旨。地震用の値が
+///   個別に定義されていなければ長期用の値をそのまま使う）。
+/// - いずれのケースも `kind` が設定されていない（全ケースが既定値 `Other`）
+///   場合は、旧スキーマ・後方互換のため先頭ケースのみを返す
+///   （並び順に依存する旧規約。新規モデルは kind 設定を推奨）。
+fn gravity_cases_for_seismic_weight(model: &squid_n_core::model::Model) -> Vec<LoadCaseId> {
+    use squid_n_core::model::LoadCaseKind;
+
+    let any_kind_set = model
+        .load_cases
+        .iter()
+        .any(|lc| lc.kind != LoadCaseKind::Other);
+    if !any_kind_set {
+        return model.load_cases.first().map(|c| c.id).into_iter().collect();
+    }
+
+    let mut result: Vec<LoadCaseId> = model
+        .load_cases
+        .iter()
+        .filter(|lc| lc.kind == LoadCaseKind::Dead)
+        .map(|lc| lc.id)
+        .collect();
+
+    let live_seismic: Vec<LoadCaseId> = model
+        .load_cases
+        .iter()
+        .filter(|lc| lc.kind == LoadCaseKind::LiveSeismic)
+        .map(|lc| lc.id)
+        .collect();
+    if !live_seismic.is_empty() {
+        result.extend(live_seismic);
+    } else {
+        result.extend(
+            model
+                .load_cases
+                .iter()
+                .filter(|lc| lc.kind == LoadCaseKind::Live)
+                .map(|lc| lc.id),
+        );
+    }
+    result
 }
 
 /// 波形 CSV/テキストの内容を解析する（ヘッドレステスト可能な純粋関数）。
@@ -4493,5 +4702,223 @@ mod tests {
         app.model = missing;
         app.refresh_beam_loads();
         assert_eq!(app.beam_loads.len(), 3);
+    }
+
+    /// 正方形スラブ（4000×4000）+ 外周4本の梁を持つモデル
+    /// （`make_slab_test_model` の正方形版。正方形は `TriTrapezoid` で全辺
+    /// 三角形分布になるため §1.1 のスラブ→荷重ケース同期の検算がしやすい）。
+    fn make_square_slab_test_model() -> squid_n_core::model::Model {
+        use squid_n_core::ids::SlabId;
+        use squid_n_core::model::{
+            AreaLoad, DistributionMethod, ElementData, ElementKind, EndCondition, ForceRegime,
+            LocalAxis, Node, Slab,
+        };
+
+        let mk_node = |id: u32, x: f64, y: f64| Node {
+            id: NodeId(id),
+            coord: [x, y, 0.0],
+            restraint: Default::default(),
+            mass: None,
+            story: None,
+        };
+        let nodes = vec![
+            mk_node(0, 0.0, 0.0),
+            mk_node(1, 4000.0, 0.0),
+            mk_node(2, 4000.0, 4000.0),
+            mk_node(3, 0.0, 4000.0),
+        ];
+        let mk_beam = |id: u32, i: u32, j: u32| ElementData {
+            id: ElemId(id),
+            kind: ElementKind::Beam,
+            nodes: [NodeId(i), NodeId(j)].into_iter().collect(),
+            section: None,
+            material: None,
+            local_axis: LocalAxis {
+                ref_vector: [0.0, 0.0, 1.0],
+            },
+            end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+            force_regime: ForceRegime::Auto,
+            rigid_zone: Default::default(),
+            plastic_zone: None,
+        };
+        let elements = vec![
+            mk_beam(0, 0, 1),
+            mk_beam(1, 1, 2),
+            mk_beam(2, 2, 3),
+            mk_beam(3, 3, 0),
+        ];
+        let slab = Slab {
+            kind: Default::default(),
+            one_way: None,
+            id: SlabId(0),
+            boundary: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)],
+            joists: vec![],
+            loads: vec![AreaLoad {
+                kind: "DL".into(),
+                value: 0.005,
+            }],
+            method: DistributionMethod::TriTrapezoid,
+        };
+        squid_n_core::model::Model {
+            nodes,
+            elements,
+            slabs: vec![slab],
+            ..Default::default()
+        }
+    }
+
+    /// レビュー §1.1（最重要）: スラブ荷重が `sync_slab_loads_action` で
+    /// 「床荷重(自動)」荷重ケースへ実際に書き込まれ、応力解析から参照可能に
+    /// なることを確認する。正方形スラブは全辺三角形分布（2区間）になるため
+    /// `MemberLoadKind::Distributed` への変換規則を直接検算できる。
+    #[test]
+    fn test_sync_slab_loads_action_square_slab_triangle_distribution() {
+        use squid_n_core::model::{LoadCaseKind, MemberLoadKind};
+
+        let model = make_square_slab_test_model();
+        model
+            .validate()
+            .expect("テストモデルは validate を通るはず");
+        let mut app = App {
+            model,
+            ..App::default()
+        };
+
+        app.sync_slab_loads_action();
+
+        let case = app
+            .model
+            .load_cases
+            .iter()
+            .find(|lc| lc.name == SLAB_AUTO_LOAD_CASE_NAME)
+            .expect("床荷重(自動)ケースが作られるはず");
+        assert_eq!(case.kind, LoadCaseKind::Dead);
+        assert_eq!(case.member.len(), 8, "4辺 × 2区間（三角形分布）= 8件");
+        assert!(case.nodal.is_empty(), "小梁が無いので節点荷重は空のはず");
+
+        // 各梁にちょうど2区間ずつ入っていることを確認
+        for elem_id in 0..4u32 {
+            let n_segs = case
+                .member
+                .iter()
+                .filter(|m| m.elem == ElemId(elem_id))
+                .count();
+            assert_eq!(n_segs, 2, "梁#{elem_id} には三角形分布の2区間が入るはず");
+            for m in case.member.iter().filter(|m| m.elem == ElemId(elem_id)) {
+                assert_eq!(m.dir, [0.0, 0.0, -1.0], "作用方向は鉛直下向き固定のはず");
+            }
+        }
+
+        // 鉛直合計 = w × 面積（保存則）
+        let total: f64 = case
+            .member
+            .iter()
+            .map(|m| match m.kind {
+                MemberLoadKind::Distributed { a, b, w1, w2 } => (w1 + w2) / 2.0 * (b - a),
+                MemberLoadKind::Point { p, .. } => p,
+            })
+            .sum();
+        let expected = 0.005 * 4000.0 * 4000.0;
+        assert!(
+            (total - expected).abs() < 1e-6,
+            "total={total} expected={expected}"
+        );
+
+        // 再同期しても重複しない（全置換）
+        app.sync_slab_loads_action();
+        let cases: Vec<_> = app
+            .model
+            .load_cases
+            .iter()
+            .filter(|lc| lc.name == SLAB_AUTO_LOAD_CASE_NAME)
+            .collect();
+        assert_eq!(cases.len(), 1, "再同期でケースが重複してはいけない");
+        assert_eq!(cases[0].member.len(), 8, "再同期で荷重が重複してはいけない");
+
+        // undo で元に戻る（新規作成だったケースが丸ごと消える）
+        app.undo.undo(&mut app.model);
+        assert!(
+            !app.model
+                .load_cases
+                .iter()
+                .any(|lc| lc.name == SLAB_AUTO_LOAD_CASE_NAME),
+            "undo で「床荷重(自動)」ケースが消えるはず"
+        );
+    }
+
+    /// レビュー §1.7: 地震用重量に使う荷重ケースの選択が、並び順ではなく
+    /// `LoadCaseKind` に基づくことを確認する（Dead+LiveSeismic 優先、
+    /// LiveSeismic が無ければ Dead+Live、種別が一つも設定されていなければ
+    /// 従来互換で先頭ケースのみ）。
+    #[test]
+    fn test_gravity_cases_for_seismic_weight_selection() {
+        use squid_n_core::model::{LoadCase, LoadCaseKind};
+
+        let mk_lc = |i: u32, name: &str, kind: LoadCaseKind| LoadCase {
+            id: LoadCaseId(i),
+            name: name.to_string(),
+            nodal: Vec::new(),
+            member: Vec::new(),
+            kind,
+        };
+
+        // 種別が一つも設定されていない（全て既定値 Other） → 先頭ケースのみ
+        let model_no_kind = squid_n_core::model::Model {
+            load_cases: vec![
+                mk_lc(0, "LC0", LoadCaseKind::Other),
+                mk_lc(1, "LC1", LoadCaseKind::Other),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            gravity_cases_for_seismic_weight(&model_no_kind),
+            vec![LoadCaseId(0)],
+            "種別未設定モデルは従来互換で先頭ケースのみ"
+        );
+
+        // LiveSeismic が無い → Dead + Live
+        let model_dead_live = squid_n_core::model::Model {
+            load_cases: vec![
+                mk_lc(0, "固定", LoadCaseKind::Dead),
+                mk_lc(1, "積載(長期)", LoadCaseKind::Live),
+                mk_lc(2, "積雪", LoadCaseKind::Snow),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            gravity_cases_for_seismic_weight(&model_dead_live),
+            vec![LoadCaseId(0), LoadCaseId(1)],
+            "LiveSeismic が無ければ Dead+Live"
+        );
+
+        // LiveSeismic があれば Live ではなく LiveSeismic を優先
+        let model_dead_live_seismic = squid_n_core::model::Model {
+            load_cases: vec![
+                mk_lc(0, "固定", LoadCaseKind::Dead),
+                mk_lc(1, "積載(長期)", LoadCaseKind::Live),
+                mk_lc(2, "積載(地震用)", LoadCaseKind::LiveSeismic),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            gravity_cases_for_seismic_weight(&model_dead_live_seismic),
+            vec![LoadCaseId(0), LoadCaseId(2)],
+            "LiveSeismic があれば Live ではなく LiveSeismic を採用"
+        );
+
+        // 複数 Dead ケースも全て対象
+        let model_multi_dead = squid_n_core::model::Model {
+            load_cases: vec![
+                mk_lc(0, "固定1", LoadCaseKind::Dead),
+                mk_lc(1, "固定2", LoadCaseKind::Dead),
+                mk_lc(2, "地震荷重", LoadCaseKind::Seismic),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            gravity_cases_for_seismic_weight(&model_multi_dead),
+            vec![LoadCaseId(0), LoadCaseId(1)],
+            "複数の Dead ケースは全て対象、Seismic は対象外"
+        );
     }
 }

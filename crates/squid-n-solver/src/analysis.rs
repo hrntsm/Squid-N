@@ -1009,11 +1009,8 @@ mod tests {
 
     #[test]
     fn test_steel_height_ratio_bottom_story_s_gives_one_third() {
-        let model = make_story_ratio_model(&[
-            StoryStructure::S,
-            StoryStructure::Rc,
-            StoryStructure::Rc,
-        ]);
+        let model =
+            make_story_ratio_model(&[StoryStructure::S, StoryStructure::Rc, StoryStructure::Rc]);
         let alpha = steel_height_ratio(&model);
         assert!((alpha - 1.0 / 3.0).abs() < 1e-9, "alpha={}", alpha);
     }
@@ -1134,7 +1131,11 @@ mod tests {
             model.nodes.push(Node {
                 id: NodeId(i as u32),
                 coord: *c,
-                restraint: if i < 2 { Dof6Mask::FIXED } else { Dof6Mask::FREE },
+                restraint: if i < 2 {
+                    Dof6Mask::FIXED
+                } else {
+                    Dof6Mask::FREE
+                },
                 mass: None,
                 story: None,
             });

@@ -129,7 +129,11 @@ pub struct WindDistribution {
 /// `Cf_total = (0.8・kz − Cpi) + (Cpi − (−0.4)) = 0.8・kz + 0.4`
 /// （`cfg.cpi` は将来の片面評価のために保持するのみで、本関数の結果には
 /// 影響しない）。
-pub fn wind_forces(h_mm: f64, stories_bottom_to_top: &[WindStory], cfg: &WindCfg) -> WindDistribution {
+pub fn wind_forces(
+    h_mm: f64,
+    stories_bottom_to_top: &[WindStory],
+    cfg: &WindCfg,
+) -> WindDistribution {
     let h_m = h_mm / 1000.0;
     let (zb, zg, alpha) = terrain_params(cfg.roughness);
     let er = er_factor(zb, zg, alpha, h_m);
@@ -147,7 +151,7 @@ pub fn wind_forces(h_mm: f64, stories_bottom_to_top: &[WindStory], cfg: &WindCfg
         let k = kz_for_interval(zb, h_m, alpha, z0, z1);
         let cf_total = cfg.cpe_windward * k - cfg.cpe_leeward;
         let p = q * cf_total; // N/m^2
-        // 面積計算はモデルの長さ単位(mm)に合わせるため N/mm^2 に換算(×1e-6)する。
+                              // 面積計算はモデルの長さ単位(mm)に合わせるため N/mm^2 に換算(×1e-6)する。
         let p_per_mm2 = p * 1e-6;
         let f = p_per_mm2 * s.width * (s.z_top - s.z_bottom);
         kz.push(k);
@@ -196,7 +200,11 @@ mod tests {
         assert!((gust_factor(TerrainRoughness::IV, 40.0) - 2.3).abs() < 1e-12);
         // 中間高さは直線補間。III で H=20m: 2.5 + (2.1-2.5)*(20-10)/30 = 2.36667。
         let g = gust_factor(TerrainRoughness::III, 20.0);
-        assert!(approx(g, 2.5 + (2.1 - 2.5) * (20.0 - 10.0) / 30.0, 1e-9), "Gf={}", g);
+        assert!(
+            approx(g, 2.5 + (2.1 - 2.5) * (20.0 - 10.0) / 30.0, 1e-9),
+            "Gf={}",
+            g
+        );
     }
 
     #[test]
@@ -219,16 +227,36 @@ mod tests {
 
         // 手計算: Er = 1.7*(20/450)^0.2
         let er_expected = 1.7 * (20.0_f64 / 450.0).powf(0.20);
-        assert!(approx(r.er, er_expected, 1e-9), "Er={} expected={}", r.er, er_expected);
+        assert!(
+            approx(r.er, er_expected, 1e-9),
+            "Er={} expected={}",
+            r.er,
+            er_expected
+        );
 
         let gf_expected = 2.5 + (2.1 - 2.5) * (20.0 - 10.0) / 30.0;
-        assert!(approx(r.gf, gf_expected, 1e-9), "Gf={} expected={}", r.gf, gf_expected);
+        assert!(
+            approx(r.gf, gf_expected, 1e-9),
+            "Gf={} expected={}",
+            r.gf,
+            gf_expected
+        );
 
         let e_expected = er_expected * er_expected * gf_expected;
-        assert!(approx(r.e, e_expected, 1e-9), "E={} expected={}", r.e, e_expected);
+        assert!(
+            approx(r.e, e_expected, 1e-9),
+            "E={} expected={}",
+            r.e,
+            e_expected
+        );
 
         let q_expected = 0.6 * e_expected * 34.0 * 34.0;
-        assert!(approx(r.q, q_expected, 1e-6), "q={} expected={}", r.q, q_expected);
+        assert!(
+            approx(r.q, q_expected, 1e-6),
+            "q={} expected={}",
+            r.q,
+            q_expected
+        );
         // 概算値 ≈ 1365.4 N/m^2
         assert!(approx(r.q, 1365.43, 1e-3));
     }
@@ -262,8 +290,16 @@ mod tests {
         assert!(approx(r.kz[0], 0.5976658125212685, 1e-6), "kz0={}", r.kz[0]);
         assert!(approx(r.kz[1], 0.8604072175451684, 1e-6), "kz1={}", r.kz[1]);
 
-        assert!(approx(r.pressure[0], 1199.0330083528388, 1e-4), "p0={}", r.pressure[0]);
-        assert!(approx(r.pressure[1], 1486.0380454879953, 1e-4), "p1={}", r.pressure[1]);
+        assert!(
+            approx(r.pressure[0], 1199.0330083528388, 1e-4),
+            "p0={}",
+            r.pressure[0]
+        );
+        assert!(
+            approx(r.pressure[1], 1486.0380454879953, 1e-4),
+            "p1={}",
+            r.pressure[1]
+        );
 
         assert!(approx(r.force[0], 95_922.64, 1e-3), "f0={}", r.force[0]);
         assert!(approx(r.force[1], 178_324.57, 1e-3), "f1={}", r.force[1]);

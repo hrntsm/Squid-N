@@ -1,10 +1,35 @@
 use crate::app::App;
 use squid_n_core::ids::{ElemId, LoadCaseId, NodeId};
-use squid_n_core::model::{ElementKind, MemberLoad, MemberLoadKind};
+use squid_n_core::model::{ElementKind, LoadCaseKind, MemberLoad, MemberLoadKind};
 use squid_n_edit::{
     AddCombination, AddLoadCase, AddMemberLoad, DeleteCombination, DeleteLoadCase,
-    DeleteMemberLoad, DeleteNodalLoad, SetLoadCaseName, SetNodalLoad,
+    DeleteMemberLoad, DeleteNodalLoad, SetLoadCaseKind, SetLoadCaseName, SetNodalLoad,
 };
+
+/// `LoadCaseKind` の全種別（UI の選択肢一覧・順序を1箇所に集約する）。
+const LOAD_CASE_KINDS: [LoadCaseKind; 7] = [
+    LoadCaseKind::Dead,
+    LoadCaseKind::Live,
+    LoadCaseKind::LiveSeismic,
+    LoadCaseKind::Snow,
+    LoadCaseKind::Wind,
+    LoadCaseKind::Seismic,
+    LoadCaseKind::Other,
+];
+
+/// `LoadCaseKind` の表示ラベル（レビュー §1.7: 地震用重量の集計に使う種別を
+/// 荷重タブから明示的に選べるようにする）。
+fn load_case_kind_label(kind: LoadCaseKind) -> &'static str {
+    match kind {
+        LoadCaseKind::Dead => "固定荷重",
+        LoadCaseKind::Live => "積載荷重(長期)",
+        LoadCaseKind::LiveSeismic => "積載荷重(地震用)",
+        LoadCaseKind::Snow => "積雪荷重",
+        LoadCaseKind::Wind => "風荷重",
+        LoadCaseKind::Seismic => "地震荷重",
+        LoadCaseKind::Other => "その他/未設定",
+    }
+}
 
 #[derive(Clone)]
 struct MemberLoadDraft {
@@ -60,6 +85,7 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
     });
     let n_lc = app.model.load_cases.len();
     let mut pending_name: Vec<(usize, String)> = Vec::new();
+    let mut pending_kind: Vec<(LoadCaseId, LoadCaseKind)> = Vec::new();
     let mut pending_delete: Option<LoadCaseId> = None;
     let mut name_bufs: Vec<String> = app
         .model
@@ -72,10 +98,11 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
         .striped(true)
         .column(Column::auto())
         .column(Column::initial(120.0))
+        .column(Column::initial(130.0))
         .column(Column::initial(60.0))
         .column(Column::auto())
         .header(20.0, |mut h| {
-            for t in &["ID", "名称", "荷重数", ""] {
+            for t in &["ID", "名称", "種別", "荷重数", ""] {
                 h.col(|ui| {
                     ui.strong(*t);
                 });
@@ -116,6 +143,21 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
                     }
                 });
                 row.col(|ui| {
+                    egui::ComboBox::from_id_salt(("load_case_kind", lc.id.0))
+                        .selected_text(load_case_kind_label(lc.kind))
+                        .show_ui(ui, |ui| {
+                            for kind in LOAD_CASE_KINDS {
+                                if ui
+                                    .selectable_label(lc.kind == kind, load_case_kind_label(kind))
+                                    .clicked()
+                                    && lc.kind != kind
+                                {
+                                    pending_kind.push((lc.id, kind));
+                                }
+                            }
+                        });
+                });
+                row.col(|ui| {
                     ui.label((lc.nodal.len() + lc.member.len()).to_string());
                 });
                 row.col(|ui| {
@@ -137,13 +179,17 @@ pub fn loads_table(ui: &mut egui::Ui, app: &mut App) {
             });
         });
 
-    let had_name = !pending_name.is_empty() || pending_delete.is_some();
+    let had_name = !pending_name.is_empty() || !pending_kind.is_empty() || pending_delete.is_some();
     for (i, name) in pending_name {
         let lc_id = LoadCaseId(app.model.load_cases[i].id.0);
         app.undo.run(
             &mut app.model,
             Box::new(SetLoadCaseName { id: lc_id, name }),
         );
+    }
+    for (id, kind) in pending_kind {
+        app.undo
+            .run(&mut app.model, Box::new(SetLoadCaseKind { id, kind }));
     }
     if let Some(lc_id) = pending_delete {
         app.undo

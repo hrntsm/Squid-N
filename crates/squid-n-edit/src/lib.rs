@@ -1543,6 +1543,102 @@ impl EditCommand for SetStoryWeight {
     }
 }
 
+/// 荷重ケース種別（`LoadCaseKind`）変更（レビュー §1.7: 地震用重量に使う
+/// 荷重ケースを並び順ではなく種別で明示的に選べるようにする）。
+/// 存在しない `LoadCaseId` は Noop。
+pub struct SetLoadCaseKind {
+    pub id: LoadCaseId,
+    pub kind: squid_n_core::model::LoadCaseKind,
+}
+
+impl EditCommand for SetLoadCaseKind {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        let idx = self.id.index();
+        if idx >= model.load_cases.len() || model.load_cases[idx].id != self.id {
+            return Box::new(Noop);
+        }
+        let old = model.load_cases[idx].kind;
+        model.load_cases[idx].kind = self.kind;
+        Box::new(SetLoadCaseKind {
+            id: self.id,
+            kind: old,
+        })
+    }
+
+    fn label(&self) -> &str {
+        "荷重ケース種別変更"
+    }
+}
+
+/// スラブ荷重を専用の荷重ケースへ全置換で同期する（レビュー §1.1: 面荷重→大梁
+/// 分配の結果を応力解析の荷重ケースへ接続する）。
+///
+/// `name` で既存ケースを探し、見つかれば `kind` を `Dead` に固定した上で
+/// `nodal`/`member` を丸ごと置き換える（逆操作は置換前の `LoadCase` 全体の
+/// 復元、[`RestoreLoadCaseContent`]）。見つからなければ [`AddLoadCase`] と同じ
+/// 「末尾に `LoadCaseId(len)`」の規則で新規ケースを追加する（逆操作は
+/// 既存の [`DeleteLoadCase`] をそのまま再利用できる）。
+///
+/// 呼び出し側（`squid-n-app::App::sync_slab_loads_action`）は、計算結果が
+/// 既存ケースの内容と変わらない場合はこのコマンドを発行しない（undo 履歴を
+/// 汚さないための冪等性は呼び出し側の責務）。
+pub struct SyncSlabLoadsToCase {
+    pub name: String,
+    pub nodal: Vec<squid_n_core::model::NodalLoad>,
+    pub member: Vec<squid_n_core::model::MemberLoad>,
+}
+
+impl EditCommand for SyncSlabLoadsToCase {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        use squid_n_core::model::{LoadCase, LoadCaseKind};
+
+        if let Some(idx) = model.load_cases.iter().position(|lc| lc.name == self.name) {
+            let old = model.load_cases[idx].clone();
+            model.load_cases[idx].kind = LoadCaseKind::Dead;
+            model.load_cases[idx].nodal = self.nodal.clone();
+            model.load_cases[idx].member = self.member.clone();
+            Box::new(RestoreLoadCaseContent { old })
+        } else {
+            let new_id = LoadCaseId(model.load_cases.len() as u32);
+            model.load_cases.push(LoadCase {
+                id: new_id,
+                name: self.name.clone(),
+                kind: LoadCaseKind::Dead,
+                nodal: self.nodal.clone(),
+                member: self.member.clone(),
+            });
+            Box::new(DeleteLoadCase { id: new_id })
+        }
+    }
+
+    fn label(&self) -> &str {
+        "床荷重の同期"
+    }
+}
+
+/// [`SyncSlabLoadsToCase`] が既存ケースを置換したときの逆操作。
+/// 置換前の `LoadCase` を丸ごと復元する（[`RestoreSection`]・[`RestoreStories`]
+/// と同様、自身を逆操作として返す対称パターン）。`id` が指す位置が
+/// ずれている（他の操作で荷重ケースが削除された等）場合は Noop。
+pub struct RestoreLoadCaseContent {
+    pub old: squid_n_core::model::LoadCase,
+}
+
+impl EditCommand for RestoreLoadCaseContent {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        let idx = self.old.id.index();
+        if idx >= model.load_cases.len() || model.load_cases[idx].id != self.old.id {
+            return Box::new(Noop);
+        }
+        let replaced = std::mem::replace(&mut model.load_cases[idx], self.old.clone());
+        Box::new(RestoreLoadCaseContent { old: replaced })
+    }
+
+    fn label(&self) -> &str {
+        "荷重ケース内容の復元"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2674,5 +2770,165 @@ mod tests {
         stack.redo(&mut model);
         assert_eq!(model.nodes.len(), 2);
         assert!(model.generated_masters.is_empty());
+    }
+
+    #[test]
+    fn test_set_load_case_kind_roundtrip() {
+        use squid_n_core::ids::LoadCaseId;
+        use squid_n_core::model::LoadCaseKind;
+        let mut model = empty_model();
+        let mut stack = UndoStack::new();
+        stack.run(&mut model, Box::new(AddLoadCase { name: "DL".into() }));
+        assert_eq!(model.load_cases[0].kind, LoadCaseKind::Other);
+
+        stack.run(
+            &mut model,
+            Box::new(SetLoadCaseKind {
+                id: LoadCaseId(0),
+                kind: LoadCaseKind::Dead,
+            }),
+        );
+        assert_eq!(model.load_cases[0].kind, LoadCaseKind::Dead);
+
+        stack.undo(&mut model);
+        assert_eq!(model.load_cases[0].kind, LoadCaseKind::Other);
+
+        stack.redo(&mut model);
+        assert_eq!(model.load_cases[0].kind, LoadCaseKind::Dead);
+    }
+
+    #[test]
+    fn test_set_load_case_kind_invalid_id_is_noop() {
+        use squid_n_core::ids::LoadCaseId;
+        use squid_n_core::model::LoadCaseKind;
+        let mut model = empty_model();
+        let mut stack = UndoStack::new();
+        stack.run(
+            &mut model,
+            Box::new(SetLoadCaseKind {
+                id: LoadCaseId(0),
+                kind: LoadCaseKind::Dead,
+            }),
+        );
+        assert!(model.load_cases.is_empty());
+    }
+
+    #[test]
+    fn test_sync_slab_loads_to_case_creates_new_case() {
+        use squid_n_core::ids::{ElemId, LoadCaseId};
+        use squid_n_core::model::{LoadCaseKind, MemberLoad, MemberLoadKind, NodalLoad};
+        let mut model = empty_model();
+        let mut stack = UndoStack::new();
+
+        let member = vec![MemberLoad {
+            elem: ElemId(0),
+            dir: [0.0, 0.0, -1.0],
+            kind: MemberLoadKind::Distributed {
+                a: 0.0,
+                b: 1000.0,
+                w1: 1.0,
+                w2: 1.0,
+            },
+        }];
+        let nodal = vec![NodalLoad {
+            node: NodeId(0),
+            values: [0.0, 0.0, -5.0, 0.0, 0.0, 0.0],
+        }];
+
+        stack.run(
+            &mut model,
+            Box::new(SyncSlabLoadsToCase {
+                name: "床荷重(自動)".into(),
+                nodal: nodal.clone(),
+                member: member.clone(),
+            }),
+        );
+        assert_eq!(model.load_cases.len(), 1);
+        assert_eq!(model.load_cases[0].id, LoadCaseId(0));
+        assert_eq!(model.load_cases[0].name, "床荷重(自動)");
+        assert_eq!(model.load_cases[0].kind, LoadCaseKind::Dead);
+        assert_eq!(model.load_cases[0].member, member);
+        assert_eq!(model.load_cases[0].nodal, nodal);
+
+        // undo → 新規作成したケースごと消える(DeleteLoadCase を再利用した逆操作)。
+        stack.undo(&mut model);
+        assert!(model.load_cases.is_empty());
+
+        stack.redo(&mut model);
+        assert_eq!(model.load_cases.len(), 1);
+    }
+
+    #[test]
+    fn test_sync_slab_loads_to_case_replaces_existing_case() {
+        use squid_n_core::ids::ElemId;
+        use squid_n_core::model::{LoadCaseKind, MemberLoad, MemberLoadKind};
+        let mut model = empty_model();
+        let mut stack = UndoStack::new();
+
+        // 既存の同名ケース(手動でユーザーが編集した中身を想定)。
+        stack.run(
+            &mut model,
+            Box::new(AddLoadCase {
+                name: "床荷重(自動)".into(),
+            }),
+        );
+        stack.run(
+            &mut model,
+            Box::new(AddMemberLoad {
+                lc: LoadCaseId(0),
+                load: MemberLoad {
+                    elem: ElemId(0),
+                    dir: [0.0, 0.0, -1.0],
+                    kind: MemberLoadKind::Distributed {
+                        a: 0.0,
+                        b: 500.0,
+                        w1: 9.0,
+                        w2: 9.0,
+                    },
+                },
+            }),
+        );
+        let before = model.clone();
+        assert_eq!(model.load_cases[0].member.len(), 1);
+
+        let new_member = vec![MemberLoad {
+            elem: ElemId(1),
+            dir: [0.0, 0.0, -1.0],
+            kind: MemberLoadKind::Distributed {
+                a: 0.0,
+                b: 2000.0,
+                w1: 3.0,
+                w2: 3.0,
+            },
+        }];
+        stack.run(
+            &mut model,
+            Box::new(SyncSlabLoadsToCase {
+                name: "床荷重(自動)".into(),
+                nodal: Vec::new(),
+                member: new_member.clone(),
+            }),
+        );
+        // 全置換: 個数は増えず(重複せず)、内容が新しい値に入れ替わる。
+        assert_eq!(model.load_cases.len(), 1);
+        assert_eq!(model.load_cases[0].member, new_member);
+        assert_eq!(model.load_cases[0].kind, LoadCaseKind::Dead);
+
+        // 再同期しても個数は変わらない(全置換なので重複しない)。
+        stack.run(
+            &mut model,
+            Box::new(SyncSlabLoadsToCase {
+                name: "床荷重(自動)".into(),
+                nodal: Vec::new(),
+                member: new_member.clone(),
+            }),
+        );
+        assert_eq!(model.load_cases.len(), 1);
+        assert_eq!(model.load_cases[0].member, new_member);
+
+        // undo を2回 → 元の手動入力内容に戻る。
+        stack.undo(&mut model);
+        stack.undo(&mut model);
+        assert!(model.eq_ignoring_dofmap(&before));
     }
 }

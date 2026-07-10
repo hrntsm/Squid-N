@@ -196,7 +196,13 @@ mod tests {
         let names: Vec<&str> = combos.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["G + P", "G + P + Kx", "G + P - Kx", "G + P + Ky", "G + P - Ky"]
+            vec![
+                "G + P",
+                "G + P + Kx",
+                "G + P - Kx",
+                "G + P + Ky",
+                "G + P - Ky"
+            ]
         );
     }
 
@@ -217,24 +223,48 @@ mod tests {
         // + Kx系4 + Ky系4 + Wx系4 + Wy系4 = 3 + 16 = 19
         assert_eq!(combos.len(), 19);
 
-        let by_name = |n: &str| combos.iter().find(|c| c.name == n).unwrap_or_else(|| panic!("missing combo {n}"));
+        let by_name = |n: &str| {
+            combos
+                .iter()
+                .find(|c| c.name == n)
+                .unwrap_or_else(|| panic!("missing combo {n}"))
+        };
 
-        assert_eq!(by_name("G + P").terms, vec![(LoadCaseId(1), 1.0), (LoadCaseId(2), 1.0)]);
+        assert_eq!(
+            by_name("G + P").terms,
+            vec![(LoadCaseId(1), 1.0), (LoadCaseId(2), 1.0)]
+        );
         assert_eq!(
             by_name("G + P + 0.7S").terms,
-            vec![(LoadCaseId(1), 1.0), (LoadCaseId(2), 1.0), (LoadCaseId(7), 0.7)]
+            vec![
+                (LoadCaseId(1), 1.0),
+                (LoadCaseId(2), 1.0),
+                (LoadCaseId(7), 0.7)
+            ]
         );
         assert_eq!(
             by_name("G + P + S").terms,
-            vec![(LoadCaseId(1), 1.0), (LoadCaseId(2), 1.0), (LoadCaseId(7), 1.0)]
+            vec![
+                (LoadCaseId(1), 1.0),
+                (LoadCaseId(2), 1.0),
+                (LoadCaseId(7), 1.0)
+            ]
         );
         assert_eq!(
             by_name("G + P + Kx").terms,
-            vec![(LoadCaseId(1), 1.0), (LoadCaseId(2), 1.0), (LoadCaseId(3), 1.0)]
+            vec![
+                (LoadCaseId(1), 1.0),
+                (LoadCaseId(2), 1.0),
+                (LoadCaseId(3), 1.0)
+            ]
         );
         assert_eq!(
             by_name("G + P - Kx").terms,
-            vec![(LoadCaseId(1), 1.0), (LoadCaseId(2), 1.0), (LoadCaseId(3), -1.0)]
+            vec![
+                (LoadCaseId(1), 1.0),
+                (LoadCaseId(2), 1.0),
+                (LoadCaseId(3), -1.0)
+            ]
         );
         assert_eq!(
             by_name("G + P + 0.35S + Kx").terms,
@@ -256,11 +286,19 @@ mod tests {
         );
         assert_eq!(
             by_name("G + P + Wx").terms,
-            vec![(LoadCaseId(1), 1.0), (LoadCaseId(2), 1.0), (LoadCaseId(5), 1.0)]
+            vec![
+                (LoadCaseId(1), 1.0),
+                (LoadCaseId(2), 1.0),
+                (LoadCaseId(5), 1.0)
+            ]
         );
         assert_eq!(
             by_name("G + P - Wy").terms,
-            vec![(LoadCaseId(1), 1.0), (LoadCaseId(2), 1.0), (LoadCaseId(6), -1.0)]
+            vec![
+                (LoadCaseId(1), 1.0),
+                (LoadCaseId(2), 1.0),
+                (LoadCaseId(6), -1.0)
+            ]
         );
         assert_eq!(
             by_name("G + P + 0.35S + Wy").terms,

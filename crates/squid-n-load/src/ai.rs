@@ -404,7 +404,12 @@ mod tests {
         );
         // ΣPi = Q最下層。
         let sum_pi: f64 = r.pi.iter().sum();
-        assert!((sum_pi - r.qi[0]).abs() < 1e-6, "ΣPi={} Q0={}", sum_pi, r.qi[0]);
+        assert!(
+            (sum_pi - r.qi[0]).abs() < 1e-6,
+            "ΣPi={} Q0={}",
+            sum_pi,
+            r.qi[0]
+        );
     }
 
     #[test]
@@ -435,7 +440,12 @@ mod tests {
         let ai1 = 1.0 + ((1.0 / alpha1.sqrt()) - alpha1) * t_factor;
         let ci1 = z * rt_val * ai1 * c0;
         let q1 = ci1 * alpha1 * w_normal;
-        assert!((r.qi[1] - q1).abs() < 1e-9, "Q1={} expected={}", r.qi[1], q1);
+        assert!(
+            (r.qi[1] - q1).abs() < 1e-9,
+            "Q1={} expected={}",
+            r.qi[1],
+            q1
+        );
 
         let k_expected = 0.1 * (1.0 - 5.0_f64.min(20.0) / 40.0) * z;
         assert!((k_expected - 0.0875).abs() < 1e-12);
