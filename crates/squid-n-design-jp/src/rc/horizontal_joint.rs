@@ -5,7 +5,7 @@
 //! 確認する。使用限界状態・終局限界状態の 2 種類の検討がある。
 //!
 //! # 位置付け・簡略化
-//! - 本モジュールは [`crate::joint`] と同様の**純関数群**（[`pca_horizontal_joint_service`]・
+//! - 本モジュールは [`crate::rc::joint`] と同様の**純関数群**（[`pca_horizontal_joint_service`]・
 //!   [`pca_horizontal_joint_ultimate`]・[`moment_zero_distance`]）を中心とし、
 //!   [`crate::joint_wiring`] と同様に `Model`（[`squid_n_core::model::PcaBeamAttr`]）と
 //!   部材内力から入力を組み立てて一括実行する配線関数 [`collect_pca_checks`] を提供する。

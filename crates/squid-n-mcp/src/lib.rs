@@ -1416,7 +1416,7 @@ fn compute_design_check_job(model: &Model, load_case: Option<u32>) -> Result<Job
         };
         // 柱の座屈長さ lk = K・h（app.rs run_design_check と同じ規則）。
         let lk = if kind == squid_n_design_jp::MemberKind::Column {
-            squid_n_design_jp::buckling::steel_column_k(model, elem).map(|k| k * length)
+            squid_n_design_jp::steel::buckling::steel_column_k(model, elem).map(|k| k * length)
         } else {
             None
         };
@@ -1498,7 +1498,9 @@ fn compute_design_check_job(model: &Model, load_case: Option<u32>) -> Result<Job
         .map(|(id, mf)| (*id, mf.at.as_slice()))
         .collect();
     // PCa 水平接合面の検定（PcaBeamAttr が登録された梁のみ。単一ケース＝長期扱い）。
-    for (_, _, cr) in squid_n_design_jp::pca::collect_pca_checks(model, &mf_slices, true) {
+    for (_, _, cr) in
+        squid_n_design_jp::rc::horizontal_joint::collect_pca_checks(model, &mf_slices, true)
+    {
         n_checks += 1;
         if !cr.ok {
             n_ng += 1;

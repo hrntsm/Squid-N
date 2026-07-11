@@ -1602,7 +1602,8 @@ impl App {
             // 場合。K は節点まわり剛度比 G から算定）。柱以外は None（lk=部材長）。
             // RC 柱の検定は lk を使わないため、柱一律で設定して問題ない。
             let lk = if kind == squid_n_design_jp::MemberKind::Column {
-                squid_n_design_jp::buckling::steel_column_k(&self.model, elem).map(|k| k * length)
+                squid_n_design_jp::steel::buckling::steel_column_k(&self.model, elem)
+                    .map(|k| k * length)
             } else {
                 None
             };
@@ -1723,7 +1724,7 @@ impl App {
             self.design_term,
         );
         // PCa 水平接合面の検定（PcaBeamAttr が登録された梁のみ。使用限界・終局限界）。
-        checks.extend(squid_n_design_jp::pca::collect_pca_checks(
+        checks.extend(squid_n_design_jp::rc::horizontal_joint::collect_pca_checks(
             &self.model,
             &mf_slices,
             self.design_term == LoadTerm::Long,

@@ -33,6 +33,8 @@ use squid_n_core::units::ConcreteClass;
 mod beam;
 mod bond;
 mod column;
+/// 鉄筋コンクリート造水平接合面の検討（PCa 打継ぎ面のせん断検定）。
+pub mod horizontal_joint;
 pub mod joint;
 pub mod wall;
 
