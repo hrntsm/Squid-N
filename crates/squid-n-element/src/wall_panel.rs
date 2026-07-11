@@ -600,7 +600,10 @@ mod tests {
         let a_gross = 150.0 * 4000.0 + 2.0 * 360_000.0;
         // κ = as_gross/as_y(逆算)が矩形の 1.2 と異なる(I形の値)
         let kappa = a_gross / wall_cols.column.as_y;
-        assert!((kappa - 1.2).abs() > 1e-3, "κ が I 形になっていない: {kappa}");
+        assert!(
+            (kappa - 1.2).abs() > 1e-3,
+            "κ が I 形になっていない: {kappa}"
+        );
     }
 
     #[test]

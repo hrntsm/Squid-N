@@ -120,6 +120,16 @@ pub(crate) fn wall_opening_reduction(data: &ElementData, model: &Model) -> f64 {
 pub fn build_behavior(data: &ElementData, model: &Model) -> (Box<dyn ElementBehavior>, ElemState) {
     match data.kind {
         ElementKind::Beam => {
+            // RC 耐震壁の側柱: 面内方向は両端ピンのためモーメント・せん断を
+            // 負担しない（RESP-D 計算編 02「側柱の断面性能」）。該当する柱は
+            // 面内曲げ面のみ端部回転を静的縮約した要素へ差し替える。
+            if let Some(axis) = crate::side_column::wall_side_column_release(data, model) {
+                let elem = crate::beam::BeamElement::new(data, model);
+                return (
+                    Box::new(crate::side_column::InPlaneReleasedColumn::new(elem, axis)),
+                    ElemState::default(),
+                );
+            }
             // ForceRegime に基づいて要素種別を選択（P5 §5）
             let regime = resolve_force_regime(data, model);
             match regime {

@@ -156,8 +156,8 @@ pub fn wall_shear_shape_factor(xi: f64, eta: f64) -> f64 {
     if denom <= 1e-12 {
         return KAPPA_RC;
     }
-    let bracket = eta
-        + xi * (1.0 - eta) * ((15.0 / 8.0) * (1.0 - xi * xi).powi(2) - xi.powi(4) * eta);
+    let bracket =
+        eta + xi * (1.0 - eta) * ((15.0 / 8.0) * (1.0 - xi * xi).powi(2) - xi.powi(4) * eta);
     let k = 3.0 * (1.0 + xi) / denom * bracket;
     if k.is_finite() && k > 0.0 {
         k
