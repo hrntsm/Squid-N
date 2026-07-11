@@ -949,6 +949,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "mat".into(),
                 young: 20000.0,
@@ -1324,6 +1325,7 @@ mod tests {
             shape: None,
         });
         model.materials.push(Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "SN400B".into(),
             young: 205000.0,
@@ -1688,6 +1690,7 @@ mod tests {
             shape: None,
         });
         model.materials.push(Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "SN400B".into(),
             young: 205000.0,

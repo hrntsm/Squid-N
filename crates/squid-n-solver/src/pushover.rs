@@ -1294,6 +1294,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "steel".to_string(),
                 young: 205000.0,
@@ -1444,6 +1445,7 @@ mod tests {
             shape: None,
         };
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "s".to_string(),
             young: 205000.0,
@@ -1682,6 +1684,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "s".to_string(),
                 young: 205000.0,
@@ -1872,6 +1875,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "steel".to_string(),
                 young: 205000.0,
@@ -2022,6 +2026,7 @@ mod tests {
     fn test_compute_shear_yield_qy_steel() {
         // 鋼系（fy 設定あり）: Qy = as・fy/√3（RcRect 形状の有無・方向によらない）。
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "s".to_string(),
             young: 205000.0,
@@ -2044,6 +2049,7 @@ mod tests {
         // RC系（fy 無し・fc 設定あり）かつ断面形状情報（RcRect）が無い場合:
         // Qy = as・0.7√fc（慣用値へフォールバック）。
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "rc".to_string(),
             young: 23000.0,
@@ -2065,6 +2071,7 @@ mod tests {
     fn test_compute_shear_yield_qy_zero_as_is_infinite() {
         // 有効せん断断面積が 0 の断面は判定対象外（Qy=∞扱い）。
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "s".to_string(),
             young: 205000.0,
@@ -2117,6 +2124,7 @@ mod tests {
         };
         let sec = shape.to_section(SectionId(0), "RC-400x600".into());
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "rc".to_string(),
             young: 23000.0,
@@ -2327,6 +2335,7 @@ mod tests {
         };
         let sec = shape.to_section(SectionId(0), "RC-400x600".into());
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "rc".to_string(),
             young: 23000.0,

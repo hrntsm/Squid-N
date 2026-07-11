@@ -57,11 +57,29 @@
 //!   である。02章の r0/r は耐震壁判定・等価開口の算定にのみ用い、18条の
 //!   γ式や `Q1,Q2` の計算に流用してはならない（数式が異なるため結果が
 //!   変わる）。
+//! - SRC 側柱（[`SectionShape::SrcRect`]）を持つ耐震壁は、側柱の内蔵鉄骨の
+//!   ウェブせん断断面積 `As = steel_web_thick・(steel_height − 2・steel_flange_thick)`
+//!   と、鋼種（`steel_grade`）から [`crate::steel::steel_f_value_prefix`] で
+//!   解決した F 値・[`crate::steel::steel_fs`] による許容せん断応力度 `sfs`
+//!   から `steel_shear = sfs・As` を算定し、[`WallSideColumn::steel_shear`]
+//!   へ供給する（RC 側柱は 0）。F 値の板厚区分にはフランジ厚とウェブ厚の
+//!   大きい方を用いる（他のフォールバック箇所と同じ近似）。
+//! - SRC 造柱梁接合部（パネルゾーン、[`crate::joint::src_panel_zone_check`]）:
+//!   柱断面形状が `SrcRect` の節点で検定する。梁の上下主筋間距離 mBd・柱の
+//!   左右主筋間距離 mCd は、既存の RC 接合部配線（`beam_j` に
+//!   `d − rc_dt(rebar)` を用いる近似）に合わせ、「梁せい／柱幅 −
+//!   2・rc_dt(rebar)」（`rc_dt` はかぶり＋帯筋径＋主筋径/2）で近似する
+//!   （鉄筋位置の実配置ではなく主筋かぶり情報からの近似）。梁が S 造の
+//!   場合は mBd の代わりに sBd（フランジ板厚中心間距離、S パネルゾーンの
+//!   `db` 算定と同じ近似）を用いる。柱鉄骨のフランジ重心間距離 sCd は
+//!   `steel_height − steel_flange_thick`、接合部鉄骨ウェブ厚 Jtw は柱の
+//!   `steel_web_thick`、ヤング係数比 n は [`crate::rc::young_ratio_n`]。
+//!   内法階高/階高比 h′/h は情報が無いため 1.0 固定とする（暫定）。
 
 use crate::joint::{
     box_zp, cold_formed_column_ratio_check, panel_mpp, rc_joint_shear_check, rc_wall_shear_check,
-    s_panel_zone_check, ColdFormedInput, JointShape, PanelSection, RcJointInput, RcWallInput,
-    WallSideColumn,
+    s_panel_zone_check, src_panel_zone_check, ColdFormedInput, JointShape, PanelSection,
+    RcJointInput, RcWallInput, SrcPanelInput, WallSideColumn,
 };
 use crate::wall_opening::{equivalent_opening, is_seismic_wall, opening_ratio_r0, WallJudgeInput};
 use crate::{CheckResult, LoadTerm};
@@ -142,9 +160,29 @@ fn h_zp(h: f64, b: f64, tw: f64, tf: f64) -> f64 {
 /// モデルと部材内力から節点単位の検定を一括実行する。
 ///
 /// 戻り値: `(節点, 種別ラベル, 検定結果)` のリスト。
+///
+/// 冷間成形角形鋼管の存在軸力に `NL + 1.5・NE` の割増を効かせたい場合は
+/// [`collect_joint_checks_with_long`] を使う（本関数は割増なし＝当該ケースの
+/// 軸力そのまま）。
 pub fn collect_joint_checks(
     model: &Model,
     member_forces: &[(ElemId, ForcesAt<'_>)],
+    term: LoadTerm,
+) -> Vec<(NodeId, String, CheckResult)> {
+    collect_joint_checks_with_long(model, member_forces, None, term)
+}
+
+/// [`collect_joint_checks`] の長期内力付き版。
+///
+/// `long_member_forces` に長期（G+P）組合せの部材内力を渡すと、冷間成形
+/// 角形鋼管の柱梁耐力比チェックの存在軸力を `N = NL + 1.5・NE`
+/// （NE = 当該ケースの軸力 − NL。RESP-D マニュアル 04「冷間成形角型鋼管の
+/// 断面検定」の Ds/Co = 1.5 割増）で算定する。None の場合は当該ケースの
+/// 軸力をそのまま用いる（従来動作）。地震時組合せの結果を渡すことを想定する。
+pub fn collect_joint_checks_with_long(
+    model: &Model,
+    member_forces: &[(ElemId, ForcesAt<'_>)],
+    long_member_forces: Option<&[(ElemId, ForcesAt<'_>)]>,
     term: LoadTerm,
 ) -> Vec<(NodeId, String, CheckResult)> {
     let mut out = Vec::new();
@@ -300,28 +338,57 @@ pub fn collect_joint_checks(
             }
             let n0 = m.elem.nodes[0];
             let n1 = m.elem.nodes[1];
-            if wall_nodes.contains(&n0) && wall_nodes.contains(&n1) {
-                if let Some(SectionShape::RcRect { b, d, ref rebar }) = m.sec.shape {
-                    let dt = rc_dt(rebar);
-                    let pw = if rebar.shear.pitch > 0.0 {
-                        rebar.shear.legs as f64
-                            * std::f64::consts::PI
-                            * rebar.shear.dia
-                            * rebar.shear.dia
-                            / 4.0
-                            / (b * rebar.shear.pitch)
-                    } else {
-                        0.0
-                    };
-                    side_columns.push(WallSideColumn {
-                        b,
-                        d_eff: d - dt,
-                        pw,
-                        w_ft: crate::rc::rebar_allowable_shear(&m.mat.name, term == LoadTerm::Long),
-                    });
-                    sum_col_depth += d;
-                }
+            if !(wall_nodes.contains(&n0) && wall_nodes.contains(&n1)) {
+                continue;
             }
+            // SRC 側柱（内蔵鉄骨あり）はウェブせん断断面積 As と鋼種の F 値から
+            // sfs・As を Qc への加算項として算定する（冒頭 doc 参照）。RC 側柱
+            // （内蔵鉄骨なし）は 0。
+            let steel_shear = match m.sec.shape {
+                Some(SectionShape::SrcRect {
+                    steel_height,
+                    steel_web_thick,
+                    steel_flange_thick,
+                    ref steel_grade,
+                    ..
+                }) => {
+                    let as_web =
+                        (steel_web_thick * (steel_height - 2.0 * steel_flange_thick)).max(0.0);
+                    let f = crate::steel::steel_f_value_prefix(
+                        steel_grade,
+                        steel_flange_thick.max(steel_web_thick),
+                    )
+                    .unwrap_or(235.0);
+                    crate::steel::steel_fs(f, term) * as_web
+                }
+                _ => 0.0,
+            };
+            let bd_rebar = match m.sec.shape {
+                Some(SectionShape::RcRect { b, d, ref rebar }) => Some((b, d, rebar)),
+                Some(SectionShape::SrcRect {
+                    b, d, ref rebar, ..
+                }) => Some((b, d, rebar)),
+                _ => None,
+            };
+            let Some((b, d, rebar)) = bd_rebar else {
+                continue;
+            };
+            let dt = rc_dt(rebar);
+            let pw = if rebar.shear.pitch > 0.0 {
+                rebar.shear.legs as f64 * std::f64::consts::PI * rebar.shear.dia * rebar.shear.dia
+                    / 4.0
+                    / (b * rebar.shear.pitch)
+            } else {
+                0.0
+            };
+            side_columns.push(WallSideColumn {
+                b,
+                d_eff: d - dt,
+                pw,
+                w_ft: crate::rc::rebar_allowable_shear(&m.mat.name, term == LoadTerm::Long),
+                steel_shear,
+            });
+            sum_col_depth += d;
         }
         let l_clear = (l - sum_col_depth / 2.0).max(0.1 * l);
         // 設計用せん断力: 等価梁化された壁要素内力の最大水平せん断成分（暫定）。
@@ -506,6 +573,88 @@ pub fn collect_joint_checks(
             }
         }
 
+        // ── SRC 造柱梁接合部（パネルゾーン） ─────────────────────
+        let src_col = cols.iter().find(|c| {
+            matches!(c.sec.shape, Some(SectionShape::SrcRect { .. }))
+                && c.mat.fc.unwrap_or(0.0) > 0.0
+        });
+        if let Some(col) = src_col {
+            if let Some(SectionShape::SrcRect {
+                ref rebar,
+                steel_height,
+                steel_web_thick,
+                steel_flange_thick,
+                ..
+            }) = col.sec.shape
+            {
+                let fc = col.mat.fc.unwrap_or(0.0);
+                // mCd（柱の左右主筋間距離）の近似: 柱幅 − 2・rc_dt(rebar)
+                // （冒頭 doc 参照。既存 RC 接合部配線の beam_j 近似に合わせる）。
+                let m_cd = (col.sec.width - 2.0 * rc_dt(rebar)).max(0.0);
+                let s_cd = (steel_height - steel_flange_thick).max(0.0);
+                let j_tw = steel_web_thick;
+
+                let beam0 = beams[0];
+                let beam_is_steel = is_steel(&beam0.mat.name);
+                let m_bd = if beam_is_steel {
+                    // 梁が S 造の場合は mBd の代わりに sBd（フランジ板厚中心間
+                    // 距離）を渡す（S パネルゾーンの db 算定と同じ近似）。
+                    match beam0.sec.shape {
+                        Some(SectionShape::SteelH { flange_thick, .. }) => {
+                            beam0.sec.depth - flange_thick
+                        }
+                        _ => 0.9 * beam0.sec.depth,
+                    }
+                } else {
+                    match beam0.sec.shape {
+                        Some(SectionShape::RcRect { ref rebar, .. })
+                        | Some(SectionShape::SrcRect { ref rebar, .. }) => {
+                            (beam0.sec.depth - 2.0 * rc_dt(rebar)).max(0.0)
+                        }
+                        _ => 0.8 * beam0.sec.depth,
+                    }
+                };
+
+                // 接合部形状（RC 接合部配線と同じ判定: 柱2本以上×取り付く梁
+                // 2本以上で十字形、以下同様）。
+                let shape = match (cols.len() >= 2, beams.len() >= 2) {
+                    (true, true) => JointShape::Cross,
+                    (false, true) => JointShape::Tee,
+                    (true, false) => JointShape::Knee,
+                    (false, false) => JointShape::Corner,
+                };
+
+                let sum_beam_moments: f64 = beams
+                    .iter()
+                    .filter_map(|b| b.end_forces(nid))
+                    .map(|f| f[5].abs())
+                    .sum();
+
+                let inp = SrcPanelInput {
+                    shape,
+                    fc,
+                    long_term: term == LoadTerm::Long,
+                    col_width: col.sec.width,
+                    beam_width: beam0.sec.width,
+                    m_bd,
+                    m_cd,
+                    j_tw,
+                    s_cd,
+                    beam_is_steel,
+                    n_ratio: crate::rc::young_ratio_n(fc),
+                    // h′/h（内法階高/階高比、原典図 2026-07-11）は情報が無いため 1.0 固定（暫定、
+                    // 冒頭 doc 参照）。
+                    h_ratio: 1.0,
+                    sum_beam_moments,
+                };
+                out.push((
+                    nid,
+                    "柱梁接合部(SRC)".to_string(),
+                    src_panel_zone_check(&inp),
+                ));
+            }
+        }
+
         // ── 冷間成形角形鋼管の柱梁耐力比 ────────────────────────
         let cf_cols: Vec<&&MemberInfo> = cols
             .iter()
@@ -518,6 +667,28 @@ pub fn collect_joint_checks(
             })
             .collect();
         if !cf_cols.is_empty() {
+            // 長期（G+P）の当該部材・当該節点側の軸力 NL [N]（引張正）。
+            // 存在軸力 N = NL + 1.5・NE（NE = 当該ケース軸力 − NL）に用いる。
+            let long_end_n = |c: &MemberInfo, nid: NodeId| -> Option<f64> {
+                let list = long_member_forces?;
+                let (_, forces) = list.iter().find(|(id, _)| *id == c.elem.id)?;
+                let pos = if c.elem.nodes.first() == Some(&nid) {
+                    0.0
+                } else if c.elem.nodes.get(1) == Some(&nid) {
+                    1.0
+                } else {
+                    return None;
+                };
+                forces
+                    .iter()
+                    .min_by(|a, b| {
+                        (a.0 - pos)
+                            .abs()
+                            .partial_cmp(&(b.0 - pos).abs())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(_, f)| f[0])
+            };
             let zp_f_n = |c: &MemberInfo| -> Option<(f64, f64, f64)> {
                 let (h, b, t) = match c.sec.shape {
                     Some(SectionShape::SteelBox {
@@ -535,7 +706,18 @@ pub fn collect_joint_checks(
                 let f = crate::steel::steel_f_value_prefix(&c.mat.name, t).unwrap_or(295.0);
                 let n = c
                     .end_forces(nid)
-                    .map(|fr| (-fr[0]).max(0.0) / (f * c.sec.area.max(1e-9)))
+                    .map(|fr| {
+                        // 圧縮正に変換して存在軸力を求める（RESP-D: N = NL+1.5・NE）。
+                        let n_cur = -fr[0];
+                        let n_exist = match long_end_n(c, nid) {
+                            Some(nl_signed) => {
+                                let nl = -nl_signed;
+                                nl + 1.5 * (n_cur - nl)
+                            }
+                            None => n_cur,
+                        };
+                        n_exist.max(0.0) / (f * c.sec.area.max(1e-9))
+                    })
                     .unwrap_or(0.0);
                 Some((box_zp(h, b, t), f, n))
             };
@@ -661,6 +843,7 @@ mod tests {
             }),
         }];
         let materials = vec![Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "SD345".to_string(),
             young: 23000.0,

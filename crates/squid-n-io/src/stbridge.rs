@@ -243,6 +243,7 @@ pub fn import_stbridge(xml: &str) -> Result<Model, StbError> {
                     }
                     "StbMaterial" => {
                         model.materials.push(Material {
+                            concrete_class: Default::default(),
                             id: MaterialId(get_u32(&a, "id")?),
                             name: a.get("name").cloned().unwrap_or_default(),
                             young: get_f64(&a, "young")?,
@@ -434,6 +435,7 @@ mod tests {
             seismic_weight: None,
         });
         m.materials.push(Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "S400".into(),
             young: 205000.0,

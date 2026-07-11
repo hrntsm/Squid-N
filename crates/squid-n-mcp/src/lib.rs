@@ -447,6 +447,7 @@ pub mod server {
                     shape: None,
                 }],
                 materials: vec![Material {
+                    concrete_class: Default::default(),
                     id: MaterialId(0),
                     name: "SN400".into(),
                     young: 20000.0,
@@ -535,6 +536,7 @@ pub mod server {
                     shape: None,
                 }],
                 materials: vec![Material {
+                    concrete_class: Default::default(),
                     id: MaterialId(0),
                     name: "steel".into(),
                     young: 205000.0,
@@ -1412,16 +1414,31 @@ fn compute_design_check_job(model: &Model, load_case: Option<u32>) -> Result<Job
             (Some(a), Some(b)) => Some((a, b)),
             _ => None,
         };
+        // 柱の座屈長さ lk = K・h（app.rs run_design_check と同じ規則）。
+        let lk = if kind == squid_n_design_jp::MemberKind::Column {
+            squid_n_design_jp::buckling::steel_column_k(model, elem).map(|k| k * length)
+        } else {
+            None
+        };
+        // S 造部材の断面検定属性（欠損率・横座屈長さ）。単一ケース・長期検定の
+        // ため seismic_qd（地震時 QD 割増）は常に None。
+        let steel_attr = model
+            .steel_design_attrs
+            .iter()
+            .find(|a| a.elem == *elem_id)
+            .cloned();
         let ctx = squid_n_design_jp::DesignCtx {
             term: squid_n_design_jp::LoadTerm::Long,
             kind,
             length,
             lb: None,
-            lk: None,
+            lk,
             shear_span,
             rc_damage_control: true,
             end_moments_z,
             mid_moment_z: m_at(0.5),
+            seismic_qd: None,
+            steel_attr,
         };
 
         // 検定器の選択: 複合断面（SRC/CFT）は形状優先、それ以外は材料名で鋼/RC
@@ -1454,7 +1471,13 @@ fn compute_design_check_job(model: &Model, load_case: Option<u32>) -> Result<Job
                 my: forces[4],
                 mz: forces[5],
             };
-            let cr = checker.check(&mfa, sec, mat, &ctx);
+            // BRB 属性が登録された部材はメーカー許容値による BRB 検定に差し替える
+            // （app.rs run_design_check と同じ規則）。
+            let cr = if let Some(brb) = model.brb_attrs.iter().find(|a| a.elem == *elem_id) {
+                squid_n_design_jp::brb::brb_check(brb, mfa.n, length, true)
+            } else {
+                checker.check(&mfa, sec, mat, &ctx)
+            };
             n_checks += 1;
             if !cr.ok {
                 n_ng += 1;
@@ -1474,6 +1497,16 @@ fn compute_design_check_job(model: &Model, load_case: Option<u32>) -> Result<Job
         .iter()
         .map(|(id, mf)| (*id, mf.at.as_slice()))
         .collect();
+    // PCa 水平接合面の検定（PcaBeamAttr が登録された梁のみ。単一ケース＝長期扱い）。
+    for (_, _, cr) in squid_n_design_jp::pca::collect_pca_checks(model, &mf_slices, true) {
+        n_checks += 1;
+        if !cr.ok {
+            n_ng += 1;
+        }
+        if cr.ratio > max_ratio {
+            max_ratio = cr.ratio;
+        }
+    }
     let joint_checks = squid_n_design_jp::joint_wiring::collect_joint_checks(
         model,
         &mf_slices,

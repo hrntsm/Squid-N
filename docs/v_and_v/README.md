@@ -84,6 +84,9 @@
 > （節点・層・材料・断面・部材・節点荷重。export 冪等・再import安定をテスト）。断面は形鋼ライブラリ
 > 参照でなく物性直持ち（StbSecRaw）の subset のため 🔶。完全な他社相互運用は将来。
 > #25: `squid-n-edit` の EditCommand/UndoStack は P3 で実装済み・健全（MCP からの利用は未配線）。
+> #13: 断面検定（許容応力度検定）の RESP-D マニュアル照合結果は
+> `docs/v_and_v/断面検定_RESP-D照合.md` を参照（対象: rc.rs/steel.rs/src_cft.rs/
+> joint.rs/joint_wiring.rs/combo.rs）。
 > P4（材料・断面）の監査結果は `docs/v_and_v/p4_review.md` を参照。
 > #19: 包絡線（軟化・接線符号・連続性）・ひび割れ判定・MP 反転検知/ξ 更新を修正し、単軸履歴則 insta スナップショット追加で ✅。
 > #20: 武田・原点指向・スリップに `UniaxialMaterial`(trial/commit/revert) を実装。武田内側ルール（ポリゴン則）・TakedaDegrading（ピーク劣化）を本格化。insta スナップショットでループ固定し ✅。

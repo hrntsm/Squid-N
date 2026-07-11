@@ -92,6 +92,7 @@ fn get_material(model: &Model, mid: Option<squid_n_core::ids::MaterialId>) -> Ma
         }
     })
     .unwrap_or_else(|| Material {
+        concrete_class: Default::default(),
         id: squid_n_core::ids::MaterialId(0),
         name: String::new(),
         young: 0.0,
@@ -1344,6 +1345,7 @@ mod tests {
             ],
             materials: vec![
                 Material {
+                    concrete_class: Default::default(),
                     id: MaterialId(0),
                     name: "FC24".into(),
                     young: 23000.0,
@@ -1354,6 +1356,7 @@ mod tests {
                     fy: None,
                 },
                 Material {
+                    concrete_class: Default::default(),
                     id: MaterialId(1),
                     name: "BCR295(充填FC36)".into(),
                     young: 205000.0,
@@ -1458,6 +1461,7 @@ mod tests {
             ],
             sections: vec![shape.to_section(SectionId(0), "RC-300x600".into())],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "FC24".into(),
                 young: 23000.0,
@@ -1662,6 +1666,7 @@ mod tests {
             shape: None,
         };
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "steel".to_string(),
             young: 205000.0,
@@ -1793,6 +1798,7 @@ mod tests {
             elements: vec![mk_beam(0, 0, 1, 0), mk_beam(1, 1, 2, 1)], // 柱(せい600)・梁(せい700)
             sections: vec![mk_sec(0, 600.0), mk_sec(1, 700.0)],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: String::new(),
                 young: 205000.0,
@@ -1857,6 +1863,7 @@ mod tests {
             shape: None,
         };
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: String::new(),
             young: 205000.0,
@@ -1972,6 +1979,7 @@ mod tests {
         }
         .to_section(SectionId(1), "beam-H500".to_string());
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "steel".to_string(),
             young: 205000.0,
@@ -2073,6 +2081,7 @@ mod tests {
         }
         .to_section(SectionId(1), "beam-H500".to_string());
         let rc_mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "concrete".to_string(),
             young: 23000.0,
@@ -2083,6 +2092,7 @@ mod tests {
             fy: None,
         };
         let s_mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(1),
             name: "steel".to_string(),
             young: 205000.0,
@@ -2184,6 +2194,7 @@ mod tests {
         }
         .to_section(SectionId(1), "beam-RC600".to_string());
         let s_mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "steel".to_string(),
             young: 205000.0,
@@ -2194,6 +2205,7 @@ mod tests {
             fy: Some(235.0),
         };
         let rc_mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(1),
             name: "concrete".to_string(),
             young: 23000.0,
@@ -2326,6 +2338,7 @@ mod tests {
             shape: None,
         };
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "steel".to_string(),
             young: 205000.0,
@@ -2456,6 +2469,7 @@ mod tests {
             shape: None,
         };
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "conc".to_string(),
             young: 23000.0,
@@ -2570,6 +2584,7 @@ mod tests {
             shape: None,
         };
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "conc".to_string(),
             young: 23000.0,
@@ -2661,6 +2676,7 @@ mod tests {
             shape: None,
         };
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "conc".to_string(),
             young: 23000.0,
@@ -2768,6 +2784,7 @@ mod tests {
             ps: 0.0025,
         };
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "FC24".into(),
             young: 23000.0,
@@ -2911,6 +2928,7 @@ mod tests {
             ps: 0.0025,
         };
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "FC24".into(),
             young: 23000.0,
@@ -3075,6 +3093,7 @@ mod tests {
             ps: 0.0025,
         };
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "FC24".into(),
             young: 23000.0,

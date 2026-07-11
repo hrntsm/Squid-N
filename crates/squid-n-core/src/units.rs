@@ -1,7 +1,8 @@
 pub const GRAVITY_MM_S2: f64 = 9_806.65;
 
 /// コンクリートの種類（単位体積重量表の行。RESP-D マニュアル「柱梁自重」）。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// 「04 断面検定」の許容応力度低減（軽量1種・2種は普通コンクリートの 0.9 倍）にも用いる。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConcreteClass {
     #[default]
     Normal,

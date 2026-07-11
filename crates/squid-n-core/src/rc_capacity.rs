@@ -72,6 +72,50 @@ pub fn rc_qmu_simple(inp: &RcCapacityInput) -> f64 {
     2.0 * rc_mu_simple(inp) / inp.clear_span
 }
 
+/// RC 柱の曲げ終局モーメント Mu \[N·mm\]（軸力を考慮した略算式。
+/// 2007年版建築物の構造関係技術基準解説書 付録1-3 の閉形式、要・原典照合）。
+///
+/// ```text
+/// Nmax = b・D・Fc + ag・σy
+/// Nmin = −ag・σy
+/// N > 0.4・b・D・Fc:
+///   Mu = {0.8・at・σy・D + 0.12・b・D²・Fc}・(Nmax − N)/(Nmax − 0.4・b・D・Fc)
+/// 0 ≤ N ≤ 0.4・b・D・Fc:
+///   Mu = 0.8・at・σy・D + 0.5・N・D・(1 − N/(b・D・Fc))
+/// Nmin ≤ N < 0:
+///   Mu = 0.8・at・σy・D + 0.4・N・D
+/// ```
+///
+/// - `ag`: 全主筋断面積 \[mm²\]、`n_axial`: 設計軸力 \[N\]（**圧縮を正**）。
+/// - `N` は適用範囲 \[Nmin, Nmax\] にクランプし、結果が負となる場合は 0 を返す
+///   （N=Nmax（全断面圧縮）・N=Nmin（全主筋引張降伏）で曲げ余力なし）。
+/// - `inp.b`, `inp.d`(=D), `inp.at`, `inp.sigma_y`, `inp.fc` を用いる。
+///   不正入力（b, d, at, σy, Fc のいずれかが 0 以下）は 0.0 を返す。
+///
+/// RESP-D マニュアル計算編 04「断面検定」の柱設計用せん断力 QD1 = ΣcMy/h′
+/// における柱の終局曲げ（cMy）の算定に用いる。
+pub fn rc_column_mu_simple(inp: &RcCapacityInput, ag: f64, n_axial: f64) -> f64 {
+    if inp.b <= 0.0 || inp.d <= 0.0 || inp.at <= 0.0 || inp.sigma_y <= 0.0 || inp.fc <= 0.0 {
+        return 0.0;
+    }
+    let (b, d, at, sy, fc) = (inp.b, inp.d, inp.at, inp.sigma_y, inp.fc);
+    let ag = ag.max(at);
+    let n_max = b * d * fc + ag * sy;
+    let n_min = -ag * sy;
+    let n = n_axial.clamp(n_min, n_max);
+    let n_bal = 0.4 * b * d * fc;
+
+    let mu = if n > n_bal {
+        let m_bal = 0.8 * at * sy * d + 0.12 * b * d * d * fc;
+        m_bal * (n_max - n) / (n_max - n_bal)
+    } else if n >= 0.0 {
+        0.8 * at * sy * d + 0.5 * n * d * (1.0 - n / (b * d * fc))
+    } else {
+        0.8 * at * sy * d + 0.4 * n * d
+    };
+    mu.max(0.0)
+}
+
 /// せん断終局耐力 Qsu \[N\]（荒川mean式系の略算式、要・原典照合）。
 ///
 /// ```text
@@ -137,6 +181,48 @@ mod tests {
             "Mu={} vs handcalc={}",
             mu,
             mu_handcalc
+        );
+    }
+
+    #[test]
+    fn test_rc_column_mu_simple_branches() {
+        let inp = sample_input();
+        let (b, d, at, sy, fc) = (400.0_f64, 600.0, 1935.0, 345.0, 24.0);
+        let ag = 2.0 * at; // 対称配筋の全主筋
+        let n_bal = 0.4 * b * d * fc; // 2,304,000 N
+        let n_max = b * d * fc + ag * sy;
+
+        // N=0: Mu = 0.8・at・σy・D。
+        let mu0 = rc_column_mu_simple(&inp, ag, 0.0);
+        assert!((mu0 - 0.8 * at * sy * d).abs() < 1e-6);
+
+        // 中間圧縮軸力（N=0.2bDFc）: 軸力項で Mu が増える。
+        let n1 = 0.2 * b * d * fc;
+        let mu1 = rc_column_mu_simple(&inp, ag, n1);
+        let expect1 = 0.8 * at * sy * d + 0.5 * n1 * d * (1.0 - n1 / (b * d * fc));
+        assert!((mu1 - expect1).abs() < 1e-6);
+        assert!(mu1 > mu0);
+
+        // 高圧縮域（N>0.4bDFc）: Nmax で 0 に線形低減。
+        let mu_at_nmax = rc_column_mu_simple(&inp, ag, n_max);
+        assert!(mu_at_nmax.abs() < 1e-6);
+        let n2 = 0.7 * n_max + 0.3 * n_bal;
+        let mu2 = rc_column_mu_simple(&inp, ag, n2);
+        let m_bal = 0.8 * at * sy * d + 0.12 * b * d * d * fc;
+        let expect2 = m_bal * (n_max - n2) / (n_max - n_bal);
+        assert!((mu2 - expect2).abs() < 1e-6);
+
+        // 引張軸力: Mu = 0.8atσyD + 0.4ND（N<0）で減少、Nmin 以下で 0。
+        let n3 = -0.5 * ag * sy;
+        let mu3 = rc_column_mu_simple(&inp, ag, n3);
+        assert!((mu3 - (0.8 * at * sy * d + 0.4 * n3 * d)).abs() < 1e-6);
+        assert!(mu3 < mu0);
+        // 境界の連続性: N=0.4bDFc で両分岐が一致する。
+        let lo = rc_column_mu_simple(&inp, ag, n_bal - 1e-6);
+        let hi = rc_column_mu_simple(&inp, ag, n_bal + 1e-6);
+        assert!(
+            (lo - hi).abs() / lo < 1e-6,
+            "branch continuity: {lo} vs {hi}"
         );
     }
 

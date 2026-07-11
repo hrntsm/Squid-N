@@ -43,6 +43,41 @@ pub fn design_table(ui: &mut egui::Ui, app: &mut App) {
 
     // ── 一次設計: 部材検定表 ─────────────────────────────────────
     ui.strong("部材検定（許容応力度）");
+    // 断面算定条件（RESP-D マニュアル 04「断面算定条件」相当）。
+    ui.horizontal(|ui| {
+        let mut changed = false;
+        changed |= ui
+            .checkbox(
+                &mut app.analysis_cfg.rc_damage_control,
+                "RC短期せん断: 損傷制御",
+            )
+            .on_hover_text(
+                "ON: 損傷制御のための検討（2/3・α・fs）、OFF: 安全確保のための検討。\
+                 軽量コンクリート×高強度せん断補強筋は常に安全確保式（マニュアル準拠）",
+            )
+            .changed();
+        ui.label("QD:");
+        for (m, label) in [
+            (squid_n_design_jp::QdMethod::Min, "min(QD1,QD2)"),
+            (squid_n_design_jp::QdMethod::Qd1, "QD1"),
+            (squid_n_design_jp::QdMethod::Qd2, "QD2"),
+        ] {
+            if ui
+                .selectable_label(app.analysis_cfg.qd_method == m, label)
+                .on_hover_text(
+                    "地震時短期の設計用せん断力の決定方法（QD1=終局曲げベース、\
+                     QD2=QL+n・QE。長期組合せ(G+P)を先に解析している場合のみ有効）",
+                )
+                .clicked()
+            {
+                app.analysis_cfg.qd_method = m;
+                changed = true;
+            }
+        }
+        if changed {
+            app.run_design_check();
+        }
+    });
     if app.staleness.design_stale {
         ui.colored_label(
             crate::theme::BEST_YELLOW,

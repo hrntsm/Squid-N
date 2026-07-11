@@ -655,6 +655,7 @@ mod tests {
     fn test_member_skeleton_generic_basic() {
         let sec = make_section(100.0, 200.0);
         let mat_data = Material {
+            concrete_class: Default::default(),
             id: squid_n_core::ids::MaterialId(0),
             name: "steel".into(),
             young: 205000.0,

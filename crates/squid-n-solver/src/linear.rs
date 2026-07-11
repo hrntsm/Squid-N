@@ -310,6 +310,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "m".into(),
                 young: 205000.0,
@@ -421,6 +422,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "m".into(),
                 young: 205000.0,
@@ -563,6 +565,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "mat".to_string(),
                 young: 1000.0,
@@ -727,6 +730,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "mat".to_string(),
                 young: 1000.0,
@@ -822,6 +826,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "mat".to_string(),
                 young: 1000.0,
@@ -1047,6 +1052,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "mat".to_string(),
                 young: e,
@@ -1138,6 +1144,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "mat".to_string(),
                 young: 1000.0,
@@ -1250,6 +1257,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "mat".to_string(),
                 young: 1000.0,
@@ -1395,6 +1403,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "m".into(),
                 young: e,
@@ -1522,6 +1531,7 @@ mod tests {
             shape: None,
         };
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "steel".into(),
             young: 205000.0,
@@ -1659,6 +1669,7 @@ mod tests {
             shape: None,
         };
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "steel".into(),
             young: 205000.0,

@@ -586,6 +586,7 @@ mod tests {
             shape: None,
         };
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "steel".to_string(),
             young: 205000.0,

@@ -404,6 +404,88 @@ fn nonzero(z: f64) -> f64 {
 }
 
 // ---------------------------------------------------------------------
+// 断面欠損（継手部・スカラップ）と横座屈長さ
+// （RESP-D マニュアル 04 断面検定「鉄骨の断面検定における断面性能」）
+// ---------------------------------------------------------------------
+
+/// H形鋼の欠損考慮断面係数 Z'（強軸）。
+///
+/// マニュアル原文の式:
+/// - 継手部: `If' = If・(1−βf/100)`、`Iw' = Iw・(1−βw/100)`
+///   （βf/βw: フランジ/ウェブの欠損率 [%]）
+/// - スカラップ: `Iw'' = tw・((H−2tf)(1−αw/100))³/12`
+///   （αw: スカラップによるウェブ欠損率 [%]）
+///
+/// フランジ寄与分 `If = (B・H³ − B・(H−2tf)³)/12`、ウェブ寄与分
+/// `Iw = tw・(H−2tf)³/12` は、全断面の強軸断面二次モーメント
+/// `Iy = (B・H³ − (B−tw)・(H−2tf)³)/12`（[`squid_n_core::section_shape`] の
+/// H形と同一の式）を `If + Iw = Iy` と分解したもの。
+///
+/// `is_end=true`（部材端部、スカラップが生じ得る位置）の場合は、ウェブ寄与分を
+/// スカラップ考慮の `Iw''` に置き換えたうえで継手欠損 `βw` も併せて乗じる
+/// （端部に継手とスカラップが重なる保守的な扱い）。`is_end=false`（継手部・
+/// 中間部）は `Iw'`（βw のみ）を用いる。
+///
+/// `Z' = (If' + Iw'') / (H/2)`。欠損率が 0 の場合は通常の H形強軸断面係数
+/// `Z = Iy/(H/2)` に一致する。
+#[allow(clippy::too_many_arguments)]
+pub fn steel_h_z_with_loss(
+    h: f64,
+    b: f64,
+    tw: f64,
+    tf: f64,
+    beta_f: f64,
+    beta_w: f64,
+    alpha_w: f64,
+    is_end: bool,
+) -> f64 {
+    let hw = (h - 2.0 * tf).max(0.0);
+    let i_f = (b * h.powi(3) - b * hw.powi(3)) / 12.0;
+    let i_f_prime = i_f * (1.0 - beta_f / 100.0).max(0.0);
+
+    let i_w_prime = if is_end {
+        let hw_scallop = hw * (1.0 - alpha_w / 100.0).max(0.0);
+        let i_w_scallop = tw * hw_scallop.powi(3) / 12.0;
+        i_w_scallop * (1.0 - beta_w / 100.0).max(0.0)
+    } else {
+        let i_w = tw * hw.powi(3) / 12.0;
+        i_w * (1.0 - beta_w / 100.0).max(0.0)
+    };
+
+    section_modulus(i_f_prime + i_w_prime, h / 2.0)
+}
+
+/// 横座屈長さ lb [mm] の解決（優先順位: 直接入力 > 等間隔横補剛 > 部材長）。
+///
+/// 1. `lb_direct = Some((始端, 中央, 終端))` が与えられていれば、`pos`
+///    （部材軸方向の無次元位置 0.0〜1.0）に応じて該当区間の値を返す:
+///    `pos<0.25` は始端、`pos<0.75` は中央、それ以外は終端。
+/// 2. 直接入力が無く `brace_count = Some(n)`（等間隔横補剛の本数）が
+///    あれば `lb = L/(n+1)`（`n` 本の補剛で部材が `n+1` 等分される）。
+/// 3. いずれも無ければ部材長 `length` をそのまま横座屈長さとする
+///    （横補剛なし＝全長で座屈）。
+pub fn resolve_lb(
+    pos: f64,
+    length: f64,
+    lb_direct: Option<(f64, f64, f64)>,
+    brace_count: Option<u32>,
+) -> f64 {
+    if let Some((start, mid, end)) = lb_direct {
+        return if pos < 0.25 {
+            start
+        } else if pos < 0.75 {
+            mid
+        } else {
+            end
+        };
+    }
+    if let Some(n) = brace_count {
+        return length / (n as f64 + 1.0);
+    }
+    length
+}
+
+// ---------------------------------------------------------------------
 // 大梁必要横補剛数（情報出力のみ。検定比には含めない）
 // ---------------------------------------------------------------------
 
@@ -524,10 +606,34 @@ fn check_beam(
 ) -> CheckResult {
     let h = sec.depth;
     let b = sec.width;
-    let z_strong = nonzero(section_modulus(sec.iy, h / 2.0));
+    let (shape, tf, tw) = shape_of(sec);
+
+    // 断面欠損（継手部の欠損率 βf/βw・端部スカラップ αw）を考慮した断面係数。
+    // H 形で SteelDesignAttr が与えられている場合のみ Z' に置き換える
+    // （マニュアル「鉄骨の断面検定における断面性能」）。端部判定は評価位置
+    // pos<=0.25 / >=0.75 を端部とする（検定位置＝柱フェイス・中央の分類と同じ）。
+    let z_strong = match (&ctx.steel_attr, shape) {
+        (Some(attr), ShapeCategory::H)
+            if attr.joint_flange_loss > 0.0
+                || attr.joint_web_loss > 0.0
+                || attr.scallop_web_loss > 0.0 =>
+        {
+            let is_end = !(0.25 < forces.pos && forces.pos < 0.75);
+            nonzero(steel_h_z_with_loss(
+                h,
+                b,
+                tw,
+                tf,
+                attr.joint_flange_loss,
+                attr.joint_web_loss,
+                attr.scallop_web_loss,
+                is_end,
+            ))
+        }
+        _ => nonzero(section_modulus(sec.iy, h / 2.0)),
+    };
     let sigma_b = forces.mz.abs() / z_strong;
 
-    let (shape, tf, tw) = shape_of(sec);
     let ft_val = steel_ft(f, term);
     let fs_val = steel_fs(f, term);
 
@@ -540,7 +646,14 @@ fn check_beam(
         ShapeCategory::H => {
             let af = b * tf;
             let i_t = steel_i_t(b, tf, h, tw);
-            let lb = ctx.lb.unwrap_or(ctx.length);
+            // 横座屈長さ lb の優先順位: ctx.lb 直接指定 > SteelDesignAttr
+            // （直接入力 (始端,中央,終端)／等間隔補剛 L/(n+1)）> 部材長。
+            let lb = ctx.lb.unwrap_or_else(|| {
+                ctx.steel_attr
+                    .as_ref()
+                    .map(|a| resolve_lb(forces.pos, ctx.length, a.lb_direct, a.lateral_brace_count))
+                    .unwrap_or(ctx.length)
+            });
             fb = steel_fb_h(f, term, lb, i_t, h, af, c);
             let sigma_b_prime = sigma_b * (h - 2.0 * tf).max(0.0) / safe_denom(h);
             let von_mises = (sigma_b_prime.powi(2) + 3.0 * tau.powi(2)).sqrt() / safe_denom(ft_val);
@@ -793,6 +906,7 @@ mod tests {
 
     fn mat(name: &str) -> Material {
         Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: name.to_string(),
             young: 205_000.0,
@@ -831,6 +945,97 @@ mod tests {
             flange_thick: tf,
         };
         shape.to_section(SectionId(0), format!("H-{}x{}x{}x{}", h, b, tw, tf))
+    }
+
+    // -------------------------------------------------------------
+    // SteelDesignAttr の配線（断面欠損 Z'・横座屈長さ lb）
+    // -------------------------------------------------------------
+
+    #[test]
+    fn test_check_beam_applies_section_loss_attr() {
+        use squid_n_core::ids::ElemId;
+        use squid_n_core::model::SteelDesignAttr;
+        let sec = h_section(400.0, 200.0, 8.0, 13.0);
+        let m = mat("SN400B");
+        // 端部（pos=0.0）で曲げ支配となる内力。
+        let forces = MemberForcesAt {
+            pos: 0.0,
+            n: 0.0,
+            qy: 10_000.0,
+            qz: 0.0,
+            my: 0.0,
+            mz: 1.0e8,
+        };
+        let ctx_base = DesignCtx {
+            kind: MemberKind::Beam,
+            length: 4000.0,
+            ..Default::default()
+        };
+        let base = SteelDesign.check(&forces, &sec, &m, &ctx_base);
+        let ctx_loss = DesignCtx {
+            kind: MemberKind::Beam,
+            length: 4000.0,
+            steel_attr: Some(SteelDesignAttr {
+                elem: ElemId(0),
+                joint_flange_loss: 10.0,
+                joint_web_loss: 0.0,
+                scallop_web_loss: 20.0,
+                lb_direct: None,
+                lateral_brace_count: None,
+            }),
+            ..Default::default()
+        };
+        let with_loss = SteelDesign.check(&forces, &sec, &m, &ctx_loss);
+        // 欠損で Z′ が減り、曲げ応力度・検定比が大きくなる。
+        assert!(
+            with_loss.ratio > base.ratio,
+            "loss ratio={} <= base ratio={}",
+            with_loss.ratio,
+            base.ratio
+        );
+    }
+
+    #[test]
+    fn test_check_beam_lb_from_attr_brace_count() {
+        use squid_n_core::ids::ElemId;
+        use squid_n_core::model::SteelDesignAttr;
+        // 細長い横座屈支配の梁: lb = L/(n+1) の短縮で fb が上がり検定比が下がる。
+        let sec = h_section(600.0, 150.0, 8.0, 10.0);
+        let m = mat("SN400B");
+        let forces = MemberForcesAt {
+            pos: 0.5,
+            n: 0.0,
+            qy: 0.0,
+            qz: 0.0,
+            my: 0.0,
+            mz: 1.0e8,
+        };
+        let ctx_no_brace = DesignCtx {
+            kind: MemberKind::Beam,
+            length: 12_000.0,
+            ..Default::default()
+        };
+        let base = SteelDesign.check(&forces, &sec, &m, &ctx_no_brace);
+        let ctx_braced = DesignCtx {
+            kind: MemberKind::Beam,
+            length: 12_000.0,
+            steel_attr: Some(SteelDesignAttr {
+                elem: ElemId(0),
+                joint_flange_loss: 0.0,
+                joint_web_loss: 0.0,
+                scallop_web_loss: 0.0,
+                lb_direct: None,
+                lateral_brace_count: Some(5),
+            }),
+            ..Default::default()
+        };
+        let braced = SteelDesign.check(&forces, &sec, &m, &ctx_braced);
+        assert!(
+            braced.ratio < base.ratio,
+            "braced ratio={} >= base ratio={}",
+            braced.ratio,
+            base.ratio
+        );
     }
 
     // -------------------------------------------------------------
@@ -1430,6 +1635,107 @@ mod tests {
     }
 
     // -------------------------------------------------------------
+    // 断面欠損（継手部・スカラップ）と横座屈長さ
+    // -------------------------------------------------------------
+
+    /// βf=βw=αw=0 のとき、通常の H形強軸断面係数 Z=Iy/(H/2) に一致する
+    /// （`Iy` は [`squid_n_core::section_shape::SectionShape::SteelH`] と同一の
+    /// `(B・H³ − (B−tw)・(H−2tf)³)/12` 式）。
+    #[test]
+    fn test_z_with_loss_zero_matches_normal_z() {
+        let (h, b, tw, tf): (f64, f64, f64, f64) = (500.0, 200.0, 9.0, 14.0);
+        let hw = h - 2.0 * tf;
+        let iy = (b * h.powi(3) - (b - tw) * hw.powi(3)) / 12.0;
+        let z_expected = iy / (h / 2.0);
+
+        let z_mid = steel_h_z_with_loss(h, b, tw, tf, 0.0, 0.0, 0.0, false);
+        let z_end = steel_h_z_with_loss(h, b, tw, tf, 0.0, 0.0, 0.0, true);
+        assert!(
+            (z_mid - z_expected).abs() < 1e-6,
+            "z_mid={} expected={}",
+            z_mid,
+            z_expected
+        );
+        assert!(
+            (z_end - z_expected).abs() < 1e-6,
+            "z_end={} expected={}",
+            z_end,
+            z_expected
+        );
+    }
+
+    /// βf=100（フランジ全損）ならフランジ寄与 If' が消え、ウェブ寄与のみが
+    /// 残る（Z' = Iw'/(H/2)）。
+    #[test]
+    fn test_z_with_loss_beta_f_100_removes_flange_contribution() {
+        let (h, b, tw, tf): (f64, f64, f64, f64) = (500.0, 200.0, 9.0, 14.0);
+        let hw = h - 2.0 * tf;
+        let i_w = tw * hw.powi(3) / 12.0;
+        let z_expected = i_w / (h / 2.0);
+
+        let z = steel_h_z_with_loss(h, b, tw, tf, 100.0, 0.0, 0.0, false);
+        assert!(
+            (z - z_expected).abs() < 1e-6,
+            "z={} expected={}",
+            z,
+            z_expected
+        );
+    }
+
+    /// スカラップ αw の 3 乗効果: is_end=true で αw を大きくすると
+    /// Iw''=tw・(hw・(1−αw/100))³/12 は (1−αw/100)³ に比例して小さくなる。
+    #[test]
+    fn test_z_with_loss_scallop_cubic_effect() {
+        let (h, b, tw, tf): (f64, f64, f64, f64) = (500.0, 200.0, 9.0, 14.0);
+        let z_no_scallop = steel_h_z_with_loss(h, b, tw, tf, 0.0, 0.0, 0.0, true);
+        let z_scallop = steel_h_z_with_loss(h, b, tw, tf, 0.0, 0.0, 50.0, true);
+
+        let hw = h - 2.0 * tf;
+        let i_w_no_scallop = tw * hw.powi(3) / 12.0;
+        let i_w_scallop = tw * (hw * 0.5).powi(3) / 12.0;
+        // (1-0.5)^3 = 0.125 倍。
+        assert!((i_w_scallop / i_w_no_scallop - 0.125).abs() < 1e-9);
+
+        assert!(
+            z_scallop < z_no_scallop,
+            "z_scallop={} z_no_scallop={}",
+            z_scallop,
+            z_no_scallop
+        );
+        // is_end=false（スカラップ非適用）は αw の影響を受けない。
+        let z_mid_with_alpha = steel_h_z_with_loss(h, b, tw, tf, 0.0, 0.0, 50.0, false);
+        let z_mid_no_alpha = steel_h_z_with_loss(h, b, tw, tf, 0.0, 0.0, 0.0, false);
+        assert!((z_mid_with_alpha - z_mid_no_alpha).abs() < 1e-9);
+    }
+
+    /// resolve_lb: 直接入力があれば位置に応じて始端/中央/終端を返す。
+    #[test]
+    fn test_resolve_lb_direct_input_priority() {
+        let direct = Some((1000.0, 2000.0, 3000.0));
+        assert_eq!(resolve_lb(0.0, 9000.0, direct, Some(2)), 1000.0);
+        assert_eq!(resolve_lb(0.24, 9000.0, direct, Some(2)), 1000.0);
+        assert_eq!(resolve_lb(0.25, 9000.0, direct, Some(2)), 2000.0);
+        assert_eq!(resolve_lb(0.5, 9000.0, direct, Some(2)), 2000.0);
+        assert_eq!(resolve_lb(0.74, 9000.0, direct, Some(2)), 2000.0);
+        assert_eq!(resolve_lb(0.75, 9000.0, direct, Some(2)), 3000.0);
+        assert_eq!(resolve_lb(1.0, 9000.0, direct, Some(2)), 3000.0);
+    }
+
+    /// resolve_lb: 直接入力が無く等間隔横補剛の本数があれば L/(n+1)。
+    #[test]
+    fn test_resolve_lb_brace_count_when_no_direct() {
+        // n=2 本の補剛で 3 等分 → 9000/3=3000。
+        assert_eq!(resolve_lb(0.5, 9000.0, None, Some(2)), 3000.0);
+        assert_eq!(resolve_lb(0.0, 9000.0, None, Some(2)), 3000.0);
+    }
+
+    /// resolve_lb: どちらも無ければ部材長そのまま。
+    #[test]
+    fn test_resolve_lb_falls_back_to_length() {
+        assert_eq!(resolve_lb(0.5, 9000.0, None, None), 9000.0);
+    }
+
+    // -------------------------------------------------------------
     // 大梁必要横補剛数
     // -------------------------------------------------------------
 
@@ -1535,6 +1841,7 @@ mod tests {
         };
         let material = mat("SN400");
         let material = Material {
+            concrete_class: Default::default(),
             young: e,
             ..material
         };

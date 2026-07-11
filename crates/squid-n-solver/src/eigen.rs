@@ -566,6 +566,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "mat".into(),
                 young: k * 1000.0 / 1.0, // EA/L = young*1/1000 = k
@@ -631,6 +632,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "mat".into(),
                 young,
@@ -734,6 +736,7 @@ mod tests {
             elements,
             sections: vec![col_section, beam_section],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "SN400B".into(),
                 young: 205000.0,
@@ -1011,6 +1014,7 @@ mod tests {
             elements,
             sections: vec![col_section, beam_section],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "SN400B".into(),
                 young: 205000.0,

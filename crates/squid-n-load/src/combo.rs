@@ -1,6 +1,30 @@
 use squid_n_core::ids::LoadCaseId;
 use squid_n_core::model::LoadCombination;
 
+/// 多雪区域の積雪荷重低減係数（RESP-D マニュアル 04 断面検定「荷重の組合せ」）。
+///
+/// - `delta1`: 長期積雪 `G+P+δ1・S` の低減係数（既定 0.7）
+/// - `delta2`: 暴風時 `G+P+δ2・S±W` の低減係数（既定 0.35）
+/// - `delta3`: 地震時 `G+P+δ3・S±K` の低減係数（既定 0.35）
+///
+/// マニュアルでは直接入力が可能（デフォルト δ1=0.7、δ2=δ3=0.35）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SnowFactors {
+    pub delta1: f64,
+    pub delta2: f64,
+    pub delta3: f64,
+}
+
+impl Default for SnowFactors {
+    fn default() -> Self {
+        SnowFactors {
+            delta1: 0.7,
+            delta2: 0.35,
+            delta3: 0.35,
+        }
+    }
+}
+
 /// [`standard_combinations`] への入力ケース指定。
 pub struct ComboInput {
     pub dl: LoadCaseId,
@@ -11,9 +35,11 @@ pub struct ComboInput {
     pub wind_y: Option<LoadCaseId>,
     pub snow: Option<LoadCaseId>,
     /// 多雪区域か否か（建築基準法施行令86条・同82条）。
-    /// `true` の場合、長期に `0.7S` を加算し、短期地震・短期暴風に
-    /// `0.35S` を加算した組合せも追加で生成する。
+    /// `true` の場合、長期に `δ1・S` を加算し、短期暴風・短期地震に
+    /// `δ2・S`／`δ3・S` を加算した組合せも追加で生成する。
     pub heavy_snow_zone: bool,
+    /// 多雪区域の積雪荷重低減係数。`None` は既定値（δ1=0.7、δ2=δ3=0.35）。
+    pub snow_factors: Option<SnowFactors>,
 }
 
 fn push_gp(combos: &mut Vec<LoadCombination>, dl: LoadCaseId, ll: LoadCaseId) {
@@ -38,16 +64,17 @@ pub fn standard_combinations(input: &ComboInput) -> Vec<LoadCombination> {
     let mut combos = Vec::new();
     let dl = input.dl;
     let ll = input.ll;
+    let sf = input.snow_factors.unwrap_or_default();
 
     // 長期: G+P
     push_gp(&mut combos, dl, ll);
 
-    // 多雪区域の長期: G+P+0.7S
+    // 多雪区域の長期: G+P+δ1・S
     if input.heavy_snow_zone {
         if let Some(snow) = input.snow {
             combos.push(LoadCombination {
-                name: "G + P + 0.7S".into(),
-                terms: vec![(dl, 1.0), (ll, 1.0), (snow, 0.7)],
+                name: format!("G + P + {}S", trim_f64(sf.delta1)),
+                terms: vec![(dl, 1.0), (ll, 1.0), (snow, sf.delta1)],
             });
         }
     }
@@ -60,7 +87,7 @@ pub fn standard_combinations(input: &ComboInput) -> Vec<LoadCombination> {
         });
     }
 
-    // 短期地震（±両方向、多雪区域は 0.35S 付きも追加）。
+    // 短期地震（±両方向、多雪区域は δ3・S 付きも追加）。
     push_directional(
         &mut combos,
         dl,
@@ -69,6 +96,7 @@ pub fn standard_combinations(input: &ComboInput) -> Vec<LoadCombination> {
         "Kx",
         input.snow,
         input.heavy_snow_zone,
+        sf.delta3,
     );
     push_directional(
         &mut combos,
@@ -78,9 +106,10 @@ pub fn standard_combinations(input: &ComboInput) -> Vec<LoadCombination> {
         "Ky",
         input.snow,
         input.heavy_snow_zone,
+        sf.delta3,
     );
 
-    // 短期暴風（±両方向、多雪区域は 0.35S 付きも追加）。
+    // 短期暴風（±両方向、多雪区域は δ2・S 付きも追加）。
     push_directional(
         &mut combos,
         dl,
@@ -89,6 +118,7 @@ pub fn standard_combinations(input: &ComboInput) -> Vec<LoadCombination> {
         "Wx",
         input.snow,
         input.heavy_snow_zone,
+        sf.delta2,
     );
     push_directional(
         &mut combos,
@@ -98,13 +128,21 @@ pub fn standard_combinations(input: &ComboInput) -> Vec<LoadCombination> {
         "Wy",
         input.snow,
         input.heavy_snow_zone,
+        sf.delta2,
     );
 
     combos
 }
 
+/// 係数を組合せ名向けに整形する（末尾の 0 を落とす。例: 0.70 → "0.7"）。
+fn trim_f64(v: f64) -> String {
+    let s = format!("{v:.3}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 /// 地震・暴風いずれかの片方向（Kx/Ky/Wx/Wy）について、`G+P±X` と
-/// 多雪区域なら `G+P+0.35S±X` を追加する共通ヘルパー。
+/// 多雪区域なら `G+P+δ・S±X`（δ: 暴風時 δ2／地震時 δ3）を追加する共通ヘルパー。
+#[allow(clippy::too_many_arguments)]
 fn push_directional(
     combos: &mut Vec<LoadCombination>,
     dl: LoadCaseId,
@@ -113,6 +151,7 @@ fn push_directional(
     label: &str,
     snow: Option<LoadCaseId>,
     heavy_snow_zone: bool,
+    delta: f64,
 ) {
     let Some(case) = case else {
         return;
@@ -127,13 +166,14 @@ fn push_directional(
     });
     if heavy_snow_zone {
         if let Some(snow) = snow {
+            let d = trim_f64(delta);
             combos.push(LoadCombination {
-                name: format!("G + P + 0.35S + {label}"),
-                terms: vec![(dl, 1.0), (ll, 1.0), (snow, 0.35), (case, 1.0)],
+                name: format!("G + P + {d}S + {label}"),
+                terms: vec![(dl, 1.0), (ll, 1.0), (snow, delta), (case, 1.0)],
             });
             combos.push(LoadCombination {
-                name: format!("G + P + 0.35S - {label}"),
-                terms: vec![(dl, 1.0), (ll, 1.0), (snow, 0.35), (case, -1.0)],
+                name: format!("G + P + {d}S - {label}"),
+                terms: vec![(dl, 1.0), (ll, 1.0), (snow, delta), (case, -1.0)],
             });
         }
     }
@@ -159,6 +199,7 @@ pub fn auto_combinations(
         wind_y: None,
         snow: snow_case,
         heavy_snow_zone: false,
+        snow_factors: None,
     };
     standard_combinations(&input)
 }
@@ -176,11 +217,23 @@ pub fn is_short_term_combo(name: &str) -> bool {
     if upper.contains('K') || upper.contains('E') || upper.contains('W') {
         return true;
     }
-    // 多雪区域の長期積雪 0.7S は長期（令82条一号）。それ以外の S は短期積雪。
-    if upper.contains("0.7S") {
-        return false;
+    // 多雪区域の長期積雪 δ1・S（係数 <1.0 の S 項。例 "0.7S"・"0.65S"）は
+    // 長期（令82条一号）。係数なしの S（G+P+S）は短期積雪。
+    if let Some(pos) = upper.find('S') {
+        let coef: String = upper[..pos]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if let Ok(v) = coef.parse::<f64>() {
+            return v >= 1.0;
+        }
+        return true;
     }
-    upper.contains('S')
+    false
 }
 
 #[cfg(test)]
@@ -259,6 +312,7 @@ mod tests {
             wind_y: Some(LoadCaseId(6)),
             snow: Some(LoadCaseId(7)),
             heavy_snow_zone: true,
+            snow_factors: None,
         };
         let combos = standard_combinations(&input);
         // G+P(1) + G+P+0.7S(1) + G+P+S(1)
@@ -354,6 +408,43 @@ mod tests {
     }
 
     #[test]
+    fn test_snow_factors_direct_input() {
+        // δ1/δ2/δ3 の直接入力（RESP-D マニュアル: デフォルト 0.7/0.35/0.35、
+        // 直接入力可能）。名前・係数の両方に反映される。
+        let input = ComboInput {
+            dl: LoadCaseId(1),
+            ll: LoadCaseId(2),
+            seismic_x: Some(LoadCaseId(3)),
+            seismic_y: None,
+            wind_x: Some(LoadCaseId(5)),
+            wind_y: None,
+            snow: Some(LoadCaseId(7)),
+            heavy_snow_zone: true,
+            snow_factors: Some(SnowFactors {
+                delta1: 0.65,
+                delta2: 0.3,
+                delta3: 0.4,
+            }),
+        };
+        let combos = standard_combinations(&input);
+        let by_name = |n: &str| {
+            combos
+                .iter()
+                .find(|c| c.name == n)
+                .unwrap_or_else(|| panic!("missing combo {n}"))
+        };
+        // 長期積雪: δ1=0.65
+        assert_eq!(by_name("G + P + 0.65S").terms[2], (LoadCaseId(7), 0.65));
+        // 地震時: δ3=0.4、暴風時: δ2=0.3
+        assert_eq!(by_name("G + P + 0.4S + Kx").terms[2], (LoadCaseId(7), 0.4));
+        assert_eq!(by_name("G + P + 0.3S + Wx").terms[2], (LoadCaseId(7), 0.3));
+        // 長短期判定: δ1 付きは長期、δ3 付き地震は短期。
+        assert!(!is_short_term_combo("G + P + 0.65S"));
+        assert!(is_short_term_combo("G + P + 0.4S + Kx"));
+        assert!(is_short_term_combo("G + P + S"));
+    }
+
+    #[test]
     fn test_standard_combinations_no_heavy_snow_no_wind() {
         let input = ComboInput {
             dl: LoadCaseId(1),
@@ -364,6 +455,7 @@ mod tests {
             wind_y: None,
             snow: Some(LoadCaseId(5)),
             heavy_snow_zone: false,
+            snow_factors: None,
         };
         let combos = standard_combinations(&input);
         // G+P(1) + G+P+S(1) + Kx系2 + Ky系2 = 6（多雪でないので 0.7S・0.35S 系は無し）
@@ -384,6 +476,7 @@ mod tests {
             wind_y: None,
             snow: None,
             heavy_snow_zone: false,
+            snow_factors: None,
         };
         let combos = standard_combinations(&input);
         assert_eq!(combos.len(), 1);

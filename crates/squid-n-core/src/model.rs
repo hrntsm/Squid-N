@@ -286,6 +286,12 @@ pub struct Material {
     /// `None` の場合、ファイバ材料は弾性（降伏しない）として扱う（P5 非線形）。
     #[serde(default)]
     pub fy: Option<f64>,
+    /// コンクリートの種類（普通/軽量1種/軽量2種）。RESP-D マニュアル「柱梁自重」の
+    /// 単位体積重量表・「04 断面検定」の許容応力度低減（軽量コンクリートは
+    /// 普通コンクリートの 0.9 倍）に用いる。鋼材では意味を持たない（既定 Normal）。
+    /// 旧スキーマ（フィールド無し）は Normal 扱い。
+    #[serde(default)]
+    pub concrete_class: crate::units::ConcreteClass,
 }
 
 impl Material {
@@ -697,6 +703,57 @@ impl WallAttr {
     }
 }
 
+/// S 造部材の断面検定用属性（RESP-D マニュアル 04 断面検定「鉄骨の断面検定に
+/// おける断面性能」）。継手部・スカラップによる断面欠損と横座屈長さの指定に用いる。
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SteelDesignAttr {
+    pub elem: ElemId,
+    /// 継手部のフランジ欠損率 βf [%]（0=欠損なし）
+    #[serde(default)]
+    pub joint_flange_loss: f64,
+    /// 継手部のウェブ欠損率 βw [%]
+    #[serde(default)]
+    pub joint_web_loss: f64,
+    /// スカラップによるウェブ欠損率 αw [%]（端部断面に適用）
+    #[serde(default)]
+    pub scallop_web_loss: f64,
+    /// 横座屈長さの直接入力 (始端, 中央, 終端) [mm]（None=自動）
+    #[serde(default)]
+    pub lb_direct: Option<(f64, f64, f64)>,
+    /// 等間隔横補剛の本数（lb 自動計算: lb = L/(n+1)）
+    #[serde(default)]
+    pub lateral_brace_count: Option<u32>,
+}
+
+/// 座屈補剛ブレース（BRB）の断面検定用属性。許容値はメーカー資料による入力値
+/// （RESP-D マニュアル「JFEシビル二重鋼管座屈補剛ブレース／日鉄アンボンド
+/// ブレースの断面検定」）。
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BrbAttr {
+    pub elem: ElemId,
+    /// 短期許容軸力 [N]（メーカー値）
+    pub allowable_axial_short: f64,
+    /// 限界座屈長さ [mm]（メーカー値）
+    pub critical_length: f64,
+    /// 座屈長さ低減距離 L1 [mm]（= (L1上+L1下)/2）
+    #[serde(default)]
+    pub length_reduction: f64,
+}
+
+/// PCa（プレキャスト）梁の水平接合面検定用属性（RESP-D マニュアル 04）。
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PcaBeamAttr {
+    pub elem: ElemId,
+    /// 水平接合面の摩擦係数 μ
+    pub mu: f64,
+    /// 接合面を横切る補強筋の体積比合計 p′w（あばら筋+接合面補強筋）
+    pub pw_joint: f64,
+    /// 補強筋の降伏強度 σy [N/mm²]
+    pub sigma_y_joint: f64,
+    /// 接合面の位置: 断面上端からの距離 [mm]（例: 後打ちスラブ厚）
+    pub joint_depth_from_top: f64,
+}
+
 /// フレーム外雑壁の荷重伝達タイプ（RESP-D マニュアル「フレーム外雑壁」）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MiscWallTransfer {
@@ -805,6 +862,24 @@ pub struct Model {
     /// 応力解析の計算条件（RESP-D 計算編03「応力解析」。長期軸力を負担させない部材の指定）。
     #[serde(default)]
     pub stress_cfg: StressAnalysisCfg,
+    /// S 造部材の断面検定用属性（継手部・スカラップ欠損、横座屈長さ指定。
+    /// RESP-D マニュアル 04 断面検定）。
+    #[serde(default)]
+    pub steel_design_attrs: Vec<SteelDesignAttr>,
+    /// 座屈補剛ブレース（BRB）の断面検定用属性（メーカー許容値。
+    /// RESP-D マニュアル 04 断面検定）。
+    #[serde(default)]
+    pub brb_attrs: Vec<BrbAttr>,
+    /// PCa（プレキャスト）梁の水平接合面検定用属性（RESP-D マニュアル 04 断面検定）。
+    #[serde(default)]
+    pub pca_attrs: Vec<PcaBeamAttr>,
+    /// 一本部材の指定（RESP-D マニュアル 04 断面検定「採用応力 ■一本部材指定時の
+    /// 採用応力」）。各エントリは**軸方向に連続する梁要素の ID を並び順**で持ち、
+    /// 断面検定の採用応力（端部・中央モーメント、部材長、内法長、せん断スパン比
+    /// 代表値）をグループ 1 本の部材として評価する。要素の解析（剛性・内力）は
+    /// 分割部材のまま行い、検定の文脈だけを合成する。
+    #[serde(default)]
+    pub beam_groups: Vec<Vec<ElemId>>,
     #[serde(skip)]
     pub dof_map: crate::dof::DofMap,
 }
@@ -981,6 +1056,10 @@ impl Model {
             && self.wall_attrs == other.wall_attrs
             && self.misc_walls == other.misc_walls
             && self.stress_cfg == other.stress_cfg
+            && self.steel_design_attrs == other.steel_design_attrs
+            && self.brb_attrs == other.brb_attrs
+            && self.pca_attrs == other.pca_attrs
+            && self.beam_groups == other.beam_groups
     }
 }
 
@@ -1081,6 +1160,7 @@ mod tests {
     #[test]
     fn test_shear_modulus_explicit() {
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "Test".to_string(),
             young: 205000.0,
@@ -1096,6 +1176,7 @@ mod tests {
     #[test]
     fn test_shear_modulus_derived() {
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "Test".to_string(),
             young: 205000.0,
@@ -1107,6 +1188,35 @@ mod tests {
         };
         let expected = 205000.0 / (2.0 * (1.0 + 0.3));
         assert!((mat.shear_modulus() - expected).abs() < 1e-9);
+    }
+
+    /// 旧スキーマ（concrete_class フィールドが無い JSON）の Material が
+    /// 読み込めること（serde 後方互換。既定は Normal）。
+    #[test]
+    fn test_material_serde_backward_compat_concrete_class() {
+        let json = r#"{
+            "id": 0,
+            "name": "FC24",
+            "young": 23000.0,
+            "poisson": 0.2,
+            "density": 2.4e-9,
+            "fc": 24.0
+        }"#;
+        let mat: Material = serde_json::from_str(json).unwrap();
+        assert_eq!(mat.concrete_class, crate::units::ConcreteClass::Normal);
+        assert_eq!(mat.fc, Some(24.0));
+
+        // ラウンドトリップ（Lightweight1 が保存・復元できること）。
+        let mat2 = Material {
+            concrete_class: crate::units::ConcreteClass::Lightweight1,
+            ..mat
+        };
+        let s = serde_json::to_string(&mat2).unwrap();
+        let back: Material = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            back.concrete_class,
+            crate::units::ConcreteClass::Lightweight1
+        );
     }
 
     #[test]

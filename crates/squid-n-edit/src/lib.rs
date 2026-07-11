@@ -999,6 +999,7 @@ impl EditCommand for AddMaterial {
     fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
         let new_id = MaterialId(model.materials.len() as u32);
         model.materials.push(squid_n_core::model::Material {
+            concrete_class: Default::default(),
             id: new_id,
             name: self.name.clone(),
             young: self.young,

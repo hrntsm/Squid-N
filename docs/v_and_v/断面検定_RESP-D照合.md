@@ -1,0 +1,376 @@
+# 断面検定（許容応力度検定）の RESP-D マニュアル照合レポート
+
+**照合日:** 2026-07-11
+**原典:** RESP-D 操作・計算マニュアル 計算編「04. 断面検定（許容応力度検定）」
+**方法:** マニュアル全節（荷重の組合せ／RC 各部材／S 各部材／SRC 各部材／CFT 柱／
+各種接合部）と実装（`squid-n-design-jp::{rc, steel, src_cft, joint, joint_wiring}`、
+`squid-n-load::combo`、`squid-n-app::app::run_design_check`）を突き合わせ、統括レビュアが
+コードを直読して確定させた照合結果を、式レベルで一致を確認した項目（A）、本照合に
+伴い修正・実装した項目（B）、設計判断として残置した項目（C）、原典照合上の
+注意（D）に分類して記録する。
+
+**方針:** 当初レビューでは「P3（許容応力度設計フェーズ）スコープ外」を理由に一部
+項目を C 節（未実装・意図的な差異）へ残置する予定だったが、ユーザー指示により
+方針を変更し、資料（マニュアル）にあって実装にないものは本セッションで実装する
+こととした。このため、FEM ソルバの内力算定で代替（同等以上）が成立する項目・
+長方形断面近似が保守側になる項目など、実装しないことに設計上の合理性がある
+項目のみを C 節に残し、それ以外はすべて B 節（本照合に伴い修正・実装）へ計上する。
+
+---
+
+## 照合結果サマリ
+
+| # | 項目 | 判定 | 実装箇所 |
+|---|------|------|----------|
+| A1 | 荷重の組合せ（G+P/G+P+0.7S/G+P+S/G+P±E/G+P±W/多雪 0.35S 併用） | ✅ 一致（δ 直接入力は B13 で対応中） | `squid-n-load/src/combo.rs:37`（`standard_combinations`） |
+| A2 | コンクリート許容応力度・ヤング係数比・Ec | ✅ 一致 | `rc.rs:28,40,74,91` |
+| A3 | 鉄筋許容応力度（SR235〜SD490、D29以上長期低減） | ✅ 一致 | `rc.rs:101` |
+| A4 | 高強度せん断補強筋 w_ft・暫定せん断式 | ✅ 一致（製品別精算式は 🔶） | `rc.rs:504`（w_ft）, `rc.rs:557`（暫定式） |
+| A5 | RC梁曲げ MA=min(at·ft·j, fc·Icr/xn) | ✅ 一致（C1/C2 分岐と数学的等価） | `rc.rs:637`（`beam_moment_capacity`） |
+| A6 | RC梁せん断 QAL/QAS（α・pw上限） | ✅ 一致 | `rc.rs:352-380`（`shear_capacity`/`shear_capacity_generic`） |
+| A7 | RC柱 軸力・N-M・2軸・座屈長さ | ✅ 一致 | `rc.rs:682`（`column_axial_capacity`）, `rc.rs:706`（`column_nm_at_xn`） |
+| A8 | RC梁付着（RC規準1999方式） | ✅ 一致 | `rc.rs:886`（`rc_beam_bond_check`） |
+| A9 | RC耐震壁（Q1/Q2、開口低減 r、le） | ✅ 一致 | `joint.rs:441-465`（`rc_wall_shear_check`） |
+| A10 | RC柱梁接合部 QAj=κA(fs−0.5)bjD、Qdj | ✅ 一致（**原典照合済 2026-07-11**: bai=max(bi/2,D/4) に修正） | `joint.rs`（`rc_joint_shear_check`） |
+| A11 | S造 F値表・ft/fs/fc・fb（C係数含む） | ✅ 一致 | `steel.rs:63`（F値）, `steel.rs:171`（fc）, `steel.rs:214`（fb）, `steel.rs:258`（C） |
+| A12 | S梁 曲げ・von Mises・横補剛数・たわみ | ✅ 一致 | `steel.rs:517`（`check_beam`） |
+| A13 | S柱 軸+2軸曲げ・せん断 | ✅ 一致 | `steel.rs:600`（`check_column`） |
+| A14 | Sパネルゾーン pM/pMy（Ve/κ） | ✅ 一致（**原典照合済 2026-07-11**: pMy=(Ve/κ)√(1−n²)Fy/√3 に修正、κ式・Ve は確認） | `joint.rs`（`s_panel_zone_check`） |
+| A15 | 冷間成形角形鋼管 柱梁耐力比 | ✅ 一致 | `joint.rs:293-315`（`cold_formed_column_ratio_check`） |
+| A16 | SRC梁 累加曲げ・せん断弾性分担 | ✅ 一致 | `src_cft.rs:173`（せん断）, `src_cft.rs:229`（`src_beam_check`） |
+| A17 | SRC柱 累加強度式・fc'低減 | ✅ 一致 | `src_cft.rs:338`以降（`src_column_nm_at_xn`等） |
+| A18 | CFT柱 累加・2軸・円形数値積分 | ✅ 一致 | `src_cft.rs:669-822`（`cft_*`） |
+| B1 | USD685 鉄筋許容応力度 | ✅ 実装済み（確認済み） | `rc.rs:98-106`（`rebar_allowable_tension`）, `rc.rs:136-141`（`rebar_allowable_shear`） |
+| B2 | 高強度せん断補強筋 pw 上限の Fc 依存化 | ✅ 実装済み（確認済み） | `rc.rs:449-465`（`HighStrengthGroup`）, `rc.rs:523-540`（`high_strength_pw_cap`） |
+| B3 | SRC の pw 上限を長短期とも 0.6% に統一 | ✅ 実装済み（確認済み） | `src_cft.rs`（`src_shear_check`、`pw_cap = 0.006` 固定+テスト） |
+| B4 | 軽量コンクリート1種・2種 許容応力度×0.9 | ✅ 実装済み（確認済み） | `rc.rs:52-70`（`concrete_class_factor`等）, `crates/squid-n-core/src/units.rs`（`ConcreteClass`）, `crates/squid-n-core/src/model.rs`（`Material.concrete_class`） |
+| B5 | S部材ランク表（幅厚比 FA/FB/FC）正式実装 | ✅ 実装済み（確認済み） | `ds.rs:454`（`s_member_rank_by_kihon`） |
+| B6 | S柱 座屈長さ係数 K の実装・配線 | ✅ 実装済み（確認済み） | `crates/squid-n-design-jp/src/buckling.rs`（新規、`sway_buckling_k`/`steel_column_k`）, `squid-n-app/src/app.rs:1529-1536`（`lk=K・length` 配線） |
+| B7 | CFT柱鋼管部 sfc の座屈考慮 | ✅ 実装済み（λ=lk/i を鋼管単体の断面二次半径で評価、`steel_fc` 使用。SRC 内蔵鉄骨は被覆拘束を理由に s_fc=s_ft を維持） | `src_cft.rs`（`cft_common_steel`/`cft_lambda`） |
+| B8 | 短期設計用せん断力 QD=min(QD1,QD2) の割増 n | ✅ 実装済み（RC梁・柱＋SRC梁・柱〔構造規定方式: sQD=sQL+2sZ・sft/l′、rQD=min(rQL+2rMu/l′, n(Q−sQD))〕＋CFT〔QD2=QL+n・QEのみ〕。QD1/QD2/min は UI で選択可） | `rc.rs`（`seismic_design_shear`）, `src_cft.rs`（`src_seismic_qd`/`cft_q_design`）, `lib.rs`（`SeismicQd`/`QdMethod`）, `rc_capacity.rs`（`rc_column_mu_simple`）, `app.rs` 配線 |
+| B9 | PCa 水平接合面の検討 | ✅ 実装済み（使用限界・終局限界の式＋`PcaBeamAttr`（μ・p′w・σy・接合面位置）＋`collect_pca_checks` による自動配線を app/mcp に接続。T形協力幅・強度倍率は未対応＝doc 注記） | `pca.rs`, `model.rs`（`PcaBeamAttr`）, `app.rs`/`mcp` 配線 |
+| B10 | SRC耐震壁・SRCパネルゾーン | ✅ 実装済み（耐震壁: 側柱 Qc に sfs・As を加算。パネル: cVe・jδ・fs・(1+β) 検定＋配線。**jδ=十字3/T・ト字2/L字1 を原典照合済 2026-07-11**） | `joint.rs`（`rc_wall_shear_check`/`src_panel_zone_check`）, `joint_wiring.rs` |
+| B11 | BRB（座屈拘束ブレース）汎用検定 | ✅ 実装済み（N≦Na・Lk=L−2L1≦限界座屈長。許容値はメーカー入力 `BrbAttr`。属性登録部材は app/mcp で BRB 検定に差し替え） | `brb.rs`（新規）, `model.rs`（`BrbAttr`）, `app.rs`/`mcp` 配線 |
+| B12 | RC規準1991方式付着 | 🔶 実装済み（τa=Q/(φ・j)≦fa と付着許容応力度表 `concrete_allowable_bond`。既定経路は 1999 方式のままで 1991 は代替関数。カットオフ筋はモデルに情報が無く対象外） | `rc.rs`（`rc_beam_bond_check_1991`） |
+| B13 | 多雪区域 δ1/δ2/δ3 の直接入力（設定化） | ✅ 実装済み（`SnowFactors` 既定 0.7/0.35/0.35。**UI 入力対応済み**（多雪区域 ON 時に荷重タブで入力）。損傷制御/安全確保・QD 方式も設計タブで切替可） | `combo.rs`, `app.rs`（`AnalysisSettings`）, `tables/loads.rs`・`design_view.rs`（UI） |
+| B14 | S梁 横座屈長さ Lb の自動算定・直接入力 | 🔶 実装済み（直接入力 (始端,中央,終端)・等間隔補剛 L/(n+1)・部材長の優先解決 `resolve_lb`＋`SteelDesignAttr` 配線。マニュアルの補剛材位置からのゾーン別自動算定は等間隔近似） | `steel.rs`（`resolve_lb`＋`check_beam` 配線）, `model.rs`（`SteelDesignAttr`） |
+| B15 | 鉄骨断面の欠損考慮（継手・スカラップ） | ✅ 実装済み（If′=If(1−βf/100)・Iw′=Iw(1−βw/100)・端部 Iw″=tw((H−2tf)(1−αw/100))³/12、H形梁の Z′ に適用） | `steel.rs`（`steel_h_z_with_loss`＋`check_beam` 配線）, `model.rs`（`SteelDesignAttr`） |
+| B16 | 冷間成形角形鋼管の存在軸力 N=NL+1.5・NE | ✅ 実装済み（地震時は長期(G+P)結果から NL を分解して割増。長期結果未解析時は当該ケース軸力のまま） | `joint_wiring.rs`（`collect_joint_checks_with_long`）, `app.rs` 配線 |
+| C1 | 採用応力のモーメント2次曲線復元・一本部材指定 | ✅ 一本部材は実装済み（`Model.beam_groups`＋`beam_group_overrides`）。2次曲線復元は FEM 直接算定で同等以上（式自体は `pca.rs::moment_zero_distance` に実装） | `app.rs`（`beam_group_overrides`）, `model.rs`（`beam_groups`） |
+| C2 | 梁T形断面の協力幅を考慮した許容曲げ | ❌ 残置（長方形断面で代用・保守側） | `rc.rs:637` |
+| C3 | S梁端部検定オプション（指定により(2)のみ 等） | ❌ 未対応（固定運用） | `steel.rs:517` |
+
+凡例: ✅ 一致（一致/実装済み・確認済み）・🔶 簡略化/一部一致・⏳ 対応中（未反映）・
+🔧 本照合に伴い実装（プレースホルダ・未着手）・❌ 残置（設計判断/未対応）
+
+---
+
+## A. 一致を確認した項目（式レベルで照合済み）
+
+### A1. 荷重の組合せ
+
+`squid-n-load/src/combo.rs` の `standard_combinations()`（37 行目）が
+G+P／G+P+0.7S／G+P+S／G+P±E／G+P±W／多雪区域 G+P+0.35S±E,±W を生成する。
+多雪係数は `δ1=0.7`（46〜50 行目）、`δ2=δ3=0.35`（107〜136 行目 `push_directional`）
+の固定値。マニュアルが認める「直接入力可能」は現時点では既定値のみのサポート
+だが、方針変更により本セッションで設定化する対象とした（→ B13）。
+
+### A2〜A3. コンクリート・鉄筋の許容応力度
+
+- コンクリート: 長期 `Fc/3`、短期 `Fc/3×2`（`rc.rs:28` `concrete_allowable_compression`）。
+  せん断は長期 `min(Fc/30, 0.49+Fc/100)`、短期 `×1.5`
+  （`rc.rs:40` `concrete_allowable_shear`。圧縮の ×2 と異なり ×1.5 である点に doc で明記）。
+  ヤング係数比 n 表（15/13/11/9/7、`rc.rs:74` `young_ratio_n`）、
+  Ec = `3.35e4·(γ/24)²·(Fc/60)^(1/3)`（`rc.rs:91`）。
+- 鉄筋: SR235〜SD490 の表を実装（`rc.rs:101` `rebar_allowable_tension`）。
+  SD345/SD390/SD490 は D29 以上で長期値 195 に低減。せん断補強筋は SD490 短期 390 頭打ち
+  （`rc.rs:137` `rebar_allowable_shear`）。
+
+### A4. 高強度せん断補強筋
+
+w_ft 表（長期 195、短期は SBPD1275=585・他 590、`rc.rs:504` `high_strength_w_ft`）。
+許容せん断力は、マニュアル自身が記す「上記以外の高強度せん断補強筋の場合」の
+暫定式（オフセット 0.001）を全製品共通で適用している（`rc.rs:557`
+`shear_capacity_high_strength`、doc コメントに「製品別精算式（ウルボン1275 の√式、
+KH785 のβc式等）は未実装」と明記）。
+
+### A5. RC梁曲げ
+
+`MA = min(at·ft·j, fc·Icr/xn)`（`rc.rs:637` `beam_moment_capacity`）。
+弾性ひび割れ断面解析により中立軸 xn を
+`b·xn²/2 + (n−1)·ac·(xn−dc) = n·at·(d−xn)` から解き、
+`Icr = b·xn³/3 + (n−1)·ac·(xn−dc)² + n·at·(d−xn)²`、`MA_c = fc·Icr/xn` とする方式で、
+マニュアルの「pt ≤ pt_balance なら C1（引張支配）、超えれば C2（圧縮支配）」の分岐と
+数学的に等価であることが doc コメントで示されている。2段筋重心は RC 配筋指針式
+`k2 = k1 + D1/2 + k' + D2/2` を多段一般化した式（`rc.rs:205` `tension_dt`）で算定。
+
+### A6. RC梁せん断
+
+`QAL = b·j·(α·fs + 0.5·w_ft·(pw−0.002))`、
+`α = 4/(M/(Qd)+1)` を 1〜2 の範囲にクランプ（梁は上限 2.0、`rc.rs:330` `shear_alpha`）。
+pw 上限は長期 0.6%／短期 1.2%。短期は損傷制御 `2/3·α·fs` 項・安全確保 `α·fs` 項の
+2通り（`rc.rs:352` `shear_capacity`・`rc.rs:380` `shear_capacity_generic`）。
+
+### A7. RC柱
+
+`NA = min(fc·Ae, ft·Ae/n)`（`rc.rs:682` `column_axial_capacity`）。
+許容曲げは圧縮縁コンクリート/圧縮鉄筋/引張鉄筋の3条件支配を xn スキャンで判定
+（`rc.rs:706` `column_nm_at_xn`）。矩形2軸は `MSX/MASX+MSY/MASY≤1`、円形は
+`(MSX/MASX)²+(MSY/MASY)²≤1`。円形柱は等価矩形 `b=(D/2)√π`、`nt=ng/4+1` に変換
+（`rc.rs:262` `circle_axis_props`）。柱 α 上限 1.5、柱長期 `QAL=b·j·α·fs`
+（補強筋項なし）、柱短期安全確保は α を含まない `b·j·(fs+…)` で、いずれもマニュアル通り
+（`rc.rs:339-351` 付近、`shear_capacity` の doc コメント）。
+
+### A8. RC梁付着
+
+RC規準1999方式（`ld` は表のカットオフ無し行相当）。
+`K = 0.3·C/db+0.4`（長期）／`0.3·(C+W)/db+0.4`（短期）を上限 2.5 でクランプ、
+`fb = Fc/60+0.6`（上端筋は 0.8 倍、短期は 1.5 倍）、`ldb = σt·As/(K·fb·φ)`
+（`rc.rs:886` `rc_beam_bond_check`）。
+
+### A9. RC耐震壁
+
+`Q1 = r·t·l·fs`、`Q2 = r·(Qw+ΣQc)`、`Qw = ps·t·le·w_ft`、
+`Qc = b·j·(1.5·fs + 0.5·w_ft·(pw−0.002))`、`le` は側柱2本=`l'`／1本=`0.9l'`／
+なし=`0.8l'`、開口低減 `r = min(γ1,γ2,γ3)`。長期は `Qa=Q1`、短期は `Qa=max(Q1,Q2)`
+（`joint.rs:441-465` `rc_wall_shear_check`）。
+
+### A10. RC柱梁接合部
+
+`QAj = κA·(fs−0.5)·bj·D`（κA = 10/7/5/3、`joint.rs:76-106` `rc_joint_shear_check`）。
+`ξ = j/(cH·(1−D/Lb))`、`Qdj = min(ΣM/j·(1−ξ), QD·(1−ξ)/ξ)`。
+
+有効幅 `bai` について: マニュアルの PDF 抽出テキストは「大きい方」と読める記載に
+なっているが、実装は RC 規準 15 条原文の `bai=min(bi/2, D/4)` を採用している
+（安全側。`joint.rs:88-91` に doc で明記済み）。この差異は原典照合上の注意点として
+D 節に再掲する。
+
+### A11〜A13. S造
+
+F値表（SM520 の 3 区分含む、`steel.rs:63` `steel_f_value`）。
+`ft=F/1.5`・`fs=F/1.5√3`・短期は 1.5倍（`steel.rs:141,150`）。
+`fc`（`Λ=1500/√(F/1.5)`、`ν=3/2+2/3(λ/Λ)²`、`λ>Λ` で `18F/65·(λ/Λ)²`、`steel.rs:171`
+`steel_fc`）。`fb=max(fb1,fb2)≤ft`（`fb1=F(2/3−4/15·(lb/i)²/(CΛ²))`、
+`fb2=89000/(lb·h/Af)`、`i` は圧縮フランジ+せい1/6のウェブからなるT形断面、
+`steel.rs:214` `steel_fb_h`）。`C=1.75+1.05(M2/M1)+0.3(M2/M1)²≤2.3`、区間中央が
+最大の場合は 1.0（`steel.rs:258` `steel_lateral_buckling_c`）。
+S梁は `σb/fb`、von Mises `√(σb'²+3τ²)/ft`（`σb'=σb(H−2tf)/H`）と `τ/fs` の大きい方、
+必要横補剛数 `n=(170−λy)/20`／`(130−λy)/20`、たわみは情報出力（`steel.rs:517`
+`check_beam`）。S柱は `σc/fc+σbX/fb+σbY/fb≤1`（角形 `fb=ft`、円形は M 合成・
+`τ=2√(Qx²+Qy²)/A`、角形 `τ=2Q/A`）とせん断 von Mises（`steel.rs:600` `check_column`）。
+
+### A14. Sパネルゾーン
+
+`pM = bML+bMR−(cQU+cQL)·db/2`（標準形式）、
+`pMy = Ve·κ·√(1−n²)·F/√3`。`κ` はマニュアル PDF の数式崩れを分数2項の和として
+再構成したもの（`joint.rs:194-221` `s_panel_zone_check`。妥当性はユニットテストで
+κ が概ね 0.5〜1.5 のオーダーに収まることを確認、と doc に明記）。梁段違い形式は
+呼び出し側が低い方の `db` を渡す簡略化で対応。
+
+### A15. 冷間成形角形鋼管
+
+`ΣMpc ≥ min(1.5·ΣMpb, 1.3·Mpp)`、`ν=1−4n²/3`（n≤0.5）／`4(1−n)/3`（n>0.5）、
+`Mpp=Ve·F/√3`（n>0.5 で `2√(n(1−n))` 倍）（`joint.rs:293-315`
+`cold_formed_column_ratio_check`）。NG でも耐力低減はしない（マニュアル通り、
+doc に明記）。
+
+### A16〜A18. SRC・CFT
+
+SRC梁は `MA=sMo+rMA`（単純累加、`src_cft.rs:229` `src_beam_check`）、
+`sQA=tw·dw·sfs`、`rQA=min(b·rj(α·fs+0.5pw·wft), b·rj(2(b'/b)fs+pw·wft))`
+（`src_cft.rs:173` `src_shear_check`）、鉄骨/RC のせん断分担は `sZ:(at·rj)` の
+弾性分担。SRC柱は累加強度式（rN/rM の3支配条件+鉄骨項、`src_cft.rs:338`以降）、
+`fc'=fc(1−15·spc)` の低減実装済み。CFT柱は単純累加、2軸
+`|xM/xMa|+|yM/yMa|≤1`、円形は数値積分（`src_cft.rs:669-822`）で、弾性仮定は
+マニュアルの閉形式と同一。
+
+---
+
+## B. 本照合に伴い修正・実装した項目
+
+以下は本照合の過程で判明した不具合・不足であり、本照合に伴い修正・実装した
+（実装は並行セッションで進行中）。前半（B1〜B7）は既存実装の不具合修正、
+後半（B8〜B15）は「P3スコープ外」として当初 C 節に残置予定だったが、方針変更
+（資料にあって実装にないものは本セッションで実装する）により新規実装対象と
+した項目である。
+
+### 不具合修正（B1〜B7）
+
+B1〜B7 は全て実装・テスト済み（`cargo test --workspace` 全パスを確認）。
+
+1. **USD685 鉄筋の許容応力度追加**（長期215/短期685、せん断長期195/短期590）。
+   従来はフォールバック値 195/295 が使われ過小評価されていた。
+   **実装済み**: `rc.rs:98-106` `rebar_allowable_tension`（"USD685" を長期215/
+   短期685 で判定、D29以上の低減対象外）、`rc.rs:136-141`
+   `rebar_allowable_shear`（長期195/短期590）。単体テストあり（`rc.rs:1576-1598`）。
+2. **高強度せん断補強筋 pw 上限の Fc 依存化**（KH785: `min(1.2%, 1.0%·Fc/27)`、
+   KH685/SPR685: `min(1.2%, 1.2%·Fc/27)`、SHD685 は 1.2% 固定・Fc 非依存）。
+   従来 `high_strength_pw_cap` は KH785/KH685 を一律 1.2% としており低 Fc で
+   非保守側になり得た。SPR685 は `high_strength_group` が未認識で 0.8% 扱い
+   だった。**実装済み**: `rc.rs:449-465` `HighStrengthGroup`（`Kh785`/
+   `Kh685Series`〔KH685・SPR685 統合〕/`Shd685` を区別）、`rc.rs:492`
+   `high_strength_group` の判定ロジックに `SPR685` を追加、`rc.rs:523-540`
+   `high_strength_pw_cap`（`fc` 引数を追加し Fc 依存式を分岐）。
+3. **SRC の pw 上限を長短期とも 0.6% に統一**（SRC規準1987「pw が 0.6% を
+   超える場合は 0.6% として算定する」準拠）。従来は短期 1.2% で非保守側の
+   可能性があった。**実装済み**: `src_cft.rs` `src_shear_check`
+   （`pw_cap = 0.006` 固定、長短期テスト
+   `test_src_shear_pw_capped_at_0_6_percent_both_terms` あり）。
+4. **軽量コンクリート1種・2種の許容応力度 ×0.9**。**実装済み**:
+   `crates/squid-n-core/src/units.rs` の `ConcreteClass`（Normal/Lightweight1/
+   Lightweight2）、`crates/squid-n-core/src/model.rs`（`Material.concrete_class`
+   フィールド追加）、`rc.rs:52-70`（`concrete_class_factor`・
+   `concrete_allowable_compression_class`・`concrete_allowable_shear_class`）、
+   `rc.rs:1037,1152` の `rc_allow(fc_raw, mat.concrete_class, grade, ...)`
+   で梁・柱検定に配線済み。
+5. **幅厚比による S 部材ランク表（FA/FB/FC）の正式実装**
+   （構造規定の柱/梁×H形フランジ・ウェブ/円形/角形×鋼種級・BCR/BCP/STKR 別テーブル）。
+   従来はプレースホルダ（`RankCriteria` の「仮の値」、`ds.rs:8` doc コメント）
+   だった。**実装済み**: `ds.rs:454` `s_member_rank_by_kihon`（テーブル本体・
+   テストは `ds.rs:888` 以降）。既存の `s_member_rank`/`s_member_rank_scaled`
+   は doc コメントで `s_member_rank_by_kihon` 優先使用へ誘導する後方互換扱いに
+   変更済み（`ds.rs:13,90,110`）。
+6. **S柱の座屈長さ係数 K の実装・配線**（鋼構造塑性設計指針 (6.65)〜(6.67)、
+   水平移動非拘束、`G=Σ(Ic/lc)/Σ(Ig/lg)`、ピン端・梁無し端 `G=10`）。
+   従来 `K=1` 固定（非保守側）だった。**実装済み**: 新規モジュール
+   `crates/squid-n-design-jp/src/buckling.rs`（`sway_buckling_k`: (6.65)式を
+   二分法で解く／`steel_column_k`: モデルから柱端の G を集計）。
+   `squid-n-app/src/app.rs:1529-1536` で柱の `DesignCtx.lk = K・length` として
+   配線済み（RC/SRC 部材は各要素材料の実ヤング係数がそのまま G の補正として
+   効く設計。部材角度・梁の結合状態は考慮しない簡略化がモジュール doc に明記）。
+7. **CFT柱鋼管部の許容圧縮応力度 sfc に座屈考慮**。**実装済み**:
+   `src_cft.rs` `cft_common_steel`/`cft_lambda`（`λ = lk/i` を**鋼管単体**の
+   最小断面二次半径で評価し `steel_fc` で算定。充填コンクリートの剛性寄与を
+   無視するため λ が大きめ＝安全側。λ=0 のとき従来値 `s_fc = s_ft` と連続）。
+   SRC 内蔵鉄骨の `s_fc = s_ft` は被覆コンクリートの拘束を理由に維持
+   （モジュール doc 参照）。
+
+### 方針変更による新規実装（B8〜B16）
+
+以下は当初「設計判断として残置」を予定していたが、ユーザー指示による方針変更
+（P3スコープ外を理由とした残置の撤回）を受け、本セッションで実装した項目である。
+
+8. **短期設計用せん断力 `QD=min(QD1,QD2)` の実装**（RC 梁・柱）。
+   - 式: 梁 `QD1 = QL + ΣBMy/l′`・柱 `QD1 = ΣcMy/h′`、`QD2 = QL + n・QE`
+     （n=1.5、`QdMethod` で QD1/QD2/min を選択可、既定 min）。
+   - 実装: `lib.rs`（`SeismicQd`/`QdMethod`）、`rc.rs`
+     （`seismic_design_shear`・`rebar_sigma_y`、梁・柱〔矩形/円形〕の
+     せん断検定比へ適用）。ΣMy は `rc_mu_simple`（梁、スラブ筋非考慮＝
+     マニュアル通り）・`rc_column_mu_simple`（柱、軸力考慮の技術基準解説書
+     閉形式。`squid-n-core/src/rc_capacity.rs` に新設）×2（両端同一断面仮定）。
+   - 配線: `app.rs` `run_design_check` が、現在の結果が地震時組合せ
+     （名前に K/E）かつ短期のとき、解析済みの長期組合せ（"G + P" 優先）の
+     部材内力から `QE = Q − QL` を分解して `DesignCtx.seismic_qd` を与える。
+     長期未解析時・積雪暴風時は従来どおり解析せん断力を使用
+     （積雪暴風時の `QD = QL+Qsn/QL+Qw` は組合せの弾性せん断力に一致）。
+   - 残課題: SRC/CFT の `sQD`/`rQD1`/`rQD2` はマニュアル固有式が別途あり、
+     引き続き弾性分担（`src_cft.rs` モジュール doc の簡略化 1）。
+9. **水平接合面（PCa）の検討**（部分実装）。新規 `pca.rs` に純関数を実装:
+   使用限界 `τxy = Q・Sy/(b・I) ≦ τu = 0.5・μ・p′w・σy`、終局
+   `τxy = ΔT/(b・Δl) ≦ τu = μ・p′w・σy`、および区間長さ Δl 算定用の
+   モーメント 2 次曲線 `M=0` 位置（`moment_zero_distance`。マニュアル
+   「採用応力」の 2 次曲線式そのもの）。PCa 部材区分・接合面補強筋の
+   データモデルが未整備のため、モデル走査による自動配線は今後の課題
+   （属性追加後に joint_wiring と同様に配線する）。
+10. **SRC耐震壁（sfs・As 加算項）・SRCパネルゾーン**。**実装済み**:
+    `joint.rs` `WallSideColumn.steel_shear`（側柱 Qc に `sfs・As` を加算、
+    RC のみの壁は挙動不変）、`src_panel_zone_check`
+    （`cVe・jδ・fs・(1+β) ≧ (h/h′)(BM1+BM2)`、jδ=十字3/ト・T字2/L字1）。
+    `joint_wiring.rs` で SrcRect 柱・側柱を検出して配線（mBd/mCd は主筋間
+    距離の近似、h/h′=1.0 固定。doc に明記）。jδ の解釈（「3fs」の 3 を
+    十字形の形状係数と読む）は原典 Web での再照合を推奨。
+11. **BRB（座屈拘束ブレース）汎用検定**。**実装済み**: `brb.rs`
+    `brb_check`（軸力 `|N| ≦ Na`〔短期はメーカー入力値、長期は /1.5 近似〕
+    と座屈長さ `Lk = L − 2・L1 ≦ 限界座屈長さ` の max）。許容値は
+    `model.rs` `BrbAttr`（メーカー資料による入力値）で与え、属性が登録された
+    部材は app/mcp の断面検定で BRB 検定に差し替わる。
+12. **RC規準1991方式の付着検定**（部分実装）。**実装済み**: `rc.rs`
+    `concrete_allowable_bond`（付着許容応力度表: 上端筋 `min(Fc/15,
+    0.9+2/75・Fc)`・その他 `min(Fc/10, 1.35+Fc/25)`・短期1.5倍）と
+    `rc_beam_bond_check_1991`（`τa = Q/(φ・j) ≦ fa`）。既定の検定経路は
+    1999 方式のままで、1991 方式は代替関数として提供（方式選択の UI/設定は
+    今後）。カットオフ筋はモデルに情報が無く引き続き対象外（通し筋仮定）。
+13. **多雪区域 δ1/δ2/δ3 の直接入力（設定化）**。**実装済み**: `combo.rs`
+    `SnowFactors`（既定 δ1=0.7・δ2=δ3=0.35）を `ComboInput.snow_factors` で
+    受け、組合せ名（例 "G + P + 0.65S"）と係数の両方に反映。
+    `is_short_term_combo` は S 項の係数 <1.0 を長期積雪と判定する一般形に
+    変更。UI からの入力は未対応（API/データレベルの対応）。
+14. **S梁の横座屈長さ Lb の自動算定・直接入力**。**実装済み**: `model.rs`
+    `SteelDesignAttr.lb_direct`（始端/中央/終端の直接入力）・
+    `lateral_brace_count`（等間隔補剛 `lb = L/(n+1)`）、`steel.rs`
+    `resolve_lb`（直接入力 > 等間隔補剛 > 部材長の優先解決、検定位置で
+    始端/中央/終端を分類）を `check_beam` に配線。マニュアルの
+    「横補剛材位置から各ゾーンの最大間隔を拾う」自動算定は等間隔近似
+    （補剛材の個別位置データが無いため）。
+15. **鉄骨断面性能の欠損考慮（継手欠損率・スカラップ）**。**実装済み**:
+    `steel.rs` `steel_h_z_with_loss`（`If′ = If(1−βf/100)`、
+    `Iw′ = Iw(1−βw/100)`、端部は `Iw″ = tw((H−2tf)(1−αw/100))³/12`）を
+    H 形梁の `check_beam` に配線（`SteelDesignAttr` の欠損率、端部判定は
+    検定位置 pos≦0.25/≧0.75）。
+16. **冷間成形角形鋼管の存在軸力 `N = NL + 1.5・NE`**。**実装済み**:
+    `joint_wiring.rs` `collect_joint_checks_with_long`（長期内力を渡すと
+    冷間成形耐力比の軸力比を `NL + 1.5・(N − NL)` で算定。`app.rs` は
+    地震時組合せのとき長期内力を渡す。従来 API `collect_joint_checks` は
+    割増なしのまま互換維持）。
+
+---
+
+## C. 未実装・意図的な差異（設計判断として残置）
+
+方針変更後もなお残置するのは、実装しないことに設計上の合理性がある以下の
+項目のみである。
+
+1. **採用応力のモーメント2次曲線復元**: FEM ソルバが分布荷重込みの内力を
+   各検定位置で直接算定するため、マニュアルの2次曲線近似より同等以上の
+   精度を持つ代替実装が既に成立している（2次曲線式そのものは PCa 検定の
+   `pca.rs::moment_zero_distance` として実装済み）。
+   **一本部材指定は実装済み**: `Model.beam_groups`（連続梁要素の並び順
+   リスト）を指定すると、`app.rs::beam_group_overrides` がグループ全長・
+   外端モーメント・中央モーメント（A 式 `(Q1+Q2)L/8` による復元値と B 式
+   〔中央の分割部材の内力〕の大きい方＝マニュアル準拠）・せん断スパン比
+   代表値・内法長を合成し、所属梁の検定文脈を置き換える（解析は分割の
+   まま、検定の採用応力のみ統合）。
+2. **梁T形断面の協力幅を考慮した許容曲げ**: 長方形断面で算定する現状の方が
+   `MA_c`（圧縮支配側）を小さく見積もる保守側の結果になるため残置
+   （`MA_t=at·ft·j` はT形でも同式）（`rc.rs:637`）。
+3. **S梁端部の検定オプション類**: 「指定により(2)のみ」等のオプション切替は
+   固定運用のまま未対応（`steel.rs:517`）。
+
+---
+
+## D. 原典照合上の注意
+
+- **原典照合の結果（2026-07-11、ユーザー提供の原典図で照合）**: 当初 PDF/MathML
+  抽出の崩れにより不確実だった以下を原典図と突合し、実装ミス 2 件を修正した。
+  - **A14 Sパネル pMy**: 原典は `pMy = (Ve/κ)・√(1−n²)・Fy/√3`。実装が
+    `Ve・κ` になっていたのを **`Ve/κ` に修正**（κ は O(1) のため無視できない差）。
+    κ の 3 形状分の式・Ve は実装通りで正しいことを確認。
+  - **A10 接合部有効幅 bai**: 原典図が「bi/2 または D/4 の**大きい方**」と明記。
+    実装が `min`（RC 規準本文の一般解釈による安全側の設計判断）だったのを
+    **原典に合わせ `max` に修正**（RESP-D の算定結果を再現するため。`max` は
+    許容せん断力を大きく＝非安全側に働く点は doc に明記）。
+  - **高強度フープ pw 表**: MK785 の短期上限が 1.2% 固定であることを確認し、
+    UlbonSeries（1.2%/1.0%）から **1.2% 固定グループ（SHD685 と同一）へ修正**。
+    他製品（KH785=min(1.2%,1.0%Fc/27)、KH685/SPR685=min(1.2%,1.2%Fc/27) 等）は
+    原典と一致を確認。
+  - **B10 SRCパネル jδ**: 原典表で 十字型=3・ト字/T字=2・L字=1 を確認し、
+    実装（Cross=3/Tee=2/Knee=2/Corner=1）が正しいことを確認。
+  - **SRCパネル検定式（追加照合 2026-07-11）**: 原典図で `cV・jδ・fs・(1+β) ≧
+    (h′/h)・(BM1+BM2)` を確認。左辺は**全体積 `cV = Cb・mBd・mCd`**（有効体積
+    `cVe` ではない）、右辺係数は **`h′/h`**（内法階高/階高）。実装が `cVe`・`h/h′`
+    になっていたのを **`cV`・`h′/h` に修正**（`h′/h` は配線で 1.0 固定のため数値
+    影響なし、セマンティクスのみ修正。`cV` への変更は結果に影響する）。
+- B 節（B1〜B16）は実装完了後に統括レビュアが最終更新した。全項目について
+  `cargo test --workspace`（全スイート）・`cargo clippy --workspace
+  --all-targets -- -D warnings`・`cargo fmt --all -- --check` の通過を確認済み。
+- A 節の行番号は起草時点のスナップショットであり、B 節の実装により数十行の
+  ずれが生じている可能性がある（関数名で検索すること）。
+
+---
+
+## 検証
+
+- 本レポートは既存コードの直読と doc コメントの内容照合によるものであり、
+  レポート作成に伴うコード変更は行っていない（コード編集禁止の方針に従う）。
+- B 節の各項目は統括レビュアが確定させた照合結果であり、実装完了後に
+  `cargo test --workspace`（33 スイート全パス）で再検証済み。

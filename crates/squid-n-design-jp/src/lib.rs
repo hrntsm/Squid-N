@@ -4,8 +4,11 @@
 //! （許容応力度検定）」の計算方法に準拠する:
 //! - 鋼構造: `steel`（S梁・S柱・鉄骨ブレース、鋼構造設計規準 1973）
 //! - RC 造: `rc`（RC梁・RC柱、RC規準 1999/2010・構造規定）
+pub mod brb;
+pub mod buckling;
 pub mod joint;
 pub mod joint_wiring;
+pub mod pca;
 pub mod rc;
 pub mod src_cft;
 pub mod steel;
@@ -33,7 +36,42 @@ pub use rc::RcDesign;
 pub use src_cft::{CftDesign, SrcDesign};
 pub use steel::{steel_f_value, steel_f_value_prefix, SteelDesign};
 
-use squid_n_core::model::{Material, Section};
+use squid_n_core::model::{Material, Section, SteelDesignAttr};
+
+/// 地震時短期の設計用せん断力 QD の決定方法（RESP-D マニュアル 04 断面検定。
+/// ユーザー選択により QD1・QD2 のいずれか、または小さいほう）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum QdMethod {
+    /// QD1（部材両端の終局曲げモーメントによる値）のみ。
+    Qd1,
+    /// QD2 = QL + n・QE のみ。
+    Qd2,
+    /// min(QD1, QD2)（既定）。
+    #[default]
+    Min,
+}
+
+/// 地震時短期の設計用せん断力 QD = min(QD1, QD2) の算定に用いる文脈
+/// （RESP-D マニュアル 04 断面検定、RC 梁・柱）。
+///
+/// - 梁: `QD1 = QL + ΣBMy/l′`、柱: `QD1 = ΣcMy/h′`
+/// - `QD2 = QL + n・QE`（`QE` = 当該組合せのせん断力 − 長期せん断力）
+///
+/// `None`（長期・積雪時・暴風時、または長期結果が未解析）の場合は
+/// 解析せん断力をそのまま設計用せん断力とする。積雪時・暴風時の
+/// `QD = QL + Qsn／QL + Qw` は組合せ解析の弾性せん断力そのものに一致する
+/// ため、本文脈は地震時組合せでのみ与えることを想定する。
+pub struct SeismicQd {
+    /// 長期（G+P）の部材内力（評価位置, [N,Qy,Qz,Mx,My,Mz]）。
+    /// 当該部材の長期組合せ解析結果をそのまま渡す。
+    pub long_at: Vec<(f64, [f64; 6])>,
+    /// 水平荷重時せん断力の割増係数 n（柱は 1.5 以上。既定 1.5）。
+    pub n_factor: f64,
+    /// 内法長さ l′／h′（剛域控除後）[mm]。0 以下なら QD1 は省略する。
+    pub clear_length: f64,
+    /// QD の決定方法。
+    pub method: QdMethod,
+}
 
 /// ある評価位置 1 点の内力。
 ///
@@ -105,6 +143,12 @@ pub struct DesignCtx {
     /// たわみ検定の単純梁中央モーメント M0 の復元と、横座屈 C 係数の
     /// 「中央部の曲げモーメントが端部より大きい場合 C=1.0」判定に用いる。
     pub mid_moment_z: Option<f64>,
+    /// 地震時短期の設計用せん断力 QD = min(QD1, QD2) の算定文脈（RC）。
+    /// None の場合は解析せん断力をそのまま用いる（従来動作）。
+    pub seismic_qd: Option<SeismicQd>,
+    /// S 造部材の断面検定属性（継手・スカラップ欠損率、横座屈長さ入力）。
+    /// `Model::steel_design_attrs` 由来。None は欠損なし・lb 自動。
+    pub steel_attr: Option<SteelDesignAttr>,
 }
 
 impl Default for DesignCtx {
@@ -119,6 +163,8 @@ impl Default for DesignCtx {
             rc_damage_control: true,
             end_moments_z: None,
             mid_moment_z: None,
+            seismic_qd: None,
+            steel_attr: None,
         }
     }
 }

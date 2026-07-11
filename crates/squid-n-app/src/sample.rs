@@ -60,6 +60,7 @@ pub fn portal_frame() -> Model {
 
     // 材料: SN400B
     model.materials.push(Material {
+        concrete_class: Default::default(),
         id: MaterialId(0),
         name: "SN400B".into(),
         young: 205000.0,

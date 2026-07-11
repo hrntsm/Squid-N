@@ -841,6 +841,7 @@ mod tests {
 
         // 材料（共通）
         let mat = Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "steel".to_string(),
             young: 2.05e5,

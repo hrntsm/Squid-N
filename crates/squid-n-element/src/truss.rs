@@ -86,6 +86,7 @@ fn get_material(model: &Model, mid: Option<squid_n_core::ids::MaterialId>) -> Ma
         }
     })
     .unwrap_or_else(|| Material {
+        concrete_class: Default::default(),
         id: squid_n_core::ids::MaterialId(0),
         name: String::new(),
         young: 0.0,
@@ -410,6 +411,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "steel".to_string(),
                 young: 205000.0,

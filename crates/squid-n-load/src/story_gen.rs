@@ -747,6 +747,7 @@ mod tests {
             shape: None,
         });
         model.materials.push(Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "SN400B".into(),
             young: 205000.0,
@@ -1005,6 +1006,7 @@ mod tests {
             shape: None,
         });
         model.materials.push(Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "M".into(),
             young: 205000.0,
@@ -1287,6 +1289,7 @@ mod tests {
             shape: None,
         });
         model.materials.push(Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "Fc24".into(),
             young: 23000.0,
@@ -1497,6 +1500,7 @@ mod tests {
             shape: None,
         });
         model.materials.push(Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "Fc24".into(),
             young: 23000.0,
@@ -1666,6 +1670,7 @@ mod tests {
             shape: None,
         });
         model.materials.push(Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "S".into(),
             young: 205000.0,
@@ -1766,6 +1771,7 @@ mod tests {
             shape: None,
         });
         model.materials.push(Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "Fc24".into(),
             young: 23000.0,
@@ -1893,6 +1899,7 @@ mod tests {
             shape: None,
         });
         model.materials.push(Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "Fc24".into(),
             young: 23000.0,
@@ -2039,6 +2046,7 @@ mod tests {
             shape: None,
         });
         model.materials.push(Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "S".into(),
             young: 205000.0,

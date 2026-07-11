@@ -74,6 +74,7 @@ mod tests {
 
     fn mat_fy(fy: f64) -> Material {
         Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "S".into(),
             young: 205000.0,
@@ -87,6 +88,7 @@ mod tests {
 
     fn mat_no_fy() -> Material {
         Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "S".into(),
             young: 205000.0,

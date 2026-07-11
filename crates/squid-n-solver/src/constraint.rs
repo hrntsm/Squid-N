@@ -313,6 +313,7 @@ mod tests {
                 shape: None,
             }],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "mat".to_string(),
                 young: 1000.0,

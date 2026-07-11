@@ -534,6 +534,7 @@ mod tests {
             ],
             sections: vec![wall_shape.to_section(SectionId(0), "W150".into())],
             materials: vec![Material {
+                concrete_class: Default::default(),
                 id: MaterialId(0),
                 name: "FC24".into(),
                 young: 23000.0,

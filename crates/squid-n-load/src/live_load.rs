@@ -136,6 +136,7 @@ mod tests {
             shape: None,
         });
         model.materials.push(Material {
+            concrete_class: Default::default(),
             id: MaterialId(0),
             name: "Fc24".into(),
             young: 23000.0,
