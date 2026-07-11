@@ -13,24 +13,30 @@
 //!   （`NL + 1.5·NE` の割増は組合せ分離情報が無いため未対応）。
 //! - S 造パネルの梁段違い形式（せい差 150mm 以上）は判別せず標準形式で計算する。
 //! - 耐震壁は `SectionShape::RcWall` を割り当てた Wall 要素のみ検定する。
-//!   開口情報が無いため無開口（r=1）とし、設計用せん断力は等価梁化された
-//!   壁要素の内力の最大水平せん断成分を用いる（暫定）。
+//!   設計用せん断力は等価梁化された壁要素の内力の最大水平せん断成分を用いる
+//!   （暫定）。`Model::wall_attrs` に開口面積合計・三方スリットの有無が
+//!   登録されている場合は以下のとおり配線する。
+//!   - 個別開口の寸法データは無く合計面積のみのため、[`crate::wall_opening::equivalent_opening`]
+//!     で壁と同じ辺長比を持つ単一の等価開口 `(l0′,h0′)` に復元し、
+//!     [`crate::joint::rc_wall_shear_check`] の `RcWallInput.opening` へ
+//!     供給する（RC規準18条のせん断耐力検定用の低減係数 `r=min(γ1,γ2,γ3)`）。
+//!   - 一方、耐震壁として扱ってよいか（スリットの有無・壁厚・開口周比 r0）は
+//!     [`crate::wall_opening::is_seismic_wall`]（RESP-D マニュアル 02 剛性計算）
+//!     で判定し、`false` の壁は本検定自体をスキップする（耐震壁ではない
+//!     壁に18条検定を適用しない）。
 //!
-//!   ここで固定している `r=1` は [`crate::joint::rc_wall_shear_check`]
-//!   （RC規準18条・耐震壁せん断耐力検定）が内部に持つ開口低減係数
-//!   `r=min(γ1,γ2,γ3)` 用のものであり、[`crate::wall_opening`]
-//!   （RESP-D マニュアル 02 剛性計算の `r=1−1.25・r0` や耐震壁判定・
-//!   複数開口の等価開口置換）とは準拠する規定も数式も異なる別物である。
-//!   壁要素の開口寸法を保持するデータモデルが無いため、いずれの経路も
-//!   実データを供給できない状態は同じだが、モデルに開口情報が追加された
-//!   際は本来別々に配線すべきで、一方の r をもう一方の計算に流用しては
-//!   ならない（数式が異なるため結果が変わる）。
+//!   [`crate::wall_opening`] の `r=1−1.25・r0` は剛性計算専用の低減率であり、
+//!   上記 18 条の `r=min(γ1,γ2,γ3)` とは準拠する規定も数式も異なる別物
+//!   である。02章の r0/r は耐震壁判定・等価開口の算定にのみ用い、18条の
+//!   γ式や `Q1,Q2` の計算に流用してはならない（数式が異なるため結果が
+//!   変わる）。
 
 use crate::joint::{
     box_zp, cold_formed_column_ratio_check, panel_mpp, rc_joint_shear_check, rc_wall_shear_check,
     s_panel_zone_check, ColdFormedInput, JointShape, PanelSection, RcJointInput, RcWallInput,
     WallSideColumn,
 };
+use crate::wall_opening::{equivalent_opening, is_seismic_wall, opening_ratio_r0, WallJudgeInput};
 use crate::{CheckResult, LoadTerm};
 use squid_n_core::ids::{ElemId, NodeId};
 use squid_n_core::model::{ElementData, ElementKind, Material, Model, Section};
@@ -182,7 +188,7 @@ pub fn collect_joint_checks(
         if fc <= 0.0 {
             continue;
         }
-        // 壁の平面寸法: 節点群の水平距離の最大 = l、鉛直 extent = h（未使用）。
+        // 壁の平面寸法: 節点群の水平距離の最大 = l、鉛直 extent = h。
         let coords: Vec<[f64; 3]> = elem
             .nodes
             .iter()
@@ -201,6 +207,36 @@ pub fn collect_joint_checks(
             }
         }
         if l < 1e-9 {
+            continue;
+        }
+        let h = coords.iter().map(|c| c[2]).fold(f64::MIN, f64::max)
+            - coords.iter().map(|c| c[2]).fold(f64::MAX, f64::min);
+
+        // 壁自重属性（開口面積合計・三方スリット）。未登録の壁は開口ゼロ・
+        // スリット無し（無開口の耐震壁）として扱う。
+        let attr = model.wall_attrs.iter().find(|w| w.elem == elem.id);
+        let opening_area = attr.map(|a| a.opening_area).unwrap_or(0.0);
+        let has_slit = attr.map(|a| a.three_side_slit).unwrap_or(false);
+
+        // 複数開口の寸法データが無く合計面積のみのため、壁と同じ辺長比を持つ
+        // 単一の等価開口 (l0',h0') に復元する（Σli・hi = opening_area を保存）。
+        // h・l ≤ 0（寸法不定）の場合は復元せず開口ゼロ扱いとする。
+        let (l0p, h0p) = if opening_area > 0.0 && h > 1e-9 && l > 1e-9 {
+            equivalent_opening(&[(opening_area / h, h)], l, h)
+        } else {
+            (0.0, 0.0)
+        };
+
+        // 耐震壁判定（RESP-D マニュアル 02 剛性計算）。スリットあり・壁厚
+        // <120mm・開口周比 r0>0.4 のいずれかに該当する壁は耐震壁として
+        // 扱わないため、RC規準18条の耐震壁せん断検定自体を対象外とする。
+        let r0 = opening_ratio_r0(h0p, l0p, h, l);
+        let judge = WallJudgeInput {
+            thickness,
+            r0,
+            has_slit,
+        };
+        if !is_seismic_wall(&judge) {
             continue;
         }
         // 側柱: 壁節点のうち 2 節点を両端に持つ鉛直部材。
@@ -250,10 +286,13 @@ pub fn collect_joint_checks(
             ps,
             w_ft: crate::rc::rebar_allowable_shear(&mat.name, term == LoadTerm::Long),
             side_columns,
-            // 開口寸法データモデルが未整備のため無開口として扱う（r=1・冒頭 doc 参照）。
-            // 本 r は RC規準18条のせん断耐力検定専用であり、`crate::wall_opening`
-            // （RESP-D 02 剛性計算の開口低減）とは別式のため流用しない。
-            opening: None,
+            // 等価開口 (l0',h0') を 18条のγ式（r=min(γ1,γ2,γ3)）へ供給する
+            // （冒頭 doc 参照。02章の r0/r とは別式のため流用しない）。
+            opening: if opening_area > 0.0 && h > 1e-9 && l > 1e-9 {
+                Some((l0p, h0p, h, l))
+            } else {
+                None
+            },
             q_design,
             long_term: term == LoadTerm::Long,
         };
@@ -512,4 +551,174 @@ pub fn collect_joint_checks(
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smallvec::SmallVec;
+    use squid_n_core::dof::Dof6Mask;
+    use squid_n_core::ids::{ElemId, MaterialId, NodeId, SectionId};
+    use squid_n_core::model::{
+        ElementData, EndCondition, ForceRegime, LocalAxis, Material, Node, RigidZone, Section,
+        WallAttr,
+    };
+    use squid_n_core::section_shape::SectionShape;
+
+    /// 矩形壁（4000×3000, t=180）1 枚のみのモデル。側柱なし。
+    /// `wall_attr` を指定すると `model.wall_attrs` に登録する。
+    fn wall_model(wall_attr: Option<WallAttr>) -> Model {
+        let mut nodes: Vec<Node> = Vec::new();
+        let coords = [
+            [0.0, 0.0, 0.0],
+            [4000.0, 0.0, 0.0],
+            [4000.0, 0.0, 3000.0],
+            [0.0, 0.0, 3000.0],
+        ];
+        for (i, c) in coords.iter().enumerate() {
+            nodes.push(Node {
+                id: NodeId(i as u32),
+                coord: *c,
+                restraint: if i < 2 {
+                    Dof6Mask::FIXED
+                } else {
+                    Dof6Mask::FREE
+                },
+                mass: None,
+                story: None,
+            });
+        }
+        let sections = vec![Section {
+            id: SectionId(0),
+            name: "wall".to_string(),
+            area: 0.0,
+            iy: 1.0,
+            iz: 1.0,
+            j: 1.0,
+            depth: 0.0,
+            width: 0.0,
+            as_y: 0.0,
+            as_z: 0.0,
+            panel_thickness: None,
+            thickness: Some(180.0),
+            shape: Some(SectionShape::RcWall {
+                thickness: 180.0,
+                ps: 0.006,
+            }),
+        }];
+        let materials = vec![Material {
+            id: MaterialId(0),
+            name: "SD345".to_string(),
+            young: 23000.0,
+            poisson: 0.2,
+            density: 2.4e-9,
+            shear: None,
+            fc: Some(24.0),
+            fy: None,
+        }];
+        let elements = vec![ElementData {
+            id: ElemId(0),
+            kind: ElementKind::Wall,
+            nodes: {
+                let mut v: SmallVec<[NodeId; 8]> = SmallVec::new();
+                v.push(NodeId(0));
+                v.push(NodeId(1));
+                v.push(NodeId(2));
+                v.push(NodeId(3));
+                v
+            },
+            section: Some(SectionId(0)),
+            material: Some(MaterialId(0)),
+            local_axis: LocalAxis {
+                ref_vector: [0.0, 0.0, 1.0],
+            },
+            end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+            force_regime: ForceRegime::Auto,
+            rigid_zone: RigidZone::default(),
+            plastic_zone: None,
+        }];
+        Model {
+            nodes,
+            elements,
+            sections,
+            materials,
+            wall_attrs: wall_attr.into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
+    /// 壁要素 ElemId(0) の耐震壁(RC)検定結果（無ければ None）。
+    fn wall_check_result(model: &Model, forces: ForcesAt<'_>) -> Option<CheckResult> {
+        let member_forces = vec![(ElemId(0), forces)];
+        collect_joint_checks(model, &member_forces, LoadTerm::Short)
+            .into_iter()
+            .find(|(_, label, _)| label == "耐震壁(RC)")
+            .map(|(_, _, cr)| cr)
+    }
+
+    /// 開口あり（`wall_attrs` に `opening_area>0` を登録）の壁は、無開口より
+    /// 検定比が大きくなる（開口低減係数 r<1 で Qa が下がるため）。
+    #[test]
+    fn wall_with_opening_has_larger_ratio_than_without() {
+        let forces: [(f64, [f64; 6]); 1] = [(0.0, [0.0, 500_000.0, 0.0, 0.0, 0.0, 0.0])];
+
+        let model_no_attr = wall_model(None);
+        let res_no_opening =
+            wall_check_result(&model_no_attr, &forces).expect("無開口の壁は検定されるはず");
+
+        // opening_area = 0.1・l・h → r0 ≈ 0.316（<0.4 で耐震壁として扱われる）。
+        let model_with_opening = wall_model(Some(WallAttr {
+            elem: ElemId(0),
+            opening_area: 0.1 * 4000.0 * 3000.0,
+            opening_weight: 0.0,
+            three_side_slit: false,
+        }));
+        let res_opening = wall_check_result(&model_with_opening, &forces)
+            .expect("小開口は耐震壁のまま検定される");
+
+        assert!(
+            res_opening.ratio > res_no_opening.ratio,
+            "開口あり ratio={} <= 開口なし ratio={}",
+            res_opening.ratio,
+            res_no_opening.ratio
+        );
+    }
+
+    /// 三方スリットが指定された壁は耐震壁として扱われず、耐震壁検定自体が
+    /// 出力されない。
+    #[test]
+    fn wall_with_three_side_slit_is_not_checked() {
+        let forces: [(f64, [f64; 6]); 1] = [(0.0, [0.0, 500_000.0, 0.0, 0.0, 0.0, 0.0])];
+        let model = wall_model(Some(WallAttr {
+            elem: ElemId(0),
+            opening_area: 0.0,
+            opening_weight: 0.0,
+            three_side_slit: true,
+        }));
+        assert!(wall_check_result(&model, &forces).is_none());
+    }
+
+    /// 開口周比 r0>0.4 となる大開口の壁も耐震壁として扱われず出力されない。
+    #[test]
+    fn wall_with_large_opening_ratio_is_not_checked() {
+        let forces: [(f64, [f64; 6]); 1] = [(0.0, [0.0, 500_000.0, 0.0, 0.0, 0.0, 0.0])];
+        // opening_area = 0.5・l・h → r0 = sqrt(0.5) ≈ 0.707 > 0.4。
+        let model = wall_model(Some(WallAttr {
+            elem: ElemId(0),
+            opening_area: 0.5 * 4000.0 * 3000.0,
+            opening_weight: 0.0,
+            three_side_slit: false,
+        }));
+        assert!(wall_check_result(&model, &forces).is_none());
+    }
+
+    /// `wall_attrs` に属性が無い壁（厚さ≥120mm）は、従来どおり無開口として
+    /// 耐震壁検定される。
+    #[test]
+    fn wall_without_attr_is_checked_as_no_opening() {
+        let forces: [(f64, [f64; 6]); 1] = [(0.0, [0.0, 500_000.0, 0.0, 0.0, 0.0, 0.0])];
+        let model = wall_model(None);
+        let res = wall_check_result(&model, &forces).expect("属性なしの壁も検定されるはず");
+        assert!(res.ratio > 0.0);
+    }
 }
