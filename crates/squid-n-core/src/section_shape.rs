@@ -139,6 +139,33 @@ pub fn concrete_young_modulus(fc: f64) -> f64 {
     3.35e4 * (GAMMA_CONCRETE / 24.0).powi(2) * (fc / 60.0).powf(1.0 / 3.0)
 }
 
+/// 耐震壁（壁板＋両側柱＝平面 I 形断面）のせん断形状係数
+/// （RESP-D 計算編 02「剛性計算」耐震壁の式）。
+///
+/// κ = 3(1+ξ)/(5·(1−ξ³(1−η))²)·[η + ξ(1−η)·((15/8)(1−ξ²)² − ξ⁴·η)]
+///
+/// ξ・η の定義は原典ページに明示がないため、
+/// ξ=壁板内法長さ/全長（側柱外面間）、η=壁厚/側柱幅 と仮定する
+/// （式の読み・記号定義とも specs/原典照合リスト.md に要照合として登録）。
+/// ξ=1（側柱なし＝矩形断面）で κ=1.2（=`KAPPA_RC`）に一致する。
+/// 退化（非有限・非正）時は矩形の 1.2 にフォールバックする。
+pub fn wall_shear_shape_factor(xi: f64, eta: f64) -> f64 {
+    let xi = xi.clamp(0.0, 1.0);
+    let eta = eta.clamp(1e-6, 1.0);
+    let denom = 5.0 * (1.0 - xi.powi(3) * (1.0 - eta)).powi(2);
+    if denom <= 1e-12 {
+        return KAPPA_RC;
+    }
+    let bracket = eta
+        + xi * (1.0 - eta) * ((15.0 / 8.0) * (1.0 - xi * xi).powi(2) - xi.powi(4) * eta);
+    let k = 3.0 * (1.0 + xi) / denom * bracket;
+    if k.is_finite() && k > 0.0 {
+        k
+    } else {
+        KAPPA_RC
+    }
+}
+
 /// SRC/CFT の複合換算断面性能（要素剛性用。RESP-D 計算編 02「剛性計算」）。
 ///
 /// いずれも要素に割り当てた材料（SRC はコンクリート、CFT は鋼管）を基準とした
@@ -1163,6 +1190,21 @@ mod tests {
             steel_flange_thick: 12.0,
             steel_grade: "SN400B".into(),
         }
+    }
+
+    #[test]
+    fn test_wall_shear_shape_factor_rectangle_limit() {
+        // ξ=1(側柱なし=矩形)は η によらず κ=1.2
+        for eta in [0.1, 0.5, 1.0] {
+            let k = wall_shear_shape_factor(1.0, eta);
+            assert!((k - KAPPA_RC).abs() < 1e-12, "eta={eta} k={k}");
+        }
+        // 側柱付き(ξ<1)は有限・正の値
+        let k = wall_shear_shape_factor(0.8, 0.3);
+        assert!(k.is_finite() && k > 0.0);
+        // 退化入力でも非有限値・負値は返さない
+        let k0 = wall_shear_shape_factor(0.0, 0.0);
+        assert!(k0.is_finite() && k0 > 0.0);
     }
 
     #[test]

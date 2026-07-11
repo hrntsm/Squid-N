@@ -6,11 +6,14 @@
 //! 伝達され、四隅節点の回転自由度には剛性を与えない（＝ピン）。
 //! 剛梁は実要素ではなく、この変換（剛域変換に相当）で表現する。
 //!
-//! 壁柱の断面性能（v1 の制約は doc 参照）:
-//! - 軸剛性: 壁板断面積 t·lw（鉄筋剛性の考慮は将来対応）
-//! - 曲げ剛性: 壁板断面の面内断面2次モーメント t·lw³/12（側柱のローカル I は不算入）
-//! - せん断剛性: 壁板断面 A/κ（κ=1.2。マニュアルの I 形断面形状係数と
-//!   側柱断面の算入は将来対応）に開口低減率 r を乗じる
+//! 壁柱の断面性能:
+//! - 軸剛性: 壁板断面積 t·lw に鉄筋剛性を考慮（壁筋比 ps を縦横共通とみなし
+//!   (1+(n−1)·ps) を乗じる近似。n=Es/Ec）
+//! - 曲げ剛性: 壁板断面の面内断面2次モーメント t·lw³/12（側柱のローカル I は
+//!   不算入）に同係数を乗じる
+//! - せん断剛性: (壁板断面＋側柱断面)/κ に開口低減率 r を乗じる。
+//!   κ は側柱がある場合 I 形断面の形状係数（`wall_shear_shape_factor`、
+//!   ξ・η の定義は要原典照合）、無い場合は矩形の 1.2
 //!
 //! 上下大梁の剛性倍率（既定 100 倍）は梁要素側（`beam.rs`）で扱う。
 //! 側柱の面内両端ピン化は未対応（方向別端部解放が必要。照合レポート参照）。
@@ -22,7 +25,7 @@ use smallvec::SmallVec;
 use squid_n_core::dof::{DofMap, DOF_PER_NODE};
 use squid_n_core::ids::NodeId;
 use squid_n_core::model::{ElementData, Model};
-use squid_n_core::section_shape::{SectionShape, KAPPA_RC};
+use squid_n_core::section_shape::{wall_shear_shape_factor, SectionShape, E_STEEL, KAPPA_RC};
 
 /// 耐震壁（壁エレメントモデル）。
 pub struct WallPanelElement {
@@ -99,19 +102,64 @@ impl WallPanelElement {
         // φ 項が NaN になるため微小値を下限とする。
         let r = crate::factory::wall_opening_reduction(data, model).max(1e-6);
 
+        // 鉄筋剛性の考慮（壁筋比 ps を縦横共通とみなす近似）: (1+(n−1)·ps)
+        let ps = match &sec.shape {
+            Some(SectionShape::RcWall { ps, .. }) => (*ps).max(0.0),
+            _ => 0.0,
+        };
+        let rebar_factor = if mat.fc.is_some() && mat.young > 0.0 && ps > 0.0 {
+            1.0 + (E_STEEL / mat.young - 1.0) * ps
+        } else {
+            1.0
+        };
+
+        // 側柱（壁の鉛直辺の 2 節点を両端に持つ鉛直 Beam 部材）を収集し、
+        // せん断断面への算入と I 形形状係数 κ の算定に用いる。
+        let edge_pairs = [[ids[b0], ids[ta]], [ids[b1], ids[tb]]];
+        let mut col_area_sum = 0.0;
+        let mut col_depth_sum = 0.0; // 沿壁方向せい（両側の和）
+        let mut col_width_max: f64 = 0.0;
+        for e in &model.elements {
+            if !matches!(e.kind, squid_n_core::model::ElementKind::Beam) || e.nodes.len() < 2 {
+                continue;
+            }
+            let (n0, n1) = (e.nodes[0], e.nodes[1]);
+            let is_edge = edge_pairs
+                .iter()
+                .any(|p| (p[0] == n0 && p[1] == n1) || (p[0] == n1 && p[1] == n0));
+            if !is_edge {
+                continue;
+            }
+            if let Some(cs) = e.section.and_then(|sid| model.sections.get(sid.index())) {
+                col_area_sum += cs.area;
+                col_depth_sum += cs.depth.max(cs.width);
+                col_width_max = col_width_max.max(cs.width.min(cs.depth).max(t));
+            }
+        }
+        // κ: 側柱があれば I 形断面の形状係数（ξ=内法長さ/外面間全長、η=t/側柱幅。
+        // 定義は要原典照合）、無ければ矩形の 1.2。
+        let kappa = if col_area_sum > 0.0 && col_width_max > 0.0 {
+            let l_total = lw + col_depth_sum / 2.0;
+            let l_clear = (lw - col_depth_sum / 2.0).max(0.0);
+            wall_shear_shape_factor(l_clear / l_total, (t / col_width_max).min(1.0))
+        } else {
+            KAPPA_RC
+        };
+
         let area = t * lw;
+        let as_gross = area + col_area_sum;
         let column = BeamElement {
             id: data.id,
             e: mat.young,
             g: mat.shear_modulus(),
-            a: area,
+            a: area * rebar_factor,
             a_mass: area,
             // 面内曲げ（局所 z 軸まわり）= t·lw³/12、面外 = lw·t³/12
             iy: lw * t.powi(3) / 12.0,
-            iz: t * lw.powi(3) / 12.0,
+            iz: t * lw.powi(3) / 12.0 * rebar_factor,
             j: lw * t.powi(3) / 3.0,
-            // 面内せん断（局所 y 方向）に開口低減 r を考慮
-            as_y: r * area / KAPPA_RC,
+            // 面内せん断（局所 y 方向）: (壁板+側柱)/κ に開口低減 r を考慮
+            as_y: r * as_gross / kappa,
             as_z: area / KAPPA_RC,
             length: h,
             density: mat.density,
@@ -478,6 +526,81 @@ mod tests {
             energy(&k_o, &u) < energy(&k_no, &u) * 0.999,
             "開口低減が面内せん断剛性に効いていない"
         );
+    }
+
+    /// 鉄筋剛性の考慮: a = t·lw·(1+(n−1)·ps)、n=Es/Ec。
+    #[test]
+    fn test_wall_panel_rebar_factor() {
+        let (model, data) = make_wall_model();
+        let wall = WallPanelElement::try_new(&data, &model).unwrap();
+        let n = squid_n_core::section_shape::E_STEEL / 23000.0;
+        let expected = 150.0 * 4000.0 * (1.0 + (n - 1.0) * 0.0025);
+        assert!((wall.column.a - expected).abs() < 1e-6);
+        // 質量用は幾何断面のまま
+        assert!((wall.column.a_mass - 150.0 * 4000.0).abs() < 1e-9);
+    }
+
+    /// 側柱があるとせん断断面に算入され、I 形の形状係数 κ が用いられる。
+    #[test]
+    fn test_wall_panel_side_columns_increase_shear_area() {
+        let (mut model, data) = make_wall_model();
+        let wall_plain = WallPanelElement::try_new(&data, &model).unwrap();
+
+        // 両側の鉛直辺(節点0-3・1-2)に 600×600 の側柱を追加
+        let col_shape = SectionShape::RcRect {
+            b: 600.0,
+            d: 600.0,
+            rebar: squid_n_core::section_shape::RcRebar {
+                main_x: squid_n_core::section_shape::BarSet {
+                    count: 8,
+                    dia: 22.0,
+                    layers: 1,
+                },
+                main_y: squid_n_core::section_shape::BarSet {
+                    count: 8,
+                    dia: 22.0,
+                    layers: 1,
+                },
+                cover: 50.0,
+                shear: squid_n_core::section_shape::ShearBar {
+                    dia: 10.0,
+                    pitch: 100.0,
+                    legs: 2,
+                    grade: None,
+                },
+            },
+        };
+        model
+            .sections
+            .push(col_shape.to_section(SectionId(1), "C600".into()));
+        for (eid, n0, n1) in [(1u32, 0u32, 3u32), (2, 1, 2)] {
+            model.elements.push(ElementData {
+                id: ElemId(eid),
+                kind: ElementKind::Beam,
+                nodes: smallvec::smallvec![NodeId(n0), NodeId(n1)],
+                section: Some(SectionId(1)),
+                material: Some(MaterialId(0)),
+                local_axis: LocalAxis {
+                    ref_vector: [1.0, 0.0, 0.0],
+                },
+                end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+                force_regime: ForceRegime::Auto,
+                rigid_zone: Default::default(),
+                plastic_zone: None,
+            });
+        }
+        let wall_cols = WallPanelElement::try_new(&data, &model).unwrap();
+        // (壁板+側柱2本)/κ(I形) > 壁板/1.2
+        assert!(
+            wall_cols.column.as_y > wall_plain.column.as_y,
+            "側柱算入で as_y が増えない: {} vs {}",
+            wall_cols.column.as_y,
+            wall_plain.column.as_y
+        );
+        let a_gross = 150.0 * 4000.0 + 2.0 * 360_000.0;
+        // κ = as_gross/as_y(逆算)が矩形の 1.2 と異なる(I形の値)
+        let kappa = a_gross / wall_cols.column.as_y;
+        assert!((kappa - 1.2).abs() > 1e-3, "κ が I 形になっていない: {kappa}");
     }
 
     #[test]
