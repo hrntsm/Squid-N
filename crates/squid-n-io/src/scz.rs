@@ -249,9 +249,7 @@ mod tests {
         write_zip_with_manifest(&path, &bad_manifest, &[0u8; 4], &settings_bytes);
 
         let result = load_scz(&path);
-        assert!(
-            matches!(result, Err(IoError::HashMismatch(ref name)) if name == "model.msgpack")
-        );
+        assert!(matches!(result, Err(IoError::HashMismatch(ref name)) if name == "model.msgpack"));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -371,9 +369,7 @@ mod tests {
         write_zip_with_manifest(&path, &manifest, &model_bytes, &settings_bytes);
 
         let result = load_scz(&path);
-        assert!(
-            matches!(result, Err(IoError::MissingEntry(ref name)) if name == "model.msgpack")
-        );
+        assert!(matches!(result, Err(IoError::MissingEntry(ref name)) if name == "model.msgpack"));
         let _ = std::fs::remove_file(&path);
     }
 
