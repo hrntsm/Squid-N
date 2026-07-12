@@ -586,6 +586,7 @@ impl App {
                             r.m_strong,
                             r.m_weak,
                             r.shear_strong,
+                            r.shear_weak,
                             r.rp,
                         ),
                     )

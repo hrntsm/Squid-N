@@ -80,6 +80,10 @@ pub struct MemberDemand {
     /// 設計用せん断力 Qm [N]（プッシュオーバー応答の強軸せん断。`Some` のとき
     /// `Qmu = 上限強度倍率·|Qm|` として両端ヒンジ略算（2·Mu/内法）を置き換える）。
     pub shear: Option<f64>,
+    /// 弱軸の設計用せん断力 Qmy [N]（プッシュオーバー応答の弱軸せん断。`Some` のとき
+    /// 2 軸せん断余裕度の弱軸需要 `Qmuy = 上限強度倍率·|Qmy|`（両端ヒンジ略算 2·Muy/内法
+    /// を置き換える）に用いる。2 軸せん断を検定しない場合は無視される）。
+    pub shear_weak: Option<f64>,
     /// 部材別のヒンジ回転角 Rp [rad]（プッシュオーバー終局時の部材変形角）。`Some`
     /// のとき ν・cotφ・μ・tanθ に用いる Rp を [`UltimateShearOptions::rp`] から置き換える。
     pub rp: Option<f64>,
@@ -93,18 +97,29 @@ impl MemberDemand {
             mz: 0.0,
             my: 0.0,
             shear: None,
+            shear_weak: None,
             rp: None,
         }
     }
 
     /// プッシュオーバー応答から部材需要を作る。軸力（圧縮正）・強軸/弱軸の設計用曲げ・
-    /// 強軸設計用せん断・部材別 Rp を直接反映する（`Qmu` と Rp を応答値で置き換える）。
-    pub fn from_pushover(n_axial: f64, mz: f64, my: f64, shear: f64, rp: f64) -> Self {
+    /// 強軸/弱軸の設計用せん断・部材別 Rp を直接反映する（`Qmu`・弱軸 Qmuy・Rp を
+    /// 応答値で置き換える）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_pushover(
+        n_axial: f64,
+        mz: f64,
+        my: f64,
+        shear: f64,
+        shear_weak: f64,
+        rp: f64,
+    ) -> Self {
         Self {
             n_axial,
             mz,
             my,
             shear: Some(shear),
+            shear_weak: Some(shear_weak),
             rp: Some(rp),
         }
     }
@@ -626,7 +641,7 @@ fn check_member(
     // 2 軸せん断余裕度（柱のみ、指定時）。弱軸（main_y、b↔D 入替）の Qsu/Qmu を
     // 算定し、相互作用式 1/((Qmx/Qsux)^2+(Qmy/Qsuy)^2)^(1/2)（RC は α=2.0）で合成する。
     let biaxial_shear_margin = if kind == MemberKind::Column && opts.biaxial_shear {
-        let (qsu_y, qmu_y) = column_axis_shear(
+        let (qsu_y, qmu_y_hinge) = column_axis_shear(
             d,
             b,
             &rebar.main_y,
@@ -638,6 +653,12 @@ fn check_member(
             l_clear,
             opts,
         );
+        // 弱軸設計用せん断 Qmuy。プッシュオーバー応答の弱軸せん断が与えられていれば
+        // それを直接反映（上限強度倍率を乗じる）、無ければ両端ヒンジ略算 2·Muy/内法。
+        let qmu_y = match demand.shear_weak {
+            Some(qmy) => opts.upper_strength_factor * qmy.abs(),
+            None => qmu_y_hinge,
+        };
         let rx = if qsu > 0.0 { qmu / qsu } else { f64::INFINITY };
         let ry = if qsu_y > 0.0 {
             qmu_y / qsu_y

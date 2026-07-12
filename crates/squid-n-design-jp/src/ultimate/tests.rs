@@ -362,7 +362,7 @@ fn test_ultimate_check_pushover_demand() {
     let qm = 123_456.0_f64;
     let demand = vec![(
         ElemId(0),
-        MemberDemand::from_pushover(1_000_000.0, 1.0e8, 5.0e7, qm, 0.0),
+        MemberDemand::from_pushover(1_000_000.0, 1.0e8, 5.0e7, qm, 0.0, 0.0),
     )];
     let checks = collect_rc_ultimate_checks(&model, &demand, &UltimateShearOptions::default());
     let col = checks.iter().find(|c| c.elem == ElemId(0)).unwrap();
@@ -377,11 +377,11 @@ fn test_ultimate_check_pushover_demand() {
     // (2) 部材別 Rp を上げると（塑性理論式）柱の Qsu は低下する（ν・cotφ 低減）。
     let d_rp0 = vec![(
         ElemId(0),
-        MemberDemand::from_pushover(1_000_000.0, 1.0e8, 5.0e7, qm, 0.0),
+        MemberDemand::from_pushover(1_000_000.0, 1.0e8, 5.0e7, qm, 0.0, 0.0),
     )];
     let d_rp3 = vec![(
         ElemId(0),
-        MemberDemand::from_pushover(1_000_000.0, 1.0e8, 5.0e7, qm, 0.03),
+        MemberDemand::from_pushover(1_000_000.0, 1.0e8, 5.0e7, qm, 0.0, 0.03),
     )];
     let c0 = collect_rc_ultimate_checks(&model, &d_rp0, &UltimateShearOptions::default());
     let c3 = collect_rc_ultimate_checks(&model, &d_rp3, &UltimateShearOptions::default());
@@ -399,6 +399,45 @@ fn test_ultimate_check_pushover_demand() {
     assert!(
         (col_a.qmu - qm).abs() > 1.0,
         "shear 未指定時は Qmu が応答せん断と一致しないはず（両端ヒンジ略算）"
+    );
+}
+
+/// 2 軸せん断で弱軸の設計用せん断需要（プッシュオーバー弱軸応答）を直接反映する。
+#[test]
+fn test_ultimate_check_pushover_weak_shear() {
+    let model = column_and_beam_model();
+    let opts = UltimateShearOptions {
+        biaxial_shear: true,
+        ..Default::default()
+    };
+    // 強軸せん断は共通、弱軸せん断需要のみ大小 2 種。
+    let qm = 200_000.0_f64;
+    let small = vec![(
+        ElemId(0),
+        MemberDemand::from_pushover(1_000_000.0, 0.0, 0.0, qm, 10_000.0, 0.0),
+    )];
+    let large = vec![(
+        ElemId(0),
+        MemberDemand::from_pushover(1_000_000.0, 0.0, 0.0, qm, 400_000.0, 0.0),
+    )];
+    let cs = collect_rc_ultimate_checks(&model, &small, &opts);
+    let cl = collect_rc_ultimate_checks(&model, &large, &opts);
+    let ms = cs
+        .iter()
+        .find(|c| c.elem == ElemId(0))
+        .unwrap()
+        .biaxial_shear_margin
+        .expect("2軸指定で Some");
+    let ml = cl
+        .iter()
+        .find(|c| c.elem == ElemId(0))
+        .unwrap()
+        .biaxial_shear_margin
+        .expect("2軸指定で Some");
+    // 弱軸の需要せん断が大きいほど 2 軸せん断余裕度は小さくなる（不利側）。
+    assert!(
+        ml < ms,
+        "弱軸需要大の余裕度 {ml} は弱軸需要小 {ms} より小さいはず"
     );
 }
 
