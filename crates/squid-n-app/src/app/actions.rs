@@ -669,7 +669,7 @@ impl App {
         Analysis::prepare(&work).map_err(|e| format!("解析準備エラー: {}", e))?;
         let dofmap = squid_n_core::dof::DofMap::build(&work);
         let reducer = squid_n_solver::constraint::Reducer::build(&work, &dofmap);
-        squid_n_solver::pushover::pushover_analysis(
+        squid_n_solver::pushover::pushover_analysis_recording(
             &mut work,
             &dofmap,
             &reducer,
@@ -679,6 +679,8 @@ impl App {
             false,
             false,
             0.0,
+            false,
+            cfg.ductility_method,
         )
         .map_err(|e| format!("プッシュオーバー解析エラー: {}", e))
     }

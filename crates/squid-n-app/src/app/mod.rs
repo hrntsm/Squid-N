@@ -160,6 +160,8 @@ pub struct AnalysisSettings {
     pub push_dir: SeismicDir,
     pub push_steps: usize,
     pub push_max_disp: f64,
+    /// プッシュオーバー: 塑性率（ductility）の算定方式（RESP-D「05 非線形モデル」）。
+    pub ductility_method: squid_n_solver::pushover::DuctilityMethod,
     /// 時刻歴: 減衰比・サンプル波の刻み/継続時間/周期/振幅 [mm/s²]
     pub th_damping: f64,
     pub th_dt: f64,
@@ -231,6 +233,7 @@ impl Default for AnalysisSettings {
             push_dir: SeismicDir::X,
             push_steps: 50,
             push_max_disp: 500.0,
+            ductility_method: squid_n_solver::pushover::DuctilityMethod::default(),
             th_damping: 0.02,
             th_dt: 0.01,
             th_duration: 10.0,

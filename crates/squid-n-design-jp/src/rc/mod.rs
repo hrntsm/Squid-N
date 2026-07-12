@@ -31,14 +31,24 @@ use squid_n_core::section_shape::{BarSet, RcRebar, SectionShape, ShearBar};
 use squid_n_core::units::ConcreteClass;
 
 mod beam;
+/// 鉄筋コンクリート造梁の非線形復元力特性（曲げトリリニア・せん断・軸）。
+/// 非線形解析の材端バネ骨格に用いる（RESP-D「05 非線形モデル」）。
+pub mod beam_nonlinear;
 mod bond;
 mod column;
 /// 鉄筋コンクリート造水平接合面の検討（PCa 打継ぎ面のせん断検定）。
 pub mod horizontal_joint;
 pub mod joint;
 pub mod wall;
+/// 鉄筋コンクリート造耐震壁のせん断非線形特性（トリリニア Qc/βu/Qu）。
+/// 非線形解析のせん断ばね骨格に用いる（RESP-D「05 非線形モデル」）。
+pub mod wall_nonlinear;
 
 pub use bond::{rc_beam_bond_check, rc_beam_bond_check_1991, Bond1991Result, BondCheckResult};
+pub use wall_nonlinear::{
+    wall_shear_beta_u, wall_shear_crack, wall_shear_trilinear, wall_shear_ultimate,
+    WallShearTrilinear, WallShearTrilinearInput,
+};
 
 // 材料強度・許容応力度は `crate::material_strength`（RESP-D「材料強度・許容応力度」節）へ
 // 集約した。RC 造の検定で用いるものを再エクスポートし、従来の

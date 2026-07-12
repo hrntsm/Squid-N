@@ -215,6 +215,12 @@ pub fn build_behavior(data: &ElementData, model: &Model) -> (Box<dyn ElementBeha
             Box::new(crate::spring::NodalSpringElement::new(data, model)),
             ElemState::default(),
         ),
+        // 免震支承材：RESP-D マニュアル計算編05「非線形モデル」免震支承材。
+        // 水平は非線形せん断（積層ゴム系バイリニア／摩擦ばね）、鉛直は弾性軸。
+        ElementKind::Isolator => (
+            Box::new(crate::isolator::IsolatorElement::new(data, model)),
+            ElemState::default(),
+        ),
     }
 }
 
@@ -289,6 +295,57 @@ fn build_fiber(data: &ElementData, model: &Model) -> crate::fiber_elem::FiberBea
     crate::fiber_elem::FiberBeam::with_plastic_zone(data, model, lp)
 }
 
+/// 部材の曲げ終局（降伏）モーメント My [N·mm]（RESP-D「05 非線形モデル」）。
+/// RC=0.9·at·σy·j（[`squid_n_core::rc_capacity::rc_mu_simple`]）、鉄骨=Zp·σy（全塑性 Mp）、
+/// それ以外（複合断面・形状不明）は σy·Z弾性でフォールバックする。
+/// 従来の材端バネは σy·Z弾性を用いていたが、規準の曲げ終局強度へ改良する。
+fn flexural_yield_moment(data: &ElementData, model: &Model) -> f64 {
+    use squid_n_core::section_shape::SectionShape;
+    let sec = data.section.and_then(|sid| model.sections.get(sid.index()));
+    let mat = data
+        .material
+        .and_then(|mid| model.materials.get(mid.index()));
+    let depth = sec.map(|s| s.depth.max(s.width)).unwrap_or(100.0);
+    let iz = sec.map(|s| s.iz.max(s.iy)).unwrap_or(1.0e6);
+    let ze = if depth > 0.0 { iz / (depth / 2.0) } else { 0.0 };
+    let fy = mat.and_then(|m| m.fy);
+    match sec.and_then(|s| s.shape.as_ref()) {
+        Some(SectionShape::RcRect { rebar, d, .. }) | Some(SectionShape::RcCircle { rebar, d }) => {
+            let sy = fy.unwrap_or(345.0);
+            let fc = mat.and_then(|m| m.fc).unwrap_or(0.0);
+            let at = squid_n_core::section_shape::bar_set_area(&rebar.main_x) / 2.0;
+            let d_eff = (d - rebar.cover - rebar.main_x.dia / 2.0).max(0.0);
+            let my = squid_n_core::rc_capacity::rc_mu_simple(
+                &squid_n_core::rc_capacity::RcCapacityInput {
+                    b: 1.0,
+                    d: *d,
+                    at,
+                    d_eff,
+                    sigma_y: sy,
+                    fc: fc.max(1e-9),
+                    pw: 0.0,
+                    sigma_wy: 0.0,
+                    clear_span: 1.0,
+                    sigma_0: 0.0,
+                },
+            );
+            if my > 0.0 {
+                my
+            } else {
+                sy * ze
+            }
+        }
+        Some(shape) => {
+            let sy = fy.unwrap_or(235.0);
+            match shape.plastic_modulus_strong() {
+                Some(zp) => sy * zp,
+                None => sy * ze,
+            }
+        }
+        None => fy.unwrap_or(235.0) * ze,
+    }
+}
+
 /// 集中バネの降伏モーメント My0 と軸許容耐力 N許容 = σy·A（MN 相関用）。
 fn yield_moment_and_axial(data: &ElementData, model: &Model) -> (f64, f64) {
     let sec = data.section.and_then(|sid| model.sections.get(sid.index()));
@@ -296,11 +353,8 @@ fn yield_moment_and_axial(data: &ElementData, model: &Model) -> (f64, f64) {
         .material
         .and_then(|mid| model.materials.get(mid.index()));
     let fy_sigma = mat.and_then(|m| m.fy).unwrap_or(235.0);
-    let depth = sec.map(|s| s.depth.max(s.width)).unwrap_or(100.0);
-    let iz = sec.map(|s| s.iz.max(s.iy)).unwrap_or(1.0e6);
-    let z = if depth > 0.0 { iz / (depth / 2.0) } else { 0.0 };
     let area = sec.map(|s| s.area).unwrap_or(1.0e4);
-    (fy_sigma * z, fy_sigma * area)
+    (flexural_yield_moment(data, model), fy_sigma * area)
 }
 
 fn build_rotational_springs(
@@ -315,11 +369,9 @@ fn build_rotational_springs(
         .material
         .and_then(|mid| model.materials.get(mid.index()));
     let e = mat.map(|m| m.young).unwrap_or(205000.0);
-    let fy_sigma = mat.and_then(|m| m.fy).unwrap_or(235.0);
-    let depth = sec.map(|s| s.depth.max(s.width)).unwrap_or(100.0);
     let iz = sec.map(|s| s.iz.max(s.iy)).unwrap_or(1.0e6);
-    let z = if depth > 0.0 { iz / (depth / 2.0) } else { 0.0 };
-    let my = fy_sigma * z;
+    // 材端バネの降伏モーメントは規準の曲げ終局強度（RC=0.9atσyj、鉄骨=Zpσy）を用いる。
+    let my = flexural_yield_moment(data, model);
 
     let n0 = &model.nodes[data.nodes[0].index()];
     let n1 = &model.nodes[data.nodes[1].index()];

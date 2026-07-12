@@ -56,6 +56,9 @@ use squid_n_core::model::{Material, Section};
 use squid_n_core::section_shape::{BarSet, RcRebar, SectionShape, ShearBar};
 
 mod beam;
+/// 鉄骨鉄筋コンクリート造梁のせん断終局強度（非線形解析のせん断ばね終局耐力）。
+/// RESP-D「05 非線形モデル」の SRC 梁せん断復元力特性。
+pub mod beam_nonlinear;
 mod column;
 pub mod panel_zone;
 

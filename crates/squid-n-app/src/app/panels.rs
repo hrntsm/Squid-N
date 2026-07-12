@@ -813,6 +813,34 @@ impl App {
                 );
             });
             ui.horizontal(|ui| {
+                use squid_n_solver::pushover::DuctilityMethod;
+                ui.label("塑性率方式:")
+                    .on_hover_text("RESP-D「05 非線形モデル」ファイバーモデルの塑性率");
+                egui::ComboBox::from_id_salt("ductility_method")
+                    .selected_text(match self.analysis_cfg.ductility_method {
+                        DuctilityMethod::ReferenceStrain => "基点歪み",
+                        DuctilityMethod::WeightedAverageJm => "重み付け平均Jm",
+                        DuctilityMethod::FirstYield => "降伏時",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.analysis_cfg.ductility_method,
+                            DuctilityMethod::ReferenceStrain,
+                            "基点歪み（RC:引張0.01/圧縮0.005・鉄骨0.01）",
+                        );
+                        ui.selectable_value(
+                            &mut self.analysis_cfg.ductility_method,
+                            DuctilityMethod::WeightedAverageJm,
+                            "重み付け平均塑性率 Jm≥1",
+                        );
+                        ui.selectable_value(
+                            &mut self.analysis_cfg.ductility_method,
+                            DuctilityMethod::FirstYield,
+                            "降伏発生時（塑性率1）",
+                        );
+                    });
+            });
+            ui.horizontal(|ui| {
                 if ui
                     .add_enabled(!running, egui::Button::new("▶ 実行"))
                     .clicked()
@@ -1056,6 +1084,23 @@ impl App {
             ui.label(format!("崩壊機構: {}", mech));
             ui.separator();
             ui.label(format!("ヒンジ発生 {} 件", po.hinges.len()));
+        });
+        // 塑性率（RESP-D「05 非線形モデル」）の方式と最大値。
+        ui.horizontal(|ui| {
+            use squid_n_solver::pushover::DuctilityMethod;
+            let method = match self.analysis_cfg.ductility_method {
+                DuctilityMethod::ReferenceStrain => "基点歪み",
+                DuctilityMethod::WeightedAverageJm => "重み付け平均Jm",
+                DuctilityMethod::FirstYield => "降伏時",
+            };
+            let max_mu = po
+                .hinges
+                .iter()
+                .map(|h| h.ductility)
+                .fold(0.0_f64, f64::max);
+            ui.label(format!("塑性率方式: {method}"));
+            ui.separator();
+            ui.label(format!("最大部材塑性率 μmax = {:.2}", max_mu));
         });
 
         // 性能曲線（頂部変位 - ベースシア）

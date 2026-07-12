@@ -1042,3 +1042,101 @@ fn test_plastic_zone_checkpoint_roundtrip() {
         assert_relative_eq!(f1.data[i], f2.data[i], epsilon = 1e-6);
     }
 }
+
+/// RC 断面（RcRect＋配筋）のファイバー柱は、コンクリート格子に加えて主筋が
+/// 点ファイバーとして分離配置される（RESP-D「05 非線形モデル」の鉄筋分離）。
+/// 従来は均質コンクリート断面で引張鉄筋を無視していた。
+#[test]
+fn test_rc_fiber_section_includes_separated_rebar() {
+    use squid_n_core::section_shape::{BarSet, RcRebar, SectionShape, ShearBar};
+
+    let shape = SectionShape::RcRect {
+        b: 500.0,
+        d: 500.0,
+        rebar: RcRebar {
+            main_x: BarSet {
+                count: 4,
+                dia: 25.0,
+                layers: 1,
+            },
+            main_y: BarSet {
+                count: 4,
+                dia: 25.0,
+                layers: 1,
+            },
+            cover: 50.0,
+            shear: ShearBar {
+                dia: 10.0,
+                pitch: 100.0,
+                legs: 2,
+                grade: None,
+            },
+        },
+    };
+    let sec = shape.to_section(SectionId(0), "C500".into());
+    let model = Model {
+        nodes: vec![
+            Node {
+                id: NodeId(0),
+                coord: [0.0, 0.0, 0.0],
+                restraint: Default::default(),
+                mass: None,
+                story: None,
+            },
+            Node {
+                id: NodeId(1),
+                coord: [0.0, 0.0, 3000.0],
+                restraint: Default::default(),
+                mass: None,
+                story: None,
+            },
+        ],
+        elements: vec![ElementData {
+            id: ElemId(0),
+            kind: ElementKind::Fiber,
+            nodes: smallvec::smallvec![NodeId(0), NodeId(1)],
+            section: Some(SectionId(0)),
+            material: Some(MaterialId(0)),
+            local_axis: LocalAxis {
+                ref_vector: [1.0, 0.0, 0.0],
+            },
+            end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+            force_regime: ForceRegime::Auto,
+            rigid_zone: Default::default(),
+            plastic_zone: None,
+            spring: None,
+        }],
+        sections: vec![sec],
+        materials: vec![Material {
+            concrete_class: Default::default(),
+            id: MaterialId(0),
+            name: "FC30".into(),
+            young: 25000.0,
+            poisson: 0.2,
+            density: 0.0,
+            shear: Some(0.0),
+            fc: Some(30.0),
+            fy: None,
+        }],
+        ..Default::default()
+    };
+    let fb = FiberBeam::new(&model.elements[0], &model);
+    let gp = &fb.gauss_points[0];
+    // コンクリート格子 12×20=240 に主筋（main_x 4×上下2=8 + main_y 4×側面2=8 = 16 本）が加算。
+    assert!(
+        gp.section.fibers.len() > 240,
+        "主筋ファイバーが分離配置されていない: {}",
+        gp.section.fibers.len()
+    );
+    let rebar_count = gp.section.fibers.iter().filter(|f| f.material == 1).count();
+    assert_eq!(rebar_count, 16, "主筋本数（上下8＋側面8）: {rebar_count}");
+    // 主筋は最外縁近く（かぶり50・径25 → z0=500/2-50-12.5=187.5）に配置される。
+    let max_abs_z = gp
+        .section
+        .fibers
+        .iter()
+        .filter(|f| f.material == 1)
+        .map(|f| f.z.abs())
+        .fold(0.0_f64, f64::max);
+    assert!(max_abs_z > 180.0, "主筋が最外縁近くにない: {max_abs_z}");
+}

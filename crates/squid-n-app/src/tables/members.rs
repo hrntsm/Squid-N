@@ -24,6 +24,8 @@ pub fn members_table(ui: &mut egui::Ui, app: &mut App) {
             .or_else(|| app.model.nodes.get(1).map(|n| n.id));
 
         let mut do_add = false;
+        // 免震支承材の作成フォームは仕様策定中のためプレースホルダ（押すと未実装通知）。
+        let mut do_isolator_notice = false;
 
         ui.horizontal(|ui| {
             ui.label("梁追加:");
@@ -72,6 +74,16 @@ pub fn members_table(ui: &mut egui::Ui, app: &mut App) {
             {
                 do_add = true;
             }
+
+            ui.separator();
+            // 免震支承材の作成フォーム（仕様策定中）。ボタンのみ用意し、押下時は未実装通知。
+            if ui
+                .button("+ 免震支承材追加")
+                .on_hover_text("免震支承材の作成フォームは仕様策定中（未実装）")
+                .clicked()
+            {
+                do_isolator_notice = true;
+            }
         });
 
         // クロージャ終了後に一時メモリ更新（借用の競合を避ける）
@@ -100,6 +112,11 @@ pub fn members_table(ui: &mut egui::Ui, app: &mut App) {
                 app.undo.run(&mut app.model, Box::new(AddMember { elem }));
                 app.staleness.mark_edited();
             }
+        }
+
+        // 免震支承材の作成フォームは未実装（仕様策定中）。ステータスバーに通知のみ。
+        if do_isolator_notice {
+            app.last_error = Some("免震支承材の作成フォームは未実装です（仕様策定中）".to_string());
         }
     }
     ui.separator();

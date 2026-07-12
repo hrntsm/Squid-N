@@ -25,6 +25,25 @@ pub enum MassOption {
     Consistent,
 }
 
+/// 塑性率（ductility）評価用の危険断面プローブ（RESP-D「05 非線形モデル」
+/// ファイバーモデルの塑性率）。ファイバー要素が最大曲率のガウス点（危険断面）
+/// について現在のひずみ状態を集約して返す。プッシュオーバー解析
+/// （`squid_n_solver::pushover`）が各ステップで参照し、塑性率基点曲率と
+/// 最大応答曲率から部材塑性率 μ を算定する。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DuctilityProbe {
+    /// 危険断面の曲率の大きさ |κ| = √(κy²+κz²) [1/mm]。
+    pub curvature: f64,
+    /// 断面内の最大引張ひずみ（正）。
+    pub max_tension_strain: f64,
+    /// 断面内の最大圧縮ひずみの大きさ（正で返す）。
+    pub max_compression_strain: f64,
+    /// 各ファイバの塑性率 μi=|ε|/εref の最大値（≥1 で降伏＝塑性率基点方式(3)）。
+    pub max_yield_ratio: f64,
+    /// 重み付け平均塑性率 Jm = Σσref·A·|ε|·μi / Σσref·A·|ε|（≥1 で基点＝方式(2)）。
+    pub jm: f64,
+}
+
 impl LocalMat {
     pub fn zeros(n: usize) -> Self {
         Self {
@@ -96,4 +115,13 @@ pub trait ElementBehavior {
     }
     /// チェックポイント用: バイト列から要素状態を復元
     fn deserialize_checkpoint(&mut self, _data: &[u8]) {}
+    /// 塑性率評価用の危険断面プローブ（ファイバー要素のみ実装。既定は None）。
+    /// RESP-D「05 非線形モデル」ファイバーモデルの塑性率算定に用いる。
+    fn ductility_probe(&self) -> Option<DuctilityProbe> {
+        None
+    }
+    /// コンクリート履歴の除荷則を解析種別で切替える（RESP-D「05 非線形モデル」:
+    /// 静的=逆行型／動的=原点指向型）。`dynamic=true` で原点指向型。
+    /// ファイバー要素がコンクリート材料へ伝播する（既定は何もしない）。
+    fn set_concrete_hysteresis(&mut self, _dynamic: bool) {}
 }

@@ -1437,7 +1437,9 @@ pub fn nonlinear_time_history_analysis(
 fn build_behaviors(model: &Model) -> Vec<Box<dyn squid_n_element::behavior::ElementBehavior>> {
     let mut behaviors = Vec::new();
     for elem in &model.elements {
-        let (b, _) = build_nonlinear_behavior(elem, model);
+        let (mut b, _) = build_nonlinear_behavior(elem, model);
+        // 動的解析: コンクリート履歴は原点指向型（RESP-D「05 非線形モデル」）。
+        b.set_concrete_hysteresis(true);
         behaviors.push(b);
     }
     behaviors

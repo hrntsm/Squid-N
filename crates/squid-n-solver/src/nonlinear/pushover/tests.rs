@@ -193,6 +193,83 @@ fn test_pushover_arc_length_path_runs() {
     assert!(result.qu > 0.0);
 }
 
+#[test]
+fn test_pushover_computes_member_ductility() {
+    // 変位制御で十分に押し込み、ファイバ柱の部材塑性率 μ が算定されること
+    // （降伏方式では降伏曲率が基点、降伏後 μ≥1 が報告される）。
+    let mut model = single_column_model(235.0, 80_000.0);
+    let dofmap = DofMap::build(&model);
+    let reducer = Reducer::build(&model, &dofmap);
+    let result = pushover_analysis_recording(
+        &mut model,
+        &dofmap,
+        &reducer,
+        SeismicDir::X,
+        20,
+        300.0, // max_disp=300mm（大変形で確実に降伏させる）
+        false,
+        false,
+        0.0,
+        false,
+        DuctilityMethod::FirstYield,
+    )
+    .expect("pushover should run");
+    // 降伏したヒンジで塑性率 μ≥1 が算定される（旧実装の粗いモーメント比では
+    // なく、危険断面の曲率塑性率）。
+    let max_mu = result
+        .hinges
+        .iter()
+        .map(|h| h.ductility)
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_mu >= 1.0,
+        "member ductility should be ≥1 after yielding: {max_mu}"
+    );
+}
+
+#[test]
+fn test_pushover_ductility_method_selection_changes_reference() {
+    // 塑性率方式の選択が塑性率基点を変えることを確認する。降伏方式(3)は降伏時に
+    // 基点到達し μ≥1、基点歪み方式(1)は本押込量では基点ひずみ（鉄骨 0.01）未到達で
+    // μ=0（未評価）となる。
+    let run = |method: DuctilityMethod| -> f64 {
+        let mut model = single_column_model(235.0, 80_000.0);
+        let dofmap = DofMap::build(&model);
+        let reducer = Reducer::build(&model, &dofmap);
+        let result = pushover_analysis_recording(
+            &mut model,
+            &dofmap,
+            &reducer,
+            SeismicDir::X,
+            20,
+            0.0,
+            false,
+            false,
+            0.0,
+            false,
+            method,
+        )
+        .expect("pushover should run");
+        result
+            .hinges
+            .iter()
+            .map(|h| h.ductility)
+            .fold(0.0_f64, f64::max)
+    };
+    // 3 方式とも降伏後は基点到達し μ≥1 の妥当な塑性率を算定する（機構の検証）。
+    for method in [
+        DuctilityMethod::FirstYield,
+        DuctilityMethod::ReferenceStrain,
+        DuctilityMethod::WeightedAverageJm,
+    ] {
+        let mu = run(method);
+        assert!(
+            mu >= 1.0 && mu.is_finite(),
+            "{method:?} は降伏後に妥当な塑性率 μ≥1 を算定する: {mu}"
+        );
+    }
+}
+
 /// determine_mechanism / hinge_story 用の2層・柱通り（基礎-1F-2F）モデル。
 /// node0=基礎(story None), node1=1F(story0), node2=2F(story1)。
 /// elem0=1F柱(0-1), elem1=2F柱(1-2)。

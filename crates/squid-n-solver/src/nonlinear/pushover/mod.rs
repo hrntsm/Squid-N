@@ -6,9 +6,9 @@ use smallvec::SmallVec;
 use squid_n_core::dof::DofMap;
 use squid_n_core::ids::{ElemId, StoryId};
 use squid_n_core::model::{ElementData, Material, Model, RigidZone, Section};
-use squid_n_core::rc_capacity::{rc_qsu_simple, RcCapacityInput};
-use squid_n_core::section_shape::{BarSet, RcRebar, SectionShape};
-use squid_n_element::behavior::{Ctx, ElemState, ElementBehavior, LocalVec};
+use squid_n_core::rc_capacity::{rc_mu_simple, rc_qsu_simple, RcCapacityInput};
+use squid_n_core::section_shape::{bar_set_area, BarSet, RcRebar, SectionShape};
+use squid_n_element::behavior::{Ctx, DuctilityProbe, ElemState, ElementBehavior, LocalVec};
 use squid_n_element::factory::build_nonlinear_behavior;
 use squid_n_element::transform::LocalFrame;
 use squid_n_math::solver::{make_solver, SolverBackend};
@@ -37,6 +37,29 @@ pub enum HingeLevel {
     Yield,
     Ultimate,
 }
+
+/// 塑性率（ductility）の算定方式（RESP-D「05 非線形モデル」ファイバーモデルの
+/// 塑性率）。ユーザーが 3 方式から選択する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DuctilityMethod {
+    /// (1) 塑性率基点歪みにより計算する方法（既定）。いずれかのセグメントの
+    /// ひずみが塑性率基点ひずみ（RC: 引張 0.01・圧縮 0.005、鉄骨: 0.01）を
+    /// 超えた時点の曲率を基点とし、μ=最大応答曲率/基点曲率。
+    #[default]
+    ReferenceStrain,
+    /// (2) 重み付け平均塑性率 Jm による方法。Jm=Σσy·A·|ε|·μi/Σσy·A·|ε| が
+    /// 1.0 以上となった時点の曲率を基点とする。
+    WeightedAverageJm,
+    /// (3) 降伏発生時を塑性率基点にする方法。いずれかのセグメントの塑性率が
+    /// 1 を超えた（降伏した）時点の曲率を基点とする。
+    FirstYield,
+}
+
+/// 部材塑性率の終局ヒンジ判定値。降伏後、部材塑性率がこの値以上のヒンジを
+/// Ultimate（終局）と分類する（μ<この値は Yield）。RESP-D では塑性率の
+/// クライテリアはユーザー設定だが、既定の終局判定値として 4.0 を用いる
+/// （要・原典照合／ユーザー調整余地）。
+const ULTIMATE_DUCTILITY: f64 = 4.0;
 
 /// 崩壊機構種別（P5 §7.4）
 pub enum MechanismType {
@@ -267,6 +290,7 @@ pub fn pushover_analysis(
         use_arc_length,
         arc_length_dl,
         false,
+        DuctilityMethod::default(),
     )
 }
 
@@ -286,6 +310,7 @@ pub fn pushover_analysis_recording(
     use_arc_length: bool,
     arc_length_dl: f64,
     record_node_disp: bool,
+    ductility_method: DuctilityMethod,
 ) -> Result<PushoverResult, String> {
     let n_active = dofmap.n_active();
     if n_active == 0 {
@@ -297,6 +322,15 @@ pub fn pushover_analysis_recording(
         let (b, _) = build_nonlinear_behavior(elem, model);
         behaviors.push(b);
     }
+    // 静的解析: コンクリート履歴は逆行型（RESP-D「05 非線形モデル」）。
+    for b in behaviors.iter_mut() {
+        b.set_concrete_hysteresis(false);
+    }
+
+    // 塑性率（ductility）トラッカー: 各部材の塑性率基点曲率・最大応答曲率を追跡する。
+    let ductility_refs = compute_ductility_refs(model);
+    let mut ductility_trackers: Vec<DuctilityTracker> =
+        vec![DuctilityTracker::default(); model.elements.len()];
 
     let stories = &model.stories;
     if stories.is_empty() {
@@ -435,11 +469,17 @@ pub fn pushover_analysis_recording(
                     story_drifts: story_drift,
                     node_disp: record_node_disp.then(|| total_disp.clone()),
                 });
+                let mu = update_ductility(
+                    &behaviors,
+                    &mut ductility_trackers,
+                    &ductility_refs,
+                    ductility_method,
+                );
                 track_hinges(
                     model,
-                    dofmap,
                     &behaviors,
                     &thresholds,
+                    &mu,
                     step as u32,
                     &mut hinges,
                 );
@@ -565,7 +605,13 @@ pub fn pushover_analysis_recording(
                             story_drifts: story_drift,
                             node_disp: record_node_disp.then(|| total_disp.clone()),
                         });
-                        track_hinges(model, dofmap, &behaviors, &thresholds, cstep, &mut hinges);
+                        let mu = update_ductility(
+                            &behaviors,
+                            &mut ductility_trackers,
+                            &ductility_refs,
+                            ductility_method,
+                        );
+                        track_hinges(model, &behaviors, &thresholds, &mu, cstep, &mut hinges);
                         track_shear_yield(
                             model,
                             &behaviors,
@@ -692,50 +738,191 @@ pub fn pushover_analysis_recording(
     })
 }
 
+/// ヒンジ判定のモーメント閾値（実スケルトンの折れ点）。
+/// RC はひび割れ Mc=κ·Fc·Ze・降伏 My、鉄骨は全塑性 Mp（Mc=My）。
 struct HingeThreshold {
+    /// 曲げひび割れモーメント Mc [N·mm]（RC のみ有意。鉄骨は My と同値）。
     mc: f64,
+    /// 曲げ降伏モーメント My [N·mm]。
     my: f64,
-    mu: f64,
+}
+
+/// 鉄骨系の断面形状か。
+fn is_steel_shape(shape: &SectionShape) -> bool {
+    matches!(
+        shape,
+        SectionShape::SteelH { .. }
+            | SectionShape::SteelBox { .. }
+            | SectionShape::SteelAngle { .. }
+            | SectionShape::SteelChannel { .. }
+            | SectionShape::SteelTee { .. }
+            | SectionShape::SteelPipe { .. }
+    )
+}
+
+/// 部材の曲げヒンジ閾値（実スケルトン）を算定する（RESP-D「05 非線形モデル」）。
+/// RC: Mc=κ·Fc·Ze（κ=0.56）・My=0.9·at·σy·j。鉄骨: Mp=Zp·σy（Mc=My）。
+/// 複合断面・形状不明は σy·Ze を降伏とする改良簡易値でフォールバックする。
+fn member_moment_thresholds(elem: &ElementData, model: &Model) -> HingeThreshold {
+    let Some(sec) = elem.section.and_then(|sid| model.sections.get(sid.index())) else {
+        return HingeThreshold { mc: 0.0, my: 0.0 };
+    };
+    let mat = elem
+        .material
+        .and_then(|mid| model.materials.get(mid.index()));
+    let depth = sec.depth.max(sec.width);
+    let i_gross = sec.iz.max(sec.iy);
+    let ze = if depth > 0.0 {
+        i_gross / (depth / 2.0)
+    } else {
+        0.0
+    };
+    // 降伏応力は部材材料の fy を優先。未設定なら鋼材既定 235 N/mm²（SN400 級）。
+    let sigma_y_steel = mat.and_then(|m| m.fy).unwrap_or(235.0);
+
+    match &sec.shape {
+        Some(SectionShape::RcRect { rebar, d, .. }) | Some(SectionShape::RcCircle { rebar, d }) => {
+            let fc = mat.and_then(|m| m.fc).unwrap_or(0.0);
+            // 曲げひび割れ Mc = κ·Fc·Ze（κ=0.56、RESP-D「05 非線形モデル」）。
+            let mc = 0.56 * fc * ze;
+            // 曲げ降伏 My = 0.9·at·σy·j（rc_mu_simple）。at は片側引張筋（対称配筋仮定）。
+            let sigma_y_rebar = mat.and_then(|m| m.fy).unwrap_or(345.0);
+            let at = bar_set_area(&rebar.main_x) / 2.0;
+            let d_eff = (d - rebar.cover - rebar.main_x.dia / 2.0).max(0.0);
+            let inp = RcCapacityInput {
+                b: 1.0,
+                d: *d,
+                at,
+                d_eff,
+                sigma_y: sigma_y_rebar,
+                fc: fc.max(1e-9),
+                pw: 0.0,
+                sigma_wy: 0.0,
+                clear_span: 1.0,
+                sigma_0: 0.0,
+            };
+            let my = rc_mu_simple(&inp);
+            let my = if my > 0.0 { my } else { sigma_y_rebar * ze };
+            HingeThreshold { mc: mc.min(my), my }
+        }
+        Some(shape) if is_steel_shape(shape) => {
+            // 鉄骨: 全塑性モーメント Mp = Zp·σy。ひび割れは無いため Mc=My=Mp。
+            let zp = shape.plastic_modulus_strong().unwrap_or(1.12 * ze);
+            let mp = sigma_y_steel * zp;
+            HingeThreshold { mc: mp, my: mp }
+        }
+        _ => {
+            // 複合断面(SRC/CFT)・形状不明: σy·Ze を降伏、コンクリを含むなら
+            // κ·Fc·Ze をひび割れとする改良簡易値。
+            let my = sigma_y_steel * ze;
+            let fc = mat.and_then(|m| m.fc).unwrap_or(0.0);
+            let mc = if fc > 0.0 {
+                (0.56 * fc * ze).min(my)
+            } else {
+                my
+            };
+            HingeThreshold { mc, my }
+        }
+    }
 }
 
 fn compute_hinge_thresholds(model: &Model) -> Vec<HingeThreshold> {
     model
         .elements
         .iter()
+        .map(|elem| member_moment_thresholds(elem, model))
+        .collect()
+}
+
+/// 塑性率基点ひずみ（RESP-D「05 非線形モデル」ファイバーモデルの塑性率、方式(1)）。
+/// RC 部材は引張 0.01・圧縮 0.005、鉄骨部材は引張・圧縮ともに 0.01。
+#[derive(Clone, Copy)]
+struct DuctilityRef {
+    tens: f64,
+    comp: f64,
+}
+
+fn compute_ductility_refs(model: &Model) -> Vec<DuctilityRef> {
+    model
+        .elements
+        .iter()
         .map(|elem| {
-            let (my, mu) = if let Some(sid) = elem.section {
-                if let Some(sec) = model.sections.get(sid.index()) {
-                    let depth = sec.depth.max(sec.width);
-                    let i = sec.iz.max(sec.iy);
-                    let z = if depth > 0.0 { i / (depth / 2.0) } else { 0.0 };
-                    // 降伏応力は部材材料の fy を優先。未設定なら鋼材既定 235 N/mm²（SN400 級）。
-                    let sigma_y = elem
-                        .material
-                        .and_then(|mid| model.materials.get(mid.index()))
-                        .and_then(|m| m.fy)
-                        .unwrap_or(235.0);
-                    let my = sigma_y * z;
-                    (my, my * 1.2)
-                } else {
-                    (0.0, 0.0)
+            let is_rc = elem
+                .material
+                .and_then(|mid| model.materials.get(mid.index()))
+                .and_then(|m| m.fc)
+                .is_some();
+            if is_rc {
+                DuctilityRef {
+                    tens: 0.01,
+                    comp: 0.005,
                 }
             } else {
-                (0.0, 0.0)
-            };
-            HingeThreshold {
-                mc: my / 3.0,
-                my,
-                mu,
+                DuctilityRef {
+                    tens: 0.01,
+                    comp: 0.01,
+                }
             }
         })
         .collect()
 }
 
+/// 部材ごとの塑性率トラッカー。塑性率基点曲率（初到達時）と最大応答曲率を追跡し
+/// μ=最大応答曲率/基点曲率を算定する（RESP-D「05 非線形モデル」）。
+#[derive(Clone, Copy, Default)]
+struct DuctilityTracker {
+    kappa_max: f64,
+    kappa_ref: Option<f64>,
+}
+
+impl DuctilityTracker {
+    fn update(&mut self, probe: &DuctilityProbe, reached: bool) {
+        self.kappa_max = self.kappa_max.max(probe.curvature);
+        if reached && self.kappa_ref.is_none() && probe.curvature > 0.0 {
+            self.kappa_ref = Some(probe.curvature);
+        }
+    }
+    /// 部材塑性率 μ。基点未到達（塑性率 1 未満）は 0（未評価、RESP-D 準拠）。
+    fn mu(&self) -> f64 {
+        match self.kappa_ref {
+            Some(kr) if kr > 0.0 => (self.kappa_max / kr).max(1.0),
+            _ => 0.0,
+        }
+    }
+}
+
+/// 選択された方式で塑性率基点に到達したか判定する。
+fn reference_reached(method: DuctilityMethod, probe: &DuctilityProbe, r: &DuctilityRef) -> bool {
+    match method {
+        DuctilityMethod::ReferenceStrain => {
+            probe.max_tension_strain >= r.tens || probe.max_compression_strain >= r.comp
+        }
+        DuctilityMethod::WeightedAverageJm => probe.jm >= 1.0,
+        DuctilityMethod::FirstYield => probe.max_yield_ratio >= 1.0,
+    }
+}
+
+/// 全部材の塑性率トラッカーを更新し、部材塑性率 μ の配列を返す。
+fn update_ductility(
+    behaviors: &[Box<dyn ElementBehavior>],
+    trackers: &mut [DuctilityTracker],
+    refs: &[DuctilityRef],
+    method: DuctilityMethod,
+) -> Vec<f64> {
+    for ((b, tr), r) in behaviors.iter().zip(trackers.iter_mut()).zip(refs.iter()) {
+        if let Some(probe) = b.ductility_probe() {
+            let reached = reference_reached(method, &probe, r);
+            tr.update(&probe, reached);
+        }
+    }
+    trackers.iter().map(|t| t.mu()).collect()
+}
+
 fn track_hinges(
     model: &Model,
-    _dofmap: &DofMap,
     behaviors: &[Box<dyn ElementBehavior>],
     thresholds: &[HingeThreshold],
+    ductility: &[f64],
     step: u32,
     hinges: &mut Vec<HingeEvent>,
 ) {
@@ -747,13 +934,24 @@ fn track_hinges(
         let m_j = f.data[10].abs().max(f.data[11].abs());
         let m_max = m_i.max(m_j);
         let th = &thresholds[i];
-        if m_max < th.mc {
+        if th.mc <= 0.0 || m_max < th.mc {
             continue;
         }
-        let level = if m_max >= th.mu {
-            HingeLevel::Ultimate
-        } else if m_max >= th.my {
-            HingeLevel::Yield
+        // 塑性率: ファイバー要素はプローブ由来の曲率塑性率、非ファイバー要素は
+        // モーメント比（m/My）でフォールバック（従来挙動）。
+        let mu = if ductility.get(i).copied().unwrap_or(0.0) > 0.0 {
+            ductility[i]
+        } else if th.my > 0.0 {
+            m_max / th.my
+        } else {
+            0.0
+        };
+        let level = if m_max >= th.my {
+            if mu >= ULTIMATE_DUCTILITY {
+                HingeLevel::Ultimate
+            } else {
+                HingeLevel::Yield
+            }
         } else {
             HingeLevel::Crack
         };
@@ -763,7 +961,7 @@ fn track_hinges(
             elem: elem.id,
             pos,
             level,
-            ductility: if th.my > 0.0 { m_max / th.my } else { 0.0 },
+            ductility: mu,
         });
     }
 }

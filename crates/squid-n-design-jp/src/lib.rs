@@ -9,6 +9,8 @@
 //! （部材ランク・層 Ds・保有水平耐力・剛性率・偏心率・主軸）に分離する。
 pub mod brb;
 pub mod cft;
+/// 免震支承材のマルチシアスプリング低減率・摩擦力（RESP-D「05 非線形モデル」）。
+pub mod isolator;
 pub mod joint_wiring;
 /// 材料強度・許容応力度（RESP-D「材料強度・許容応力度」節）。材種横断の
 /// 許容応力度・材料定数を集約する。構成則モデルの `squid-n-material`

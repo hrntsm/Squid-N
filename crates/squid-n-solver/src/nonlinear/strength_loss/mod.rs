@@ -415,6 +415,7 @@ pub fn staged_strength_loss(
             use_arc_length,
             arc_length_dl,
             true,
+            crate::pushover::DuctilityMethod::default(),
         )?;
 
         match detect_strength_loss(&current_model, &dofmap, &result, criterion, &removed_set) {

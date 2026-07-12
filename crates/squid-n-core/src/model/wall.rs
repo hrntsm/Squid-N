@@ -253,6 +253,59 @@ pub struct BrbAttr {
     pub length_reduction: f64,
 }
 
+/// 免震支承材の種別（RESP-D マニュアル「05 非線形モデル」免震支承材）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum IsolatorKind {
+    /// 積層ゴム系（マルチシアスプリング、水平バイリニア。鉛・高減衰含む）。
+    LaminatedRubber,
+    /// 弾性すべり支承（摩擦ばね、Qmax=μ·N）。
+    ElasticSliding,
+}
+
+/// 免震支承材の特性（`ElementKind::Isolator` 要素の非線形特性、
+/// RESP-D「05 非線形モデル」）。`Model::isolator_attrs` に要素 ID と対で保持する。
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct IsolatorProps {
+    /// 支承種別。
+    pub kind: IsolatorKind,
+    /// 水平初期（弾性）剛性 K1 [N/mm]。
+    pub k1: f64,
+    /// 水平二次剛性 K2 [N/mm]（積層ゴム系バイリニア。すべり支承は 0）。
+    pub k2: f64,
+    /// 降伏（特性）耐力 Qd [N]（積層ゴム系バイリニア）。すべり支承は 0。
+    pub qd: f64,
+    /// 鉛直剛性 Kv [N/mm]。
+    pub kv: f64,
+    /// 摩擦係数 μ（すべり支承。Qmax=μ·N）。
+    pub mu: f64,
+    /// 長期軸力 N [N]（摩擦力算定用、圧縮正）。
+    pub n_long: f64,
+    /// マルチシアスプリング本数 n（既定 8、天然ゴム系 2。表示・低減率照合用）。
+    pub n_springs: u32,
+}
+
+impl Default for IsolatorProps {
+    fn default() -> Self {
+        IsolatorProps {
+            kind: IsolatorKind::LaminatedRubber,
+            k1: 1000.0,
+            k2: 100.0,
+            qd: 50_000.0,
+            kv: 2_000_000.0,
+            mu: 0.1,
+            n_long: 0.0,
+            n_springs: 8,
+        }
+    }
+}
+
+/// 免震支承材の属性（要素 ID と特性の対）。
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct IsolatorAttr {
+    pub elem: ElemId,
+    pub props: IsolatorProps,
+}
+
 /// PCa（プレキャスト）梁の水平接合面検定用属性（RESP-D マニュアル 04）。
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PcaBeamAttr {

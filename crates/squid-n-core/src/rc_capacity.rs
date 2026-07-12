@@ -149,6 +149,30 @@ pub fn rc_qsu_simple(inp: &RcCapacityInput) -> f64 {
     (concrete_term + hoop_term + axial_term) * inp.b * j
 }
 
+/// RC 梁の曲げ降伏時剛性低下率 αy（菅野式、RESP-D「05 非線形モデル」）。
+///
+/// ```text
+/// αy = (0.043 + 1.635·n·pt + 0.043·(a/D))·(d/D)²   (2.0 ≤ a/D ≤ 5.0)
+///      (−0.0836 + 0.159·(a/D))·(d/D)²              (1.0 ≤ a/D < 2.0)
+/// ```
+/// - `pt`: 引張鉄筋比（小数）
+/// - `a_over_d`: シアスパン比 a/D（a=l0/2）。適用範囲 [1.0, 5.0] にクランプする。
+/// - `d_over_full`: 有効せい/全せい d/D
+/// - `n`: ヤング係数比 Es/Ec
+///
+/// 出典: 梅村魁『鉄筋コンクリート建物の動的耐震設計法』P.106-108（要・原典照合）。
+/// トリリニア骨格の降伏点変形（θy=θe/αy）に用いる剛性低下率で、0〜1 に収まる想定。
+/// 負となる異常入力は 0 にクランプする（1 超は補正しない＝呼び出し側で扱う）。
+pub fn rc_alpha_y_sugano(pt: f64, a_over_d: f64, d_over_full: f64, n: f64) -> f64 {
+    let ad = a_over_d.clamp(1.0, 5.0);
+    let base = if ad >= 2.0 {
+        0.043 + 1.635 * n * pt + 0.043 * ad
+    } else {
+        -0.0836 + 0.159 * ad
+    };
+    (base * d_over_full * d_over_full).max(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +264,29 @@ mod tests {
             qmu,
             qmu_handcalc
         );
+    }
+
+    #[test]
+    fn test_rc_alpha_y_sugano_matches_handcalc() {
+        // a/D=3.0（2.0-5.0域）, pt=0.008, n=15, d/D=0.9
+        let ay = rc_alpha_y_sugano(0.008, 3.0, 0.9, 15.0);
+        let base = 0.043 + 1.635 * 15.0 * 0.008 + 0.043 * 3.0;
+        assert!((ay - base * 0.9 * 0.9).abs() < 1e-9, "αy={ay}");
+        // 代表値は 0.2〜0.4 程度。
+        assert!(ay > 0.15 && ay < 0.5, "αy={ay}");
+
+        // a/D=1.5（1.0-2.0域）は別分岐。
+        let ay2 = rc_alpha_y_sugano(0.008, 1.5, 0.9, 15.0);
+        let base2 = -0.0836 + 0.159 * 1.5;
+        assert!((ay2 - base2 * 0.81).abs() < 1e-9);
+
+        // a/D クランプ: 0.5→1.0, 8.0→5.0。
+        let lo = rc_alpha_y_sugano(0.008, 0.5, 0.9, 15.0);
+        let at1 = rc_alpha_y_sugano(0.008, 1.0, 0.9, 15.0);
+        assert!((lo - at1).abs() < 1e-12);
+        let hi = rc_alpha_y_sugano(0.008, 8.0, 0.9, 15.0);
+        let at5 = rc_alpha_y_sugano(0.008, 5.0, 0.9, 15.0);
+        assert!((hi - at5).abs() < 1e-12);
     }
 
     #[test]

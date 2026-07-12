@@ -294,11 +294,10 @@ mod tests {
 
         let presets = material_presets();
         let find = |name: &str| {
-            presets
+            *presets
                 .iter()
                 .find(|p| p.0 == name)
                 .unwrap_or_else(|| panic!("preset {name} not found"))
-                .clone()
         };
 
         // Fc21/24/30 は全て Fc<=36 帯のため γRC=24.0 kN/m³ で共通。

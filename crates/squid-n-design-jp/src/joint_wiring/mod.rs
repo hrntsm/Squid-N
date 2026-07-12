@@ -80,6 +80,7 @@
 
 use crate::rc::joint::{rc_joint_shear_check, JointShape, RcJointInput};
 use crate::rc::wall::{rc_wall_shear_check, RcWallInput, WallSideColumn};
+use crate::rc::wall_nonlinear::{wall_shear_trilinear, WallShearTrilinearInput};
 use crate::srrc::panel_zone::{src_panel_zone_check, SrcPanelInput};
 use crate::steel::cold_formed::{
     box_zp, cold_formed_column_ratio_check, panel_mpp, ColdFormedInput,
@@ -336,6 +337,10 @@ pub fn collect_joint_checks_with_long(
         let wall_nodes = &elem.nodes;
         let mut side_columns = Vec::new();
         let mut sum_col_depth = 0.0;
+        // せん断非線形トリリニア（Qc/βu/Qu）用の側柱諸元の集計。
+        let mut col_gross_area = 0.0_f64; // Σ b·d（Aw の側柱分）
+        let mut col_main_area_max = 0.0_f64; // 引張側柱1本の主筋量の代表値
+        let mut dc_max = 0.0_f64; // 圧縮側柱せい Dc の代表値
         for m in &members {
             if !m.is_column() {
                 continue;
@@ -393,6 +398,14 @@ pub fn collect_joint_checks_with_long(
                 steel_shear,
             });
             sum_col_depth += d;
+            // 非線形トリリニア用: 側柱の全断面積・主筋量・せいを集計。
+            col_gross_area += b * d;
+            dc_max = dc_max.max(d);
+            let bar_area = |bs: &squid_n_core::section_shape::BarSet| -> f64 {
+                bs.count as f64 * std::f64::consts::PI / 4.0 * bs.dia * bs.dia
+            };
+            let main_area = bar_area(&rebar.main_x) + bar_area(&rebar.main_y);
+            col_main_area_max = col_main_area_max.max(main_area);
         }
         let l_clear = (l - sum_col_depth / 2.0).max(0.1 * l);
         // 設計用せん断力: 等価梁化された壁要素内力の最大水平せん断成分（暫定）。
@@ -421,6 +434,76 @@ pub fn collect_joint_checks_with_long(
         };
         let cr = rc_wall_shear_check(&inp);
         out.push((elem.nodes[0], "耐震壁(RC)".to_string(), cr));
+
+        // ── せん断非線形トリリニア骨格（Qc/βu/Qu、RESP-D「05 非線形モデル」）──
+        // 非線形解析のせん断ばね骨格。付帯柱の主筋量が得られる耐震壁のみ算定する。
+        let aw = thickness * l + col_gross_area;
+        let d_wall = l + sum_col_depth / 2.0;
+        if col_main_area_max > 0.0 && aw > 0.0 && d_wall > 0.0 {
+            // 等価壁厚 te = Aw/D（壁厚 t の 1.5 倍以下、t 以上）。
+            let te = (aw / d_wall).clamp(thickness, 1.5 * thickness);
+            // 平均軸方向応力度 σ0 = 圧縮軸力/Aw（引張は 0）。
+            let n_comp = forces.iter().map(|(_, f)| -f[0]).fold(0.0_f64, f64::max);
+            let sigma_0 = n_comp / aw;
+            // せん断スパン比 M/(Q·D): |M| 最大位置の M/Q を D で割る。
+            // せん断力が実質 0 の位置しかない場合は h/(2·D)（反曲点中央）で代用。
+            let shear_span_ratio = forces
+                .iter()
+                .max_by(|a, b| {
+                    a.1[5]
+                        .abs()
+                        .partial_cmp(&b.1[5].abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .and_then(|(_, f)| {
+                    let q = f[1].abs().max(f[2].abs());
+                    (q > 1e-6).then(|| f[5].abs() / q / d_wall)
+                })
+                .unwrap_or_else(|| h / (2.0 * d_wall));
+            let tri_inp = WallShearTrilinearInput {
+                fc,
+                aw,
+                tension_column_main_area: col_main_area_max,
+                pw_vertical: ps,
+                sigma_y_wall: 295.0, // 壁縦筋 SD295 相当、要・原典照合
+                te,
+                t: thickness,
+                d_wall,
+                dc_compression: dc_max,
+                tension_column_at: col_main_area_max,
+                sigma_wh: 295.0, // 壁横筋 SD295 相当、要・原典照合
+                pwh_ratio: ps,
+                sigma_0,
+                shear_span_ratio,
+                high_strength_shear_rebar: false,
+                opening: if l0p > 1e-9 && h0p > 1e-9 {
+                    Some((l0p, h0p, h, l))
+                } else {
+                    None
+                },
+            };
+            let tri = wall_shear_trilinear(&tri_inp);
+            // 終局せん断強度に対する設計用せん断力の比（Qu 検定）。
+            let ratio = if tri.qu > 0.0 { q_design / tri.qu } else { 0.0 };
+            let detail = format!(
+                "Qc={:.1} kN, βu={:.3}, Qu={:.1} kN, r={:.3}, QD={:.1} kN（せん断非線形トリリニア骨格）",
+                tri.qc / 1000.0,
+                tri.beta_u,
+                tri.qu / 1000.0,
+                tri.r_opening,
+                q_design / 1000.0
+            );
+            out.push((
+                elem.nodes[0],
+                "耐震壁(RC)せん断非線形".to_string(),
+                CheckResult {
+                    ratio,
+                    ok: ratio <= 1.0,
+                    basis: "RESP-D 非線形モデル 耐震壁せん断トリリニア(Qc/βu/Qu)".to_string(),
+                    detail,
+                },
+            ));
+        }
     }
 
     // ── 節点単位の接合部検定 ─────────────────────────────────────

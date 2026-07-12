@@ -24,6 +24,24 @@ pub trait UniaxialMaterial: Send + Sync + Debug {
     /// N-M 相関により降伏面の大きさを解析中に変える要素（材端集中バネ等）が
     /// 用いる。対応しない材料は何もしない（既定実装）。
     fn set_yield(&mut self, _fy: f64) {}
+
+    /// 塑性率（ductility）評価用の参照応力 σref（RESP-D「05 非線形モデル」）。
+    /// 鋼材・鉄筋は降伏強度 fy、コンクリートはシリンダー強度 fc。重み付け平均
+    /// 塑性率 Jm（Σσref·A·|ε|·μi）や降伏判定の分子重みに用いる。弾性材は 0。
+    fn reference_stress(&self) -> f64 {
+        0.0
+    }
+    /// 塑性率評価用の参照ひずみ εref（RESP-D「05 非線形モデル」）。
+    /// 鋼材・鉄筋は降伏ひずみ fy/E、コンクリートは圧縮強度時ひずみ |εc0|。
+    /// 各ファイバの塑性率 μi = |ε|/εref、降伏判定 |ε| ≥ εref に用いる。弾性材は 0。
+    fn reference_strain(&self) -> f64 {
+        0.0
+    }
+
+    /// コンクリート履歴の除荷則を解析種別で切替える（RESP-D「05 非線形モデル」:
+    /// 静的解析は逆行型、動的解析は原点指向型）。`dynamic=true` で原点指向型、
+    /// `false` で逆行型。対応しない材料（鋼材等）は何もしない（既定実装）。
+    fn set_concrete_hysteresis(&mut self, _dynamic: bool) {}
 }
 
 // ──────────────────────────── バイリニア鋼材 ────────────────────────────
@@ -80,6 +98,23 @@ impl UniaxialMaterial for Bilinear {
     fn set_yield(&mut self, fy: f64) {
         // kinematic hardening の背応力・塑性ひずみは維持したまま降伏面半径のみ更新
         self.fy = fy.max(1e-9);
+    }
+
+    fn reference_stress(&self) -> f64 {
+        // 実質弾性（fy を極端に大きく設定した鋼材ダミー）は塑性率評価の対象外。
+        if self.fy >= 1e18 {
+            0.0
+        } else {
+            self.fy
+        }
+    }
+
+    fn reference_strain(&self) -> f64 {
+        if self.fy >= 1e18 || self.e <= 0.0 {
+            0.0
+        } else {
+            self.fy / self.e
+        }
     }
 
     fn trial(&mut self, strain: f64) -> (f64, f64) {
@@ -230,6 +265,18 @@ impl MenegottoPinto {
 }
 
 impl UniaxialMaterial for MenegottoPinto {
+    fn reference_stress(&self) -> f64 {
+        self.fy
+    }
+
+    fn reference_strain(&self) -> f64 {
+        if self.e > 0.0 {
+            self.fy / self.e
+        } else {
+            0.0
+        }
+    }
+
     fn trial(&mut self, strain: f64) -> (f64, f64) {
         let c = &self.committed;
         // 進行方向の判定と反転検知（trial 内で行う＝標準 MP）
@@ -413,6 +460,16 @@ impl Concrete {
 }
 
 impl UniaxialMaterial for Concrete {
+    fn reference_stress(&self) -> f64 {
+        // コンクリートの参照応力は圧縮強度 fc（塑性率 Jm の重み・降伏判定に用いる）。
+        self.fc
+    }
+
+    fn reference_strain(&self) -> f64 {
+        // コンクリートの参照ひずみは圧縮強度時ひずみ |εc0|。
+        self.ec0.abs()
+    }
+
     fn trial(&mut self, strain: f64) -> (f64, f64) {
         let c = &self.committed;
         let e0 = self.e0();

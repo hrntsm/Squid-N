@@ -40,6 +40,11 @@ pub enum ElementKind {
     /// 軸方向の変形成分を独立なバネ剛性として持ちうる 2 節点要素。
     /// 各自由度のバネ定数は `ElementData::spring` に保持する（局所軸 6 成分）。
     NodalSpring,
+    /// 免震支承材（RESP-D マニュアル「05 非線形モデル」免震支承材）。
+    /// 2 節点要素で、水平は非線形せん断ばね（マルチシアスプリング＝積層ゴム系
+    /// バイリニア、または摩擦ばね＝弾性すべり支承 Qmax=μN）、鉛直は弾性軸ばね。
+    /// 特性は `Model::isolator_attrs` に要素 ID と対で保持する。
+    Isolator,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -421,6 +426,9 @@ pub struct Model {
     /// PCa（プレキャスト）梁の水平接合面検定用属性（RESP-D マニュアル 04 断面検定）。
     #[serde(default)]
     pub pca_attrs: Vec<PcaBeamAttr>,
+    /// 免震支承材の非線形特性（`ElementKind::Isolator` 要素、RESP-D 05 非線形モデル）。
+    #[serde(default)]
+    pub isolator_attrs: Vec<IsolatorAttr>,
     /// 一本部材の指定（RESP-D マニュアル 04 断面検定「採用応力 ■一本部材指定時の
     /// 採用応力」）。各エントリは**軸方向に連続する梁要素の ID を並び順**で持ち、
     /// 断面検定の採用応力（端部・中央モーメント、部材長、内法長、せん断スパン比
@@ -608,6 +616,7 @@ impl Model {
             && self.brb_attrs == other.brb_attrs
             && self.pca_attrs == other.pca_attrs
             && self.beam_groups == other.beam_groups
+            && self.isolator_attrs == other.isolator_attrs
     }
 }
 

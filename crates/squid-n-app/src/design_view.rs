@@ -261,6 +261,37 @@ pub fn design_table(ui: &mut egui::Ui, app: &mut App) {
             });
     }
 
+    // ── 免震支承材の非線形特性（RESP-D「05 非線形モデル」） ────────────
+    if !app.model.isolator_attrs.is_empty() {
+        ui.add_space(12.0);
+        ui.strong("免震支承材の非線形特性");
+        for a in &app.model.isolator_attrs {
+            let p = a.props;
+            let ks = squid_n_design_jp::isolator::multi_shear_stiffness_reduction(p.n_springs);
+            let qs = squid_n_design_jp::isolator::multi_shear_strength_reduction(p.n_springs);
+            let desc = match p.kind {
+                squid_n_core::model::IsolatorKind::LaminatedRubber => format!(
+                    "積層ゴム系 K1={:.0} K2={:.0} Qd={:.0}kN Kv={:.0}",
+                    p.k1,
+                    p.k2,
+                    p.qd / 1000.0,
+                    p.kv
+                ),
+                squid_n_core::model::IsolatorKind::ElasticSliding => format!(
+                    "弾性すべり μ={:.3} N={:.0}kN Qmax={:.0}kN Kv={:.0}",
+                    p.mu,
+                    p.n_long / 1000.0,
+                    squid_n_design_jp::isolator::friction_max_force(p.mu, p.n_long) / 1000.0,
+                    p.kv
+                ),
+            };
+            ui.label(format!(
+                "部材{}: {} ／ マルチシア n={} 剛性低減={:.4} 耐力低減={:.4}",
+                a.elem.0, desc, p.n_springs, ks, qs
+            ));
+        }
+    }
+
     // ── 二次設計: 層指標（層間変形角・剛性率・偏心率） ────────────
     ui.add_space(12.0);
     ui.strong("層指標（二次設計: 層間変形角・剛性率・偏心率）");

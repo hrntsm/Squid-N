@@ -433,3 +433,94 @@ fn wall_envelope_mode_excludes_wall_when_envelope_ratio_too_large() {
         "Envelope モードでは包絡矩形が大きく耐震壁から除外されるはず"
     );
 }
+
+/// 側柱付き耐震壁は、せん断非線形トリリニア骨格（Qc/βu/Qu、RESP-D「05 非線形
+/// モデル」）が算定・出力される（付帯柱の主筋量が得られる壁のみ）。
+#[test]
+fn wall_with_side_columns_emits_nonlinear_shear_trilinear() {
+    use squid_n_core::section_shape::{BarSet, RcRebar, ShearBar};
+
+    let mut model = wall_model(None);
+    // 両側の鉛直辺（節点 0-3・1-2）に 600×600 RC 側柱を追加する。
+    let col_shape = SectionShape::RcRect {
+        b: 600.0,
+        d: 600.0,
+        rebar: RcRebar {
+            main_x: BarSet {
+                count: 8,
+                dia: 22.0,
+                layers: 1,
+            },
+            main_y: BarSet {
+                count: 8,
+                dia: 22.0,
+                layers: 1,
+            },
+            cover: 50.0,
+            shear: ShearBar {
+                dia: 10.0,
+                pitch: 100.0,
+                legs: 2,
+                grade: None,
+            },
+        },
+    };
+    model
+        .sections
+        .push(col_shape.to_section(SectionId(1), "C600".into()));
+    for (eid, n0, n1) in [(1u32, 0u32, 3u32), (2u32, 1u32, 2u32)] {
+        let mut v: SmallVec<[NodeId; 8]> = SmallVec::new();
+        v.push(NodeId(n0));
+        v.push(NodeId(n1));
+        model.elements.push(ElementData {
+            id: ElemId(eid),
+            kind: ElementKind::Beam,
+            nodes: v,
+            section: Some(SectionId(1)),
+            material: Some(MaterialId(0)),
+            local_axis: LocalAxis {
+                ref_vector: [1.0, 0.0, 0.0],
+            },
+            end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+            force_regime: ForceRegime::Auto,
+            rigid_zone: RigidZone::default(),
+            plastic_zone: None,
+            spring: None,
+        });
+    }
+    // 圧縮軸力 1000kN・水平せん断 800kN・曲げ 1000kN·m（壁）。
+    let forces: [(f64, [f64; 6]); 1] = [(0.0, [-1_000_000.0, 800_000.0, 0.0, 0.0, 0.0, 1.0e9])];
+    // 側柱の内力（実アプリではソルバ結果に全要素が含まれる。側柱の主筋量を
+    // 集計するため member_forces に側柱の内力エントリも渡す）。
+    let col_forces: [(f64, [f64; 6]); 1] = [(0.0, [-500_000.0, 0.0, 0.0, 0.0, 0.0, 0.0])];
+    let member_forces = vec![
+        (ElemId(0), forces.as_slice()),
+        (ElemId(1), col_forces.as_slice()),
+        (ElemId(2), col_forces.as_slice()),
+    ];
+    let checks = collect_joint_checks(&model, &member_forces, LoadTerm::Short);
+
+    let nl = checks
+        .iter()
+        .find(|(_, label, _)| label == "耐震壁(RC)せん断非線形");
+    assert!(
+        nl.is_some(),
+        "側柱付き壁でせん断非線形トリリニアが出力される"
+    );
+    let (_, _, cr) = nl.unwrap();
+    assert!(
+        cr.detail.contains("Qc=") && cr.detail.contains("βu=") && cr.detail.contains("Qu="),
+        "detail にトリリニア諸元が含まれる: {}",
+        cr.detail
+    );
+    assert!(cr.ratio > 0.0, "Qu 検定比が正: {}", cr.ratio);
+
+    // 側柱の無い壁（主筋量ゼロ）ではトリリニアは出力されない。
+    let plain = collect_joint_checks(&wall_model(None), &member_forces, LoadTerm::Short);
+    assert!(
+        !plain
+            .iter()
+            .any(|(_, label, _)| label == "耐震壁(RC)せん断非線形"),
+        "側柱の無い壁はトリリニア対象外"
+    );
+}

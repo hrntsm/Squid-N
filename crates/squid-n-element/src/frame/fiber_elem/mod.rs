@@ -1,10 +1,151 @@
-use crate::behavior::{Ctx, ElemState, ElementBehavior, LocalMat, LocalVec, MassOption};
+use crate::behavior::{
+    Ctx, DuctilityProbe, ElemState, ElementBehavior, LocalMat, LocalVec, MassOption,
+};
 use smallvec::SmallVec;
 use squid_n_core::dof::DofMap;
 use squid_n_core::ids::NodeId;
-use squid_n_material::uniaxial::UniaxialMaterial;
-use squid_n_section::fiber::FiberSection;
+use squid_n_core::section_shape::{BarSet, RcRebar, SectionShape};
+use squid_n_material::uniaxial::{Bilinear, UniaxialMaterial};
+use squid_n_section::fiber::{Fiber, FiberSection};
 use std::any::Any;
+
+/// ガウス点のファイバー断面と材料を構築する（RESP-D「05 非線形モデル」）。
+/// RC 断面（RcRect/RcCircle）はコンクリートファイバー格子に加え、主筋を点ファイバー
+/// （バイリニア鋼材）として**分離**して配置する（従来は均質コンクリート断面で
+/// 引張側鉄筋を無視していた）。それ以外（鋼材・複合断面）は均質格子とする。
+/// `fc≤60` はコンクリートに NewRC、超過は放物線モデルを用いる。
+#[allow(clippy::too_many_arguments)]
+fn build_gauss_fibers(
+    width: f64,
+    depth: f64,
+    nw: usize,
+    nd: usize,
+    shape: Option<&SectionShape>,
+    fc: Option<f64>,
+    e: f64,
+    fy: Option<f64>,
+) -> (FiberSection, Vec<Box<dyn UniaxialMaterial>>) {
+    // 基本格子（コンクリート or 鋼材）。
+    let base: Box<dyn UniaxialMaterial> = match fc {
+        Some(fc) if fc <= 60.0 => Box::new(squid_n_material::ConcreteNewRc::new(fc, 2.0)),
+        Some(fc) => Box::new(squid_n_material::uniaxial::Concrete::new(fc, 2.0)),
+        None => Box::new(Bilinear::new(e, fy.unwrap_or(1e20), 0.01)),
+    };
+    let grid = squid_n_section::fiber::rect_fiber_section(width, depth, nw, nd, 0);
+    let mut fibers = grid.fibers;
+    let mut mats: Vec<Box<dyn UniaxialMaterial>> =
+        (0..fibers.len()).map(|_| base.clone_box()).collect();
+
+    // RC 断面: 主筋を点ファイバー（バイリニア鋼材、fy 既定 SD345=345）として追加。
+    if fc.is_some() {
+        let rebar_fy = fy.unwrap_or(345.0);
+        let rebar_e = 205000.0;
+        match shape {
+            Some(SectionShape::RcRect { rebar, b, d }) => {
+                add_rebar_fibers_rect(&mut fibers, &mut mats, rebar, *b, *d, rebar_e, rebar_fy);
+            }
+            Some(SectionShape::RcCircle { rebar, d }) => {
+                add_rebar_fibers_circle(&mut fibers, &mut mats, rebar, *d, rebar_e, rebar_fy);
+            }
+            _ => {}
+        }
+    }
+    (FiberSection { fibers }, mats)
+}
+
+/// 矩形 RC 断面の主筋点ファイバーを追加する（`mn_surface::rebar_fibers_rect` と同じ
+/// 配置規則: せい方向主筋 main_x を上下面へ、幅方向主筋 main_y を側面内分点へ）。
+/// 座標系は `rect_fiber_section` と同じ（y=幅方向、z=せい方向。強軸曲げは z）。
+fn add_rebar_fibers_rect(
+    fibers: &mut Vec<Fiber>,
+    mats: &mut Vec<Box<dyn UniaxialMaterial>>,
+    rebar: &RcRebar,
+    b: f64,
+    d: f64,
+    e: f64,
+    fy: f64,
+) {
+    let bar_area = |set: &BarSet| std::f64::consts::PI * set.dia * set.dia / 4.0;
+    let push = |y: f64,
+                z: f64,
+                a: f64,
+                mats: &mut Vec<Box<dyn UniaxialMaterial>>,
+                fibers: &mut Vec<Fiber>| {
+        fibers.push(Fiber {
+            y,
+            z,
+            area: a,
+            material: 1,
+        });
+        mats.push(Box::new(Bilinear::new(e, fy, 0.01)));
+    };
+    // せい方向主筋（上下面）。
+    let set = &rebar.main_x;
+    if set.count > 0 {
+        let a = bar_area(set);
+        for layer in 0..set.layers.max(1) {
+            let z0 = d / 2.0 - rebar.cover - layer as f64 * 2.5 * set.dia;
+            let span = b - 2.0 * rebar.cover;
+            for i in 0..set.count {
+                let y = if set.count == 1 {
+                    0.0
+                } else {
+                    -span / 2.0 + span * i as f64 / (set.count - 1) as f64
+                };
+                for zsign in [1.0, -1.0] {
+                    push(y, zsign * z0, a, mats, fibers);
+                }
+            }
+        }
+    }
+    // 幅方向主筋（側面内分点）。
+    let set = &rebar.main_y;
+    if set.count > 0 {
+        let a = bar_area(set);
+        for layer in 0..set.layers.max(1) {
+            let y0 = b / 2.0 - rebar.cover - layer as f64 * 2.5 * set.dia;
+            let span = d - 2.0 * rebar.cover;
+            for i in 0..set.count {
+                let z = -span / 2.0 + span * (i as f64 + 1.0) / (set.count + 1) as f64;
+                for ysign in [1.0, -1.0] {
+                    push(ysign * y0, z, a, mats, fibers);
+                }
+            }
+        }
+    }
+}
+
+/// 円形 RC 断面の主筋点ファイバーを追加する（main_x+main_y の合計本数を円周へ等配）。
+fn add_rebar_fibers_circle(
+    fibers: &mut Vec<Fiber>,
+    mats: &mut Vec<Box<dyn UniaxialMaterial>>,
+    rebar: &RcRebar,
+    d: f64,
+    e: f64,
+    fy: f64,
+) {
+    let total = (rebar.main_x.count + rebar.main_y.count) as usize;
+    if total == 0 {
+        return;
+    }
+    let dia = if rebar.main_x.count > 0 {
+        rebar.main_x.dia
+    } else {
+        rebar.main_y.dia
+    };
+    let a = std::f64::consts::PI * dia * dia / 4.0;
+    let r = d / 2.0 - rebar.cover;
+    for i in 0..total {
+        let th = 2.0 * std::f64::consts::PI * i as f64 / total as f64;
+        fibers.push(Fiber {
+            y: r * th.cos(),
+            z: r * th.sin(),
+            area: a,
+            material: 1,
+        });
+        mats.push(Box::new(Bilinear::new(e, fy, 0.01)));
+    }
+}
 
 pub struct GaussPoint {
     pub xi: f64,
@@ -90,29 +231,15 @@ impl FiberBeam {
 
         let nw = 12;
         let nd = 20;
-        let n_fibers = nw * nd;
-
-        let template: Box<dyn UniaxialMaterial> = if let Some(fc) = mat_ref.and_then(|m| m.fc) {
-            Box::new(squid_n_material::uniaxial::Concrete::new(fc, 2.0))
-        } else {
-            // 鋼材：降伏応力 fy が与えられれば弾塑性、無ければ実質弾性（fy=1e20）。
-            let fy = mat_ref.and_then(|m| m.fy).unwrap_or(1e20);
-            Box::new(squid_n_material::uniaxial::Bilinear::new(e, fy, 0.01))
-        };
-
+        let shape = sec.and_then(|s| s.shape.as_ref());
+        let fc = mat_ref.and_then(|m| m.fc);
+        let fy = mat_ref.and_then(|m| m.fy);
+        // RC 断面はコンクリート格子＋主筋分離（RESP-D「05 非線形モデル」）。
+        let (sec_a, mats_a) = build_gauss_fibers(width, depth, nw, nd, shape, fc, e, fy);
+        let (sec_b, mats_b) = build_gauss_fibers(width, depth, nw, nd, shape, fc, e, fy);
         let gauss_points = vec![
-            GaussPoint::new(
-                -0.5773502691896257,
-                1.0,
-                squid_n_section::fiber::rect_fiber_section(width, depth, nw, nd, 0),
-                squid_n_section::fiber::uniform_fiber_mats(&*template, n_fibers),
-            ),
-            GaussPoint::new(
-                0.5773502691896257,
-                1.0,
-                squid_n_section::fiber::rect_fiber_section(width, depth, nw, nd, 0),
-                squid_n_section::fiber::uniform_fiber_mats(&*template, n_fibers),
-            ),
+            GaussPoint::new(-0.5773502691896257, 1.0, sec_a, mats_a),
+            GaussPoint::new(0.5773502691896257, 1.0, sec_b, mats_b),
         ];
 
         let axis = crate::transform::LocalFrame::from_nodes(
@@ -176,29 +303,17 @@ impl FiberBeam {
         let iy = sec.map(|s| s.iy).unwrap_or(1.0);
         let iz = sec.map(|s| s.iz).unwrap_or(1.0);
 
-        let template: Box<dyn UniaxialMaterial> = if let Some(fc) = mat_ref.and_then(|m| m.fc) {
-            Box::new(squid_n_material::uniaxial::Concrete::new(fc, 2.0))
-        } else {
-            let fy = mat_ref.and_then(|m| m.fy).unwrap_or(1e20);
-            Box::new(squid_n_material::uniaxial::Bilinear::new(e, fy, 0.01))
-        };
-
         // 端部積分点: ξ=∓1、重み w·(L/2) = Lp → w = 2Lp/L
         let w_end = 2.0 * lp / l;
-        let n_fibers = nw * nd;
+        let shape = sec.and_then(|s| s.shape.as_ref());
+        let fc = mat_ref.and_then(|m| m.fc);
+        let fy = mat_ref.and_then(|m| m.fy);
+        // RC 断面はコンクリート格子＋主筋分離（RESP-D「05 非線形モデル」）。
+        let (sec_a, mats_a) = build_gauss_fibers(width, depth, nw, nd, shape, fc, e, fy);
+        let (sec_b, mats_b) = build_gauss_fibers(width, depth, nw, nd, shape, fc, e, fy);
         fb.gauss_points = vec![
-            GaussPoint::new(
-                -1.0,
-                w_end,
-                squid_n_section::fiber::rect_fiber_section(width, depth, nw, nd, 0),
-                squid_n_section::fiber::uniform_fiber_mats(&*template, n_fibers),
-            ),
-            GaussPoint::new(
-                1.0,
-                w_end,
-                squid_n_section::fiber::rect_fiber_section(width, depth, nw, nd, 0),
-                squid_n_section::fiber::uniform_fiber_mats(&*template, n_fibers),
-            ),
+            GaussPoint::new(-1.0, w_end, sec_a, mats_a),
+            GaussPoint::new(1.0, w_end, sec_b, mats_b),
         ];
 
         // 中央弾性部 [Lp, L−Lp] の剛性: B(ξ)ᵀ·diag(EA,EIy,EIz)·B(ξ) を
@@ -615,6 +730,66 @@ impl ElementBehavior for FiberBeam {
                 for (mat, mat_bytes) in gp.mats.iter_mut().zip(gp_mats) {
                     mat.deserialize_state(&mat_bytes);
                 }
+            }
+        }
+    }
+
+    /// 塑性率評価用の危険断面プローブ（RESP-D「05 非線形モデル」）。
+    /// 現在の `trial_disp`（ローカル系）から各ガウス点の曲率を復元し、曲率が
+    /// 最大のガウス点（危険断面）についてファイバーひずみを集約する。
+    fn ductility_probe(&self) -> Option<DuctilityProbe> {
+        let l = self.length;
+        if l <= 0.0 || self.gauss_points.is_empty() {
+            return None;
+        }
+        let td = &self.trial_disp;
+        // 曲率が最大のガウス点（危険断面）を選ぶ。
+        let mut best: Option<(f64, usize, f64, f64, f64)> = None; // (|κ|, idx, eps0, ky, kz)
+        for (gi, gp) in self.gauss_points.iter().enumerate() {
+            let b = Self::compute_b_matrix(gp.xi, l);
+            let eps0 = b[0][0] * td[0] + b[0][6] * td[6];
+            let ky = b[1][2] * td[2] + b[1][4] * td[4] + b[1][8] * td[8] + b[1][10] * td[10];
+            let kz = b[2][1] * td[1] + b[2][5] * td[5] + b[2][7] * td[7] + b[2][11] * td[11];
+            let kappa = (ky * ky + kz * kz).sqrt();
+            if best.is_none_or(|(bk, ..)| kappa > bk) {
+                best = Some((kappa, gi, eps0, ky, kz));
+            }
+        }
+        let (kappa, gi, eps0, ky, kz) = best?;
+        let gp = &self.gauss_points[gi];
+        let mut max_t = 0.0_f64;
+        let mut max_c = 0.0_f64;
+        let mut max_yr = 0.0_f64;
+        let mut jm_num = 0.0_f64;
+        let mut jm_den = 0.0_f64;
+        for (i, fiber) in gp.section.fibers.iter().enumerate() {
+            let eps = eps0 - kz * fiber.y + ky * fiber.z;
+            max_t = max_t.max(eps);
+            max_c = max_c.max(-eps);
+            let sref = gp.mats[i].reference_stress();
+            let eref = gp.mats[i].reference_strain();
+            if sref > 0.0 && eref > 0.0 {
+                let mu_i = eps.abs() / eref;
+                max_yr = max_yr.max(mu_i);
+                let w = sref * fiber.area * eps.abs();
+                jm_num += w * mu_i;
+                jm_den += w;
+            }
+        }
+        let jm = if jm_den > 0.0 { jm_num / jm_den } else { 0.0 };
+        Some(DuctilityProbe {
+            curvature: kappa,
+            max_tension_strain: max_t,
+            max_compression_strain: max_c,
+            max_yield_ratio: max_yr,
+            jm,
+        })
+    }
+
+    fn set_concrete_hysteresis(&mut self, dynamic: bool) {
+        for gp in &mut self.gauss_points {
+            for mat in &mut gp.mats {
+                mat.set_concrete_hysteresis(dynamic);
             }
         }
     }

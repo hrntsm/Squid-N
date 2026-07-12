@@ -258,6 +258,35 @@ impl SectionShape {
         }
     }
 
+    /// 鉄骨断面の塑性断面係数 Zp [mm³]（強軸）。H・箱・パイプは閉形式、
+    /// それ以外（RC・SRC・CFT・不明形状）は None を返す（RESP-D「05 非線形モデル」
+    /// 鉄骨梁の全塑性モーメント Mp=Zp·σy に用いる）。
+    pub fn plastic_modulus_strong(&self) -> Option<f64> {
+        match *self {
+            SectionShape::SteelH {
+                height,
+                width,
+                web_thick,
+                flange_thick,
+            } => Some(
+                width * flange_thick * (height - flange_thick)
+                    + web_thick * (height - 2.0 * flange_thick).powi(2) / 4.0,
+            ),
+            SectionShape::SteelBox {
+                height,
+                width,
+                thick,
+            } => Some(
+                width * height * height / 4.0
+                    - (width - 2.0 * thick) * (height - 2.0 * thick).powi(2) / 4.0,
+            ),
+            SectionShape::SteelPipe { outer_dia, thick } => {
+                Some((outer_dia.powi(3) - (outer_dia - 2.0 * thick).powi(3)) / 6.0)
+            }
+            _ => None,
+        }
+    }
+
     /// Moment of inertia about the local y‑axis [mm⁴] (strong axis for beams).
     pub fn calc_iy(&self) -> f64 {
         match *self {
