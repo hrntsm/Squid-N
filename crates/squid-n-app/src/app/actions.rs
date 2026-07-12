@@ -511,13 +511,21 @@ impl App {
     }
 
     /// 終局検定用の部材需要（軸力 [N]圧縮正・強軸/弱軸の設計用曲げ [N·mm]）。
-    /// 先頭重力ケース（G+P 相当）の静的解析結果を優先し、無ければ最後に実行した
-    /// 静的解析結果を用いる。軸力は始端値、曲げは部材内の最大絶対値（各方向）。
-    /// 2 軸曲げ余裕度の需要曲げも本結果を用いるため、地震時の相関を評価するには
-    /// 該当する組合せ／地震静的を最後に実行しておくこと（簡略化）。
-    /// 静的解析結果が無ければ空（＝需要 0）。
+    ///
+    /// `ultimate_use_pushover` が真でプッシュオーバー応答（部材別応答）が得られる場合は、
+    /// 終局時の部材別 Qmu（設計用せん断）・需要曲げ・軸力・Rp を直接反映する
+    /// （[`Self::ultimate_demand_from_pushover`]）。それ以外は先頭重力ケース（G+P 相当）の
+    /// 静的解析結果を優先し、無ければ最後に実行した静的解析結果を用いる（軸力は始端値、
+    /// 曲げは部材内の最大絶対値、Qmu は両端ヒンジ 2·Mu/内法、Rp は UI 一律指定）。
+    /// いずれの応答も無ければ空（＝需要 0）。
     fn ultimate_demand_by_elem(&self) -> Vec<(ElemId, squid_n_design_jp::ultimate::MemberDemand)> {
         use squid_n_design_jp::ultimate::MemberDemand;
+        // プッシュオーバー応答からの直接反映（優先、指定時かつ応答があれば）。
+        if self.ultimate_use_pushover {
+            if let Some(demand) = self.ultimate_demand_from_pushover() {
+                return demand;
+            }
+        }
         let gravity_lc = gravity_cases_for_seismic_weight(&self.model)
             .first()
             .copied();
@@ -538,11 +546,52 @@ impl App {
                         let n_axial = mf.at.first().map(|(_, f)| f[0])?;
                         let mz = mf.at.iter().map(|(_, f)| f[5].abs()).fold(0.0, f64::max);
                         let my = mf.at.iter().map(|(_, f)| f[4].abs()).fold(0.0, f64::max);
-                        Some((*id, MemberDemand { n_axial, mz, my }))
+                        Some((
+                            *id,
+                            MemberDemand {
+                                n_axial,
+                                mz,
+                                my,
+                                ..Default::default()
+                            },
+                        ))
                     })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
+    }
+
+    /// プッシュオーバー応答（部材別応答）から終局検定用の部材需要を組み立てる。
+    ///
+    /// プッシュオーバー最終ステップの部材別応答（[`squid_n_solver::pushover::PushoverMemberResponse`]）
+    /// から、軸力（圧縮正）・強軸/弱軸の設計用曲げ・強軸設計用せん断・部材別 Rp を
+    /// 反映する。プッシュオーバー未実行、または部材別応答が空（ステップ未確定）の場合は
+    /// `None`（呼び出し側が静的応答へフォールバック）。
+    fn ultimate_demand_from_pushover(
+        &self,
+    ) -> Option<Vec<(ElemId, squid_n_design_jp::ultimate::MemberDemand)>> {
+        use squid_n_design_jp::ultimate::MemberDemand;
+        let po = self.results.as_ref()?.pushover.as_ref()?;
+        if po.member_response.is_empty() {
+            return None;
+        }
+        Some(
+            po.member_response
+                .iter()
+                .map(|r| {
+                    (
+                        r.elem,
+                        MemberDemand::from_pushover(
+                            r.axial,
+                            r.m_strong,
+                            r.m_weak,
+                            r.shear_strong,
+                            r.rp,
+                        ),
+                    )
+                })
+                .collect(),
+        )
     }
 
     /// CFT 柱の軸終局検定（RESP-D「06 終局検定」CFT）: CftBox/CftPipe 柱の

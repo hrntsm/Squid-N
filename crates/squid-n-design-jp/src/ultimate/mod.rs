@@ -65,6 +65,10 @@ pub use rc_shear_ductility::{
 
 /// 部材の設計用需要（終局検定の入力）。**圧縮を正**とする軸力と、強軸・弱軸まわりの
 /// 設計用曲げモーメント（応答値。二軸曲げ余裕度に用いる）。
+///
+/// `shear`・`rp` は**プッシュオーバー応答からの直接反映**（[`MemberDemand::from_pushover`]）
+/// に用いる任意項目で、`None`（既定）のときは従来どおり両端ヒンジ `Qmu=2·Mu/内法` と
+/// UI 一律指定 Rp（[`UltimateShearOptions::rp`]）を用いる。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MemberDemand {
     /// 設計軸力 [N]（**圧縮正**）。柱の Mu・軸余裕度に用いる。
@@ -73,15 +77,35 @@ pub struct MemberDemand {
     pub mz: f64,
     /// 弱軸（幅方向）まわりの設計用曲げモーメント Mmy [N·mm]（符号は内部で abs）。
     pub my: f64,
+    /// 設計用せん断力 Qm [N]（プッシュオーバー応答の強軸せん断。`Some` のとき
+    /// `Qmu = 上限強度倍率·|Qm|` として両端ヒンジ略算（2·Mu/内法）を置き換える）。
+    pub shear: Option<f64>,
+    /// 部材別のヒンジ回転角 Rp [rad]（プッシュオーバー終局時の部材変形角）。`Some`
+    /// のとき ν・cotφ・μ・tanθ に用いる Rp を [`UltimateShearOptions::rp`] から置き換える。
+    pub rp: Option<f64>,
 }
 
 impl MemberDemand {
-    /// 軸力のみ（曲げ需要 0）の需要を作る。
+    /// 軸力のみ（曲げ・せん断需要 0、Rp は UI 一律指定に従う）の需要を作る。
     pub fn axial(n_axial: f64) -> Self {
         Self {
             n_axial,
             mz: 0.0,
             my: 0.0,
+            shear: None,
+            rp: None,
+        }
+    }
+
+    /// プッシュオーバー応答から部材需要を作る。軸力（圧縮正）・強軸/弱軸の設計用曲げ・
+    /// 強軸設計用せん断・部材別 Rp を直接反映する（`Qmu` と Rp を応答値で置き換える）。
+    pub fn from_pushover(n_axial: f64, mz: f64, my: f64, shear: f64, rp: f64) -> Self {
+        Self {
+            n_axial,
+            mz,
+            my,
+            shear: Some(shear),
+            rp: Some(rp),
         }
     }
 }
@@ -467,6 +491,18 @@ fn check_member(
     if fc <= 0.0 || b <= 0.0 || d <= 0.0 {
         return None;
     }
+    // 部材別 Rp（プッシュオーバー応答からの直接反映）が与えられていれば UI 一律 Rp を
+    // 置き換える。以降 opts.rp を参照する全経路（ν・cotφ・μ・tanθ）に効く。
+    let opts_owned;
+    let opts = if let Some(rp) = demand.rp {
+        opts_owned = UltimateShearOptions {
+            rp: rp.max(0.0),
+            ..*opts
+        };
+        &opts_owned
+    } else {
+        opts
+    };
     let kind = member_kind(elem, model);
     let sigma_y = mat.fy.unwrap_or(345.0);
     let l_clear = clear_span(elem, model);
@@ -501,11 +537,17 @@ fn check_member(
         _ => rc_mu_simple(&cap),
     };
 
-    // 両端ヒンジ時せん断力 Qmu = 上限強度倍率·2·Mu/内法。
-    let qmu = if l_clear > 0.0 {
-        opts.upper_strength_factor * 2.0 * mu / l_clear
-    } else {
-        0.0
+    // 設計用せん断力 Qmu。プッシュオーバー応答の設計用せん断が与えられていれば
+    // それを直接反映（上限強度倍率を乗じる）、無ければ両端ヒンジ略算 2·Mu/内法。
+    let qmu = match demand.shear {
+        Some(qm) => opts.upper_strength_factor * qm.abs(),
+        None => {
+            if l_clear > 0.0 {
+                opts.upper_strength_factor * 2.0 * mu / l_clear
+            } else {
+                0.0
+            }
+        }
     };
 
     // 終局せん断強度 Qsu（塑性理論式）または Vu（靭性指針式）。

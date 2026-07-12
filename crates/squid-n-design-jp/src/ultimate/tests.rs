@@ -246,6 +246,7 @@ fn test_ultimate_check_biaxial_bending() {
             n_axial: 1_500_000.0,
             mz: 2.0e8,
             my: 1.0e8,
+            ..Default::default()
         },
     )];
     let uni = collect_rc_ultimate_checks(&model, &demand, &UltimateShearOptions::default());
@@ -349,6 +350,55 @@ fn test_ultimate_check_shear_method_ductility() {
         "塑性 Qbu={} と靭性 Vbu={} は一般に異なるはず",
         col_p.qbu,
         col_d.qbu
+    );
+}
+
+/// プッシュオーバー応答からの部材別 Rp・設計用せん断力の直接反映が機能する。
+#[test]
+fn test_ultimate_check_pushover_demand() {
+    let model = column_and_beam_model();
+
+    // (1) 設計用せん断力 Qm を直接反映すると Qmu は 2·Mu/内法 ではなく Qm になる。
+    let qm = 123_456.0_f64;
+    let demand = vec![(
+        ElemId(0),
+        MemberDemand::from_pushover(1_000_000.0, 1.0e8, 5.0e7, qm, 0.0),
+    )];
+    let checks = collect_rc_ultimate_checks(&model, &demand, &UltimateShearOptions::default());
+    let col = checks.iter().find(|c| c.elem == ElemId(0)).unwrap();
+    // 上限強度倍率=1.0（既定）なので Qmu = |Qm|。
+    assert!(
+        (col.qmu - qm).abs() < 1e-3,
+        "Qmu={} は応答せん断 Qm={} を反映するはず",
+        col.qmu,
+        qm
+    );
+
+    // (2) 部材別 Rp を上げると（塑性理論式）柱の Qsu は低下する（ν・cotφ 低減）。
+    let d_rp0 = vec![(
+        ElemId(0),
+        MemberDemand::from_pushover(1_000_000.0, 1.0e8, 5.0e7, qm, 0.0),
+    )];
+    let d_rp3 = vec![(
+        ElemId(0),
+        MemberDemand::from_pushover(1_000_000.0, 1.0e8, 5.0e7, qm, 0.03),
+    )];
+    let c0 = collect_rc_ultimate_checks(&model, &d_rp0, &UltimateShearOptions::default());
+    let c3 = collect_rc_ultimate_checks(&model, &d_rp3, &UltimateShearOptions::default());
+    let q0 = c0.iter().find(|c| c.elem == ElemId(0)).unwrap().qsu;
+    let q3 = c3.iter().find(|c| c.elem == ElemId(0)).unwrap().qsu;
+    assert!(
+        q3 < q0,
+        "部材別 Rp=0.03 の Qsu={q3} は Rp=0 の Qsu={q0} より小さいはず"
+    );
+
+    // (3) shear/rp 未指定（axial のみ）は従来どおり Qmu=2·Mu/内法（Qm 直接反映なし）。
+    let d_axial = vec![(ElemId(0), MemberDemand::axial(1_000_000.0))];
+    let ca = collect_rc_ultimate_checks(&model, &d_axial, &UltimateShearOptions::default());
+    let col_a = ca.iter().find(|c| c.elem == ElemId(0)).unwrap();
+    assert!(
+        (col_a.qmu - qm).abs() > 1.0,
+        "shear 未指定時は Qmu が応答せん断と一致しないはず（両端ヒンジ略算）"
     );
 }
 

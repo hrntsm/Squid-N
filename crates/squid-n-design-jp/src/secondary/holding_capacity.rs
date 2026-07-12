@@ -348,6 +348,7 @@ mod tests {
             shear_yields: vec![],
             mechanism: MechanismType::Overall,
             qu: 0.0,
+            member_response: vec![],
         }
     }
 

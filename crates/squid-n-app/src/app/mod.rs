@@ -331,6 +331,10 @@ pub struct App {
     pub ultimate_biaxial_shear: bool,
     /// 終局検定で柱の曲げを 2 軸曲げとして検定するか（RC 柱の 2 軸曲げ余裕度）。
     pub ultimate_biaxial_bending: bool,
+    /// 終局検定の設計用応力（Qmu・需要曲げ）と部材別 Rp をプッシュオーバー応答から
+    /// 直接反映するか（false は静的解析応答＋UI 一律 Rp）。プッシュオーバー未実行時は
+    /// 自動的に静的応答へフォールバックする。
+    pub ultimate_use_pushover: bool,
     /// 左ペインの幅（px）。ドラッグで調整可能（180–520 にクランプ）。
     #[cfg(feature = "gui")]
     pub left_panel_width: f32,
@@ -460,6 +464,7 @@ impl Default for App {
             ultimate_shear_ductility: false,
             ultimate_biaxial_shear: false,
             ultimate_biaxial_bending: false,
+            ultimate_use_pushover: false,
             #[cfg(feature = "gui")]
             left_panel_width: 280.0,
             #[cfg(feature = "gui")]

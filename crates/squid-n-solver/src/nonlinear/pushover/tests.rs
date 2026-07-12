@@ -146,6 +146,26 @@ fn test_pushover_single_column_forms_hinge() {
             "story_drifts length should match number of stories"
         );
     }
+
+    // 部材別終局応答（終局検定の設計用応力・部材別 Rp 反映用）が生成されること。
+    assert_eq!(
+        result.member_response.len(),
+        model.elements.len(),
+        "member_response should have one entry per element"
+    );
+    let col = result
+        .member_response
+        .iter()
+        .find(|r| r.elem == model.elements[0].id)
+        .expect("column member response");
+    // 水平押しで柱脚に曲げ・せん断・変形角が生じる（いずれも正）。
+    assert!(
+        col.m_strong > 0.0 && col.shear_strong > 0.0 && col.rp > 0.0,
+        "column terminal response should be nonzero: Mz={}, Vy={}, Rp={}",
+        col.m_strong,
+        col.shear_strong,
+        col.rp
+    );
 }
 
 #[test]

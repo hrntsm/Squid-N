@@ -90,8 +90,35 @@ pub fn ultimate_table(ui: &mut egui::Ui, app: &mut App) {
         ui.checkbox(&mut app.ultimate_biaxial_bending, "柱を2軸曲げで検定")
             .on_hover_text(
                 "RC 柱の曲げ余裕度を 2 軸曲げ 1/((Mmx/Mux)²+(Mmy/Muy)²)^(1/2) として検定します\
-                 （採用応力）。需要曲げは最後に実行した静的解析の応答値を用います。",
+                 （採用応力）。需要曲げは応答（プッシュオーバー／静的）の値を用います。",
             );
+    });
+    ui.horizontal(|ui| {
+        ui.checkbox(
+            &mut app.ultimate_use_pushover,
+            "設計用応力・Rp をプッシュオーバー応答から反映",
+        )
+        .on_hover_text(
+            "終局時の設計用せん断 Qmu・需要曲げ・軸力・部材別 Rp をプッシュオーバー\
+             最終ステップの部材別応答から直接反映します。未実行時は静的応答＋UI 一律 Rp \
+             にフォールバックします。",
+        );
+        if app.ultimate_use_pushover {
+            let has_po = app
+                .results
+                .as_ref()
+                .and_then(|r| r.pushover.as_ref())
+                .map(|p| !p.member_response.is_empty())
+                .unwrap_or(false);
+            if has_po {
+                ui.colored_label(crate::theme::GOOD_GREEN, "● 応答反映中");
+            } else {
+                ui.colored_label(
+                    crate::theme::GRAY_600,
+                    "（プッシュオーバー未実行 → 静的応答で代替）",
+                );
+            }
+        }
     });
     ui.separator();
 
@@ -211,12 +238,24 @@ pub fn ultimate_table(ui: &mut egui::Ui, app: &mut App) {
             } else {
                 ("Qsu=塑性理論式の終局せん断強度", "Qbu=付着割裂耐力")
             };
+            let using_po = app.ultimate_use_pushover
+                && app
+                    .results
+                    .as_ref()
+                    .and_then(|r| r.pushover.as_ref())
+                    .map(|p| !p.member_response.is_empty())
+                    .unwrap_or(false);
+            let demand_note = if using_po {
+                "Qmu・需要曲げ・軸力・Rp はプッシュオーバー終局応答（部材別）を直接反映"
+            } else {
+                "Qmu=上限強度倍率·2·Mu/内法（両端ヒンジ）、需要曲げ・軸力は静的応答、Rp は一律指定"
+            };
             ui.colored_label(
                 crate::theme::GRAY_600,
                 format!(
-                    "Qmu=上限強度倍率·2·Mu/内法（両端ヒンジ）、{shear_note}、\
-                     {bond_note}。余裕度<1.0（赤）はせん断・付着が曲げ降伏に先行することを示す。\
-                     対象は RcRect の RC 矩形部材（強軸）。柱の Mu は長期軸力を考慮。"
+                    "{demand_note}。{shear_note}、{bond_note}。\
+                     余裕度<1.0（赤）はせん断・付着が曲げ降伏に先行することを示す。\
+                     対象は RcRect の RC 矩形部材（強軸）。"
                 ),
             );
         }

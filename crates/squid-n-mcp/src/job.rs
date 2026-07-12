@@ -663,7 +663,12 @@ fn compute_ultimate_check_job(model: &Model, load_case: Option<u32>) -> Result<J
             let my = mf.at.iter().map(|(_, f)| f[4].abs()).fold(0.0, f64::max);
             Some((
                 *id,
-                squid_n_design_jp::ultimate::MemberDemand { n_axial, mz, my },
+                squid_n_design_jp::ultimate::MemberDemand {
+                    n_axial,
+                    mz,
+                    my,
+                    ..Default::default()
+                },
             ))
         })
         .collect();
