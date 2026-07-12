@@ -308,15 +308,24 @@ pub fn design_table(ui: &mut egui::Ui, app: &mut App) {
         ui.strong("制振ダンパーの非線形特性");
         for a in &app.model.damper_attrs {
             let p = a.props;
-            // 緩和時間 τ=C0/Kd。線形マクスウェルの損失は ωτ≈1 で最大。
-            let tau = if p.kd > 0.0 { p.c0 / p.kd } else { 0.0 };
-            let kind = match p.kind {
-                squid_n_core::model::DamperKind::Maxwell => "マクスウェル",
-            };
-            ui.label(format!(
-                "部材{}: {} Kd={:.0} C0={:.0} α={:.2} ／ 緩和時間 τ={:.3}s（時刻歴で作用）",
-                a.elem.0, kind, p.kd, p.c0, p.alpha, tau
-            ));
+            match p.kind {
+                squid_n_core::model::DamperKind::Maxwell => {
+                    // 緩和時間 τ=C0/Kd。線形マクスウェルの損失は ωτ≈1 で最大。
+                    let tau = if p.kd > 0.0 { p.c0 / p.kd } else { 0.0 };
+                    ui.label(format!(
+                        "部材{}: マクスウェル Kd={:.0} C0={:.0} α={:.2} ／ 緩和時間 τ={:.3}s（時刻歴で作用）",
+                        a.elem.0, p.kd, p.c0, p.alpha, tau
+                    ));
+                }
+                squid_n_core::model::DamperKind::HystereticBilinear => {
+                    // 降伏変位 δy=Qy/k1。
+                    let dy = if p.kd > 0.0 { p.qy / p.kd } else { 0.0 };
+                    ui.label(format!(
+                        "部材{}: 履歴型ﾊﾞｲﾘﾆｱ k1={:.0} Qy={:.0} k2/k1={:.3} ／ 降伏変位 δy={:.2}mm（静的・動的で作用）",
+                        a.elem.0, p.kd, p.qy, p.k2_ratio, dy
+                    ));
+                }
+            }
         }
     }
 

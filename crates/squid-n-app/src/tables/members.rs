@@ -1,7 +1,8 @@
 use crate::app::App;
 use squid_n_core::ids::{ElemId, MaterialId, NodeId, SectionId};
 use squid_n_core::model::{
-    DamperProps, ElementData, ElementKind, EndCondition, ForceRegime, HysteresisModel, LocalAxis,
+    DamperKind, DamperProps, ElementData, ElementKind, EndCondition, ForceRegime, HysteresisModel,
+    LocalAxis,
 };
 use squid_n_edit::{
     AddDamper, AddMember, DeleteMember, SetDamperProps, SetElementMaterial, SetElementSection,
@@ -382,8 +383,8 @@ pub fn members_table(ui: &mut egui::Ui, app: &mut App) {
 }
 
 /// 制振ダンパー要素（`ElementKind::Damper`）の諸元編集・削除の一覧
-/// （RESP-D「07 非線形解析（動的解析）」制振要素）。マクスウェル要素の
-/// バネ剛性 Kd・粘性係数 C0・速度指数 α を編集する。
+/// （RESP-D「07 非線形解析（動的解析）」制振要素）。種別（マクスウェル＝速度依存型／
+/// 履歴型バイリニア＝鋼材系）を選択し、種別に応じた諸元を編集する。
 fn dampers_table(ui: &mut egui::Ui, app: &mut App) {
     use egui_extras::{Column, TableBuilder};
 
@@ -399,11 +400,14 @@ fn dampers_table(ui: &mut egui::Ui, app: &mut App) {
     }
 
     ui.separator();
-    ui.strong("制振ダンパー（マクスウェル要素）");
+    ui.strong("制振ダンパー");
     ui.label(
-        egui::RichText::new("Kd [kN/mm]・C0 [kN·(s/mm)^α]・α（1.0 で線形粘性）")
-            .color(crate::theme::GRAY_600)
-            .small(),
+        egui::RichText::new(
+            "マクスウェル（速度依存）: Kd[kN/mm]・C0[kN·(s/mm)^α]・α。\
+             履歴型バイリニア（鋼材系）: Kd=k1[kN/mm]・Qy[kN]・k2/k1。",
+        )
+        .color(crate::theme::GRAY_600)
+        .small(),
     );
 
     // 変更・削除は借用衝突を避けて確定処理へ回す。
@@ -415,12 +419,15 @@ fn dampers_table(ui: &mut egui::Ui, app: &mut App) {
         .striped(true)
         .column(Column::auto())
         .column(Column::auto())
-        .column(Column::initial(90.0))
-        .column(Column::initial(90.0))
-        .column(Column::initial(70.0))
+        .column(Column::initial(120.0))
+        .column(Column::initial(80.0))
+        .column(Column::initial(80.0))
+        .column(Column::initial(64.0))
+        .column(Column::initial(80.0))
+        .column(Column::initial(64.0))
         .column(Column::auto())
         .header(20.0, |mut h| {
-            for t in &["ID", "節点", "Kd", "C0", "α", ""] {
+            for t in &["ID", "節点", "種別", "Kd", "C0", "α", "Qy", "k2/k1", ""] {
                 h.col(|ui| {
                     ui.strong(*t);
                 });
@@ -430,6 +437,7 @@ fn dampers_table(ui: &mut egui::Ui, app: &mut App) {
             for (elem_id, props) in &dampers {
                 let elem_id = *elem_id;
                 let mut props = *props;
+                let is_maxwell = props.kind == DamperKind::Maxwell;
                 body.row(22.0, |mut row| {
                     row.col(|ui| {
                         ui.label(elem_id.0.to_string());
@@ -450,7 +458,30 @@ fn dampers_table(ui: &mut egui::Ui, app: &mut App) {
                             .unwrap_or_default();
                         ui.label(nodes);
                     });
-                    // Kd は kN/mm 単位で編集（内部は N/mm）。
+                    // 種別セレクタ。
+                    row.col(|ui| {
+                        let label = match props.kind {
+                            DamperKind::Maxwell => "マクスウェル",
+                            DamperKind::HystereticBilinear => "履歴型ﾊﾞｲﾘﾆｱ",
+                        };
+                        egui::ComboBox::from_id_salt(format!("damper_kind_{}", elem_id.0))
+                            .selected_text(label)
+                            .show_ui(ui, |ui| {
+                                for k in [DamperKind::Maxwell, DamperKind::HystereticBilinear] {
+                                    let l = match k {
+                                        DamperKind::Maxwell => "マクスウェル",
+                                        DamperKind::HystereticBilinear => "履歴型ﾊﾞｲﾘﾆｱ",
+                                    };
+                                    if ui.selectable_label(props.kind == k, l).clicked()
+                                        && props.kind != k
+                                    {
+                                        props.kind = k;
+                                        pending_props.push((elem_id, props));
+                                    }
+                                }
+                            });
+                    });
+                    // Kd（両種別で使用。kN/mm 単位で編集）。
                     row.col(|ui| {
                         let mut kd_kn = props.kd / 1000.0;
                         if ui
@@ -465,29 +496,55 @@ fn dampers_table(ui: &mut egui::Ui, app: &mut App) {
                             pending_props.push((elem_id, props));
                         }
                     });
+                    // C0（マクスウェルのみ）。
                     row.col(|ui| {
                         let mut c0_kn = props.c0 / 1000.0;
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut c0_kn)
-                                    .speed(0.1)
-                                    .range(0.0..=1.0e9),
-                            )
-                            .changed()
-                        {
+                        let resp = ui.add_enabled(
+                            is_maxwell,
+                            egui::DragValue::new(&mut c0_kn)
+                                .speed(0.1)
+                                .range(0.0..=1.0e9),
+                        );
+                        if resp.changed() {
                             props.c0 = c0_kn * 1000.0;
                             pending_props.push((elem_id, props));
                         }
                     });
+                    // α（マクスウェルのみ）。
                     row.col(|ui| {
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut props.alpha)
-                                    .speed(0.01)
-                                    .range(0.05..=2.0),
-                            )
-                            .changed()
-                        {
+                        let resp = ui.add_enabled(
+                            is_maxwell,
+                            egui::DragValue::new(&mut props.alpha)
+                                .speed(0.01)
+                                .range(0.05..=2.0),
+                        );
+                        if resp.changed() {
+                            pending_props.push((elem_id, props));
+                        }
+                    });
+                    // Qy（履歴型のみ。kN 単位）。
+                    row.col(|ui| {
+                        let mut qy_kn = props.qy / 1000.0;
+                        let resp = ui.add_enabled(
+                            !is_maxwell,
+                            egui::DragValue::new(&mut qy_kn)
+                                .speed(1.0)
+                                .range(0.0..=1.0e9),
+                        );
+                        if resp.changed() {
+                            props.qy = qy_kn * 1000.0;
+                            pending_props.push((elem_id, props));
+                        }
+                    });
+                    // k2/k1（履歴型のみ）。
+                    row.col(|ui| {
+                        let resp = ui.add_enabled(
+                            !is_maxwell,
+                            egui::DragValue::new(&mut props.k2_ratio)
+                                .speed(0.005)
+                                .range(0.0..=0.99),
+                        );
+                        if resp.changed() {
                             pending_props.push((elem_id, props));
                         }
                     });

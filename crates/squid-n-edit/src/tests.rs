@@ -1689,6 +1689,7 @@ fn test_add_damper_creates_element_and_attr_roundtrip() {
         kd: 120_000.0,
         c0: 2_000.0,
         alpha: 0.5,
+        ..Default::default()
     };
     let elem = ElementData {
         id: new_id,

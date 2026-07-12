@@ -309,24 +309,43 @@ pub struct IsolatorAttr {
 /// 制振ダンパーの種別（RESP-D「07 非線形解析（動的解析）」制振要素）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum DamperKind {
-    /// マクスウェル要素（バネ Kd と粘性ダッシュポットの直列）。
+    /// マクスウェル要素（バネ Kd と粘性ダッシュポットの直列。速度依存型）。
     #[default]
     Maxwell,
+    /// 履歴型（弾塑性バイリニア）ダンパー。鋼材系ダンパー（SUB／アンボンドブレース／
+    /// 二重鋼管座屈補剛ブレース／鉛ダンパー／U 型ダンパー等、RESP-D の標準型バイリニア）。
+    HystereticBilinear,
+}
+
+fn default_damper_qy() -> f64 {
+    50_000.0
+}
+fn default_damper_k2_ratio() -> f64 {
+    0.02
 }
 
 /// 制振ダンパー要素（`ElementKind::Damper`）の特性（RESP-D「07」制振要素）。
-/// マクスウェル要素は、バネ剛性 Kd と粘性ダッシュポット（力 `Fc=C0·sign(V)·|V|^α`）の
-/// 直列でモデル化する。α=1 で線形粘性。
+///
+/// - **マクスウェル（速度依存型）:** バネ剛性 `Kd` と粘性ダッシュポット
+///   （力 `Fc=C0·sign(V)·|V|^α`）の直列。α=1 で線形粘性。
+/// - **履歴型バイリニア:** 初期軸剛性 `Kd`（=k1）、降伏軸力 `qy`、第2剛性比 `k2_ratio`
+///   （k2=k2_ratio·k1）の弾塑性軸ばね（変位依存。静的・動的いずれでも作用）。
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DamperProps {
     /// ダンパー種別。
     pub kind: DamperKind,
-    /// バネ剛性 Kd [N/mm]。
+    /// バネ剛性 Kd [N/mm]（履歴型では初期軸剛性 k1）。
     pub kd: f64,
-    /// 粘性係数 C0 [N·(s/mm)^α]。
+    /// 粘性係数 C0 [N·(s/mm)^α]（マクスウェルのみ）。
     pub c0: f64,
-    /// 速度指数 α（1.0 で線形粘性）。
+    /// 速度指数 α（1.0 で線形粘性。マクスウェルのみ）。
     pub alpha: f64,
+    /// 降伏軸力 qy [N]（履歴型のみ）。
+    #[serde(default = "default_damper_qy")]
+    pub qy: f64,
+    /// 第2剛性比 k2/k1（履歴型のみ）。
+    #[serde(default = "default_damper_k2_ratio")]
+    pub k2_ratio: f64,
 }
 
 impl Default for DamperProps {
@@ -336,6 +355,8 @@ impl Default for DamperProps {
             kd: 100_000.0,
             c0: 1_000.0,
             alpha: 1.0,
+            qy: default_damper_qy(),
+            k2_ratio: default_damper_k2_ratio(),
         }
     }
 }

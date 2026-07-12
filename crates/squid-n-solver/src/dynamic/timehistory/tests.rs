@@ -1495,6 +1495,7 @@ fn test_maxwell_damper_reduces_free_vibration() {
                     kd: 1000.0,
                     c0: 30.0,
                     alpha: 1.0,
+                    ..Default::default()
                 },
             });
         }

@@ -224,12 +224,22 @@ pub fn build_behavior(data: &ElementData, model: &Model) -> (Box<dyn ElementBeha
             Box::new(crate::isolator::IsolatorElement::new(data, model)),
             ElemState::default(),
         ),
-        // 制振ダンパー（RESP-D「07」制振要素）。マクスウェル要素。静的・線形解析では
-        // Δt 未設定（=0）のため不活性（力・剛性 0）。時刻歴で set_time_step により活性化。
-        ElementKind::Damper => (
-            Box::new(crate::damper::MaxwellDamperElement::new(data, model)),
-            ElemState::default(),
-        ),
+        // 制振ダンパー（RESP-D「07」制振要素）。種別で要素を切替える。
+        // - マクスウェル（速度依存型）: 静的・線形では Δt=0 で不活性、時刻歴で活性化。
+        // - 履歴型バイリニア（鋼材系）: 変位依存の弾塑性軸ばね（静的・動的で作用）。
+        ElementKind::Damper => {
+            use squid_n_core::model::DamperKind;
+            let kind = model.damper_props(data.id).unwrap_or_default().kind;
+            let beh: Box<dyn ElementBehavior> = match kind {
+                DamperKind::Maxwell => {
+                    Box::new(crate::damper::MaxwellDamperElement::new(data, model))
+                }
+                DamperKind::HystereticBilinear => {
+                    Box::new(crate::damper::HystereticDamperElement::new(data, model))
+                }
+            };
+            (beh, ElemState::default())
+        }
     }
 }
 
