@@ -58,6 +58,7 @@ fn laminated() -> IsolatorProps {
         mu: 0.0,
         n_long: 0.0,
         n_springs: 8,
+        ..Default::default()
     }
 }
 
@@ -71,6 +72,25 @@ fn friction() -> IsolatorProps {
         mu: 0.1,
         n_long: 1_000_000.0, // Qmax = 0.1×1e6 = 100kN
         n_springs: 8,
+        ..Default::default()
+    }
+}
+
+/// 高減衰ゴム（歪依存）: ゴム総厚 H=200mm、γ が大きいほど二次剛性・特性耐力が低下する
+/// 歪依存係数（CKd=1−0.5γ、CQd=1−0.3γ）。
+fn hdr_strain_dependent() -> IsolatorProps {
+    IsolatorProps {
+        kind: IsolatorKind::HighDampingRubber,
+        k1: 2000.0,
+        k2: 200.0,
+        qd: 100_000.0,
+        kv: 5_000_000.0,
+        mu: 0.0,
+        n_long: 0.0,
+        n_springs: 2,
+        total_rubber_thickness: 200.0,
+        ckd_gamma: [1.0, -0.5, 0.0],
+        cqd_gamma: [1.0, -0.3, 0.0],
     }
 }
 
@@ -188,4 +208,36 @@ fn test_commit_revert_roundtrip() {
             max_relative = 1e-6
         );
     }
+}
+
+#[test]
+fn test_hdr_strain_dependent_softens_with_strain() {
+    // 高減衰ゴム（歪依存）: 弾性域は K1·δ、降伏後は γ 依存で剛性・耐力が低下する。
+    let model = iso_model(hdr_strain_dependent());
+    let ctx = Ctx { model: &model };
+    let mut elem = IsolatorElement::new(&model.elements[0], &model);
+    // 弾性域（δ=10mm < δy=50mm）: 歪依存でも弾性は K1·δ=20kN。
+    let f_el = push_horizontal(&mut elem, &ctx, 10.0);
+    assert!(
+        (horiz_resultant(&f_el) - 2000.0 * 10.0).abs() < 1.0,
+        "elastic |F|={}",
+        horiz_resultant(&f_el)
+    );
+
+    // 降伏後（δ=100mm, γ=0.5）: 歪依存で耐力が定数バイリニアより低下。
+    let f_sd = {
+        let mut e = IsolatorElement::new(&model.elements[0], &model);
+        horiz_resultant(&push_horizontal(&mut e, &ctx, 100.0))
+    };
+    let model_c = iso_model(laminated()); // 同 K1/K2/Qd の定数バイリニア。
+    let ctx_c = Ctx { model: &model_c };
+    let f_const = {
+        let mut e = IsolatorElement::new(&model_c.elements[0], &model_c);
+        horiz_resultant(&push_horizontal(&mut e, &ctx_c, 100.0))
+    };
+    assert!(
+        f_sd < f_const,
+        "歪依存で耐力低下すべき: 歪依存 {f_sd} < 定数 {f_const}"
+    );
+    assert!(f_sd > 0.0);
 }

@@ -45,6 +45,11 @@ pub enum ElementKind {
     /// バイリニア、または摩擦ばね＝弾性すべり支承 Qmax=μN）、鉛直は弾性軸ばね。
     /// 特性は `Model::isolator_attrs` に要素 ID と対で保持する。
     Isolator,
+    /// 制振ダンパー要素（RESP-D「07 非線形解析（動的解析）」制振要素）。
+    /// 2 節点の軸方向要素で、マクスウェル要素（バネ Kd と粘性ダッシュポットの直列）等で
+    /// モデル化する。減衰要素の要素力は節点力として運動方程式へ与えられ、特性は
+    /// `Model::damper_attrs` に要素 ID と対で保持する。
+    Damper,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -52,6 +57,94 @@ pub enum ForceRegime {
     UniaxialBendingShear,
     AxialBendingInteract,
     Auto,
+}
+
+/// 部材の復元力特性（履歴則）。RESP-D「07 非線形解析（動的解析）」の
+/// 「履歴特性」および「立体解析モデルの非線形特性（既定の非線形特性）」に対応する。
+/// 材端集中バネ（`ConcentratedSpringBeam`）の曲げ履歴に適用され、`Auto` は
+/// 構造種別ごとの既定（[`default_member_hysteresis`]）へ解決される。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum HysteresisModel {
+    /// 既定（構造種別で自動判定: RC/SRC/CFT=武田型、S=標準型）。
+    #[default]
+    Auto,
+    /// 逆行型（常にスケルトン上、履歴ループなし）。
+    Retrograde,
+    /// 標準型（Masing 則。除荷開始剛性=初期剛性）。
+    Standard,
+    /// 原点指向型（除荷・再載荷は原点指向の割線）。
+    OriginOriented,
+    /// 最大点指向型（Clough 系。反対側の最大経験点を指向）。
+    MaxPointOriented,
+    /// 武田型（剛性低下型トリリニア。RC/SRC/CFT 梁の既定）。
+    Takeda,
+    /// 辻・山田型（バイリニア＋β 混合硬化。座屈補剛ブレース等）。
+    TsujiYamada,
+    /// 鉄骨大梁の座屈考慮履歴（耐力劣化型＋RO 除荷。局部/横/連成座屈）。
+    SteelBuckling,
+}
+
+impl HysteresisModel {
+    /// 表示用の日本語名。
+    pub fn label(&self) -> &'static str {
+        match self {
+            HysteresisModel::Auto => "自動",
+            HysteresisModel::Retrograde => "逆行型",
+            HysteresisModel::Standard => "標準型",
+            HysteresisModel::OriginOriented => "原点指向型",
+            HysteresisModel::MaxPointOriented => "最大点指向型",
+            HysteresisModel::Takeda => "武田型",
+            HysteresisModel::TsujiYamada => "辻・山田型",
+            HysteresisModel::SteelBuckling => "座屈考慮型",
+        }
+    }
+
+    /// UI・列挙用の全候補。
+    pub const ALL: [HysteresisModel; 8] = [
+        HysteresisModel::Auto,
+        HysteresisModel::Retrograde,
+        HysteresisModel::Standard,
+        HysteresisModel::OriginOriented,
+        HysteresisModel::MaxPointOriented,
+        HysteresisModel::Takeda,
+        HysteresisModel::TsujiYamada,
+        HysteresisModel::SteelBuckling,
+    ];
+}
+
+/// 既定の部材曲げ履歴則（RESP-D「07 非線形解析（動的解析）」立体解析モデルの
+/// 既定の非線形特性表）。梁の曲げは **RC/SRC/CFT 造＝武田型（トリリニア）**、
+/// **S 造＝標準型（バイリニア）** を既定とする。ブレースの軸は S 造＝標準型。
+/// `rc_like` は RC/SRC/CFT（コンクリート系）か否か。
+pub fn default_member_hysteresis(rc_like: bool) -> HysteresisModel {
+    if rc_like {
+        HysteresisModel::Takeda
+    } else {
+        HysteresisModel::Standard
+    }
+}
+
+/// 部材の履歴則の指定（要素 ID と履歴則の対。`Model::member_hysteresis_attrs`）。
+/// RESP-D「07 非線形解析（動的解析）」履歴特性。既定（Auto）と異なる履歴則を
+/// 部材個別に指定する場合に用いる。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MemberHysteresisAttr {
+    pub elem: ElemId,
+    pub rule: HysteresisModel,
+}
+
+/// 1 つの要素に紐づく側テーブル属性のスナップショット。要素の削除・挿入
+/// （[`Model::take_elem_attrs`] / [`Model::restore_elem_attrs`]）で属性の
+/// 退避・復元に用いる（undo 用の一時保持。直列化はしない）。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ElemAttrs {
+    pub wall: Option<WallAttr>,
+    pub steel_design: Option<SteelDesignAttr>,
+    pub brb: Option<BrbAttr>,
+    pub pca: Option<PcaBeamAttr>,
+    pub isolator: Option<IsolatorAttr>,
+    pub hysteresis: Option<MemberHysteresisAttr>,
+    pub damper: Option<DamperAttr>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -429,6 +522,13 @@ pub struct Model {
     /// 免震支承材の非線形特性（`ElementKind::Isolator` 要素、RESP-D 05 非線形モデル）。
     #[serde(default)]
     pub isolator_attrs: Vec<IsolatorAttr>,
+    /// 部材の履歴則の個別指定（RESP-D「07 非線形解析（動的解析）」履歴特性）。
+    /// 未指定の部材は構造種別ごとの既定（[`default_member_hysteresis`]）に従う。
+    #[serde(default)]
+    pub member_hysteresis_attrs: Vec<MemberHysteresisAttr>,
+    /// 制振ダンパー要素（`ElementKind::Damper`）の特性（RESP-D「07」制振要素）。
+    #[serde(default)]
+    pub damper_attrs: Vec<DamperAttr>,
     /// 一本部材の指定（RESP-D マニュアル 04 断面検定「採用応力 ■一本部材指定時の
     /// 採用応力」）。各エントリは**軸方向に連続する梁要素の ID を並び順**で持ち、
     /// 断面検定の採用応力（端部・中央モーメント、部材長、内法長、せん断スパン比
@@ -617,6 +717,134 @@ impl Model {
             && self.pca_attrs == other.pca_attrs
             && self.beam_groups == other.beam_groups
             && self.isolator_attrs == other.isolator_attrs
+            && self.member_hysteresis_attrs == other.member_hysteresis_attrs
+            && self.damper_attrs == other.damper_attrs
+    }
+
+    /// ダンパー要素の特性を返す（`Model::damper_attrs` から要素 ID で検索）。
+    pub fn damper_props(&self, elem: ElemId) -> Option<DamperProps> {
+        self.damper_attrs
+            .iter()
+            .find(|a| a.elem == elem)
+            .map(|a| a.props)
+    }
+
+    /// ダンパー要素の特性を設定／解除する。`None` を渡すと指定を解除する。
+    /// 戻り値は変更前の指定（undo 用）。
+    pub fn set_damper_props(
+        &mut self,
+        elem: ElemId,
+        props: Option<DamperProps>,
+    ) -> Option<DamperProps> {
+        let old = self.damper_props(elem);
+        self.damper_attrs.retain(|a| a.elem != elem);
+        if let Some(p) = props {
+            self.damper_attrs.push(DamperAttr { elem, props: p });
+        }
+        old
+    }
+
+    /// 要素に紐づく全ての側テーブル属性（壁・鉄骨・BRB・PCa・免震・履歴則・ダンパー）の
+    /// `elem` 参照に `f` を適用する。要素の追加・削除に伴う ID 繰上げ／繰下げで、
+    /// 側テーブルの参照整合を保つために用いる。
+    pub fn shift_elem_attr_refs(&mut self, mut f: impl FnMut(&mut ElemId)) {
+        for a in &mut self.wall_attrs {
+            f(&mut a.elem);
+        }
+        for a in &mut self.steel_design_attrs {
+            f(&mut a.elem);
+        }
+        for a in &mut self.brb_attrs {
+            f(&mut a.elem);
+        }
+        for a in &mut self.pca_attrs {
+            f(&mut a.elem);
+        }
+        for a in &mut self.isolator_attrs {
+            f(&mut a.elem);
+        }
+        for a in &mut self.member_hysteresis_attrs {
+            f(&mut a.elem);
+        }
+        for a in &mut self.damper_attrs {
+            f(&mut a.elem);
+        }
+    }
+
+    /// 指定要素に紐づく全ての側テーブル属性を取り外して返す（要素削除時の退避用）。
+    pub fn take_elem_attrs(&mut self, elem: ElemId) -> ElemAttrs {
+        /// `elem` フィールドが一致する最初の要素を取り外して返す。
+        fn take_first<T>(v: &mut Vec<T>, get: impl Fn(&T) -> ElemId, elem: ElemId) -> Option<T> {
+            v.iter()
+                .position(|a| get(a) == elem)
+                .map(|pos| v.remove(pos))
+        }
+        ElemAttrs {
+            wall: take_first(&mut self.wall_attrs, |a| a.elem, elem),
+            steel_design: take_first(&mut self.steel_design_attrs, |a| a.elem, elem),
+            brb: take_first(&mut self.brb_attrs, |a| a.elem, elem),
+            pca: take_first(&mut self.pca_attrs, |a| a.elem, elem),
+            isolator: take_first(&mut self.isolator_attrs, |a| a.elem, elem),
+            hysteresis: take_first(&mut self.member_hysteresis_attrs, |a| a.elem, elem),
+            damper: take_first(&mut self.damper_attrs, |a| a.elem, elem),
+        }
+    }
+
+    /// 取り外した側テーブル属性を、指定要素 ID へ紐づけ直して復元する
+    /// （要素削除の undo 用）。各属性の `elem` は `elem` へ上書きする。
+    pub fn restore_elem_attrs(&mut self, elem: ElemId, attrs: ElemAttrs) {
+        if let Some(mut a) = attrs.wall {
+            a.elem = elem;
+            self.wall_attrs.push(a);
+        }
+        if let Some(mut a) = attrs.steel_design {
+            a.elem = elem;
+            self.steel_design_attrs.push(a);
+        }
+        if let Some(mut a) = attrs.brb {
+            a.elem = elem;
+            self.brb_attrs.push(a);
+        }
+        if let Some(mut a) = attrs.pca {
+            a.elem = elem;
+            self.pca_attrs.push(a);
+        }
+        if let Some(mut a) = attrs.isolator {
+            a.elem = elem;
+            self.isolator_attrs.push(a);
+        }
+        if let Some(mut a) = attrs.hysteresis {
+            a.elem = elem;
+            self.member_hysteresis_attrs.push(a);
+        }
+        if let Some(mut a) = attrs.damper {
+            a.elem = elem;
+            self.damper_attrs.push(a);
+        }
+    }
+
+    /// 部材に指定された履歴則を返す（未指定は `None`＝既定に従う）。
+    pub fn member_hysteresis(&self, elem: ElemId) -> Option<HysteresisModel> {
+        self.member_hysteresis_attrs
+            .iter()
+            .find(|a| a.elem == elem)
+            .map(|a| a.rule)
+    }
+
+    /// 部材の履歴則を設定する。`HysteresisModel::Auto` を指定した場合は指定を解除
+    /// （既定に従う）。戻り値は変更前の指定（undo 用）。
+    pub fn set_member_hysteresis(
+        &mut self,
+        elem: ElemId,
+        rule: HysteresisModel,
+    ) -> Option<HysteresisModel> {
+        let old = self.member_hysteresis(elem);
+        self.member_hysteresis_attrs.retain(|a| a.elem != elem);
+        if rule != HysteresisModel::Auto {
+            self.member_hysteresis_attrs
+                .push(MemberHysteresisAttr { elem, rule });
+        }
+        old
     }
 }
 

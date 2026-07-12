@@ -48,6 +48,90 @@ enum ShearModel {
         tr_fz: f64,
         tr_slip: bool,
     },
+    /// 歪依存積層ゴム系（LRB 統一型・高減衰ゴム）: 特性耐力 Qd(γ)・二次剛性 K2(γ) が
+    /// 歪 γ=|δ|/H に依存する各方向独立バイリニア。RESP-D「07」歪依存特性。
+    StrainDependent {
+        sy: StrainBilinear,
+        sz: StrainBilinear,
+        /// 基準特性耐力 Qd0 [N]。
+        qd0: f64,
+        /// 基準二次剛性 K2_0 [N/mm]。
+        k2_0: f64,
+        /// ゴム総厚 H [mm]（γ=|δ|/H）。
+        h: f64,
+        /// CQd(γ)=c0+c1·γ+c2·γ² 係数。
+        cqd: [f64; 3],
+        /// CKd(γ)=c0+c1·γ+c2·γ² 係数。
+        ckd: [f64; 3],
+    },
+}
+
+/// 歪依存 1 次元 kinematic バイリニア。降伏耐力 `qd`・二次剛性 `k2` を毎ステップ外部から
+/// 与える（歪依存）。塑性変位 `pl`（累積・符号付き）を状態に保持する。
+#[derive(Clone, Copy, Debug, Default)]
+struct StrainBilinear {
+    k1: f64,
+    /// 確定塑性変位。
+    pl: f64,
+    /// 試行塑性変位。
+    tr_pl: f64,
+    /// 試行力・接線。
+    tr_f: f64,
+    tr_t: f64,
+}
+
+impl StrainBilinear {
+    fn new(k1: f64) -> Self {
+        Self {
+            k1: k1.max(1e-9),
+            pl: 0.0,
+            tr_pl: 0.0,
+            tr_f: 0.0,
+            tr_t: k1.max(1e-9),
+        }
+    }
+
+    /// 変位 `u`・降伏耐力 `qd`・二次剛性 `k2` に対する試行（kinematic 戻し写像）。
+    fn trial(&mut self, u: f64, qd: f64, k2: f64) {
+        let qd = qd.max(1e-9);
+        let k2 = k2.clamp(0.0, self.k1 * 0.999);
+        // 塑性係数 Hp: 降伏後接線 = k1·Hp/(k1+Hp) = k2 → Hp = k1·k2/(k1−k2)。
+        let hp = if self.k1 > k2 {
+            self.k1 * k2 / (self.k1 - k2)
+        } else {
+            1e18
+        };
+        let alpha = hp * self.pl; // 背応力（kinematic hardening）。
+        let f_tr = self.k1 * (u - self.pl);
+        let phi = (f_tr - alpha).abs() - qd;
+        if phi <= 0.0 {
+            self.tr_f = f_tr;
+            self.tr_t = self.k1;
+            self.tr_pl = self.pl;
+        } else {
+            let s = (f_tr - alpha).signum();
+            let dpl = phi / (self.k1 + hp);
+            self.tr_pl = self.pl + s * dpl;
+            self.tr_f = self.k1 * (u - self.tr_pl);
+            self.tr_t = if hp >= 1e17 {
+                0.0
+            } else {
+                self.k1 * hp / (self.k1 + hp)
+            };
+        }
+    }
+
+    fn commit(&mut self) {
+        self.pl = self.tr_pl;
+    }
+    fn revert(&mut self) {
+        self.tr_pl = self.pl;
+    }
+}
+
+/// γ の 2 次多項式 `c0+c1·γ+c2·γ²`（歪依存係数）。負値は 0 にクランプ。
+fn poly3(c: &[f64; 3], gamma: f64) -> f64 {
+    (c[0] + c[1] * gamma + c[2] * gamma * gamma).max(0.0)
 }
 
 /// 免震支承材要素。
@@ -93,16 +177,34 @@ impl IsolatorElement {
             .unwrap_or_default();
 
         let shear = match props.kind {
-            IsolatorKind::LaminatedRubber => {
-                let hardening = if props.k1 > 0.0 {
-                    (props.k2 / props.k1).clamp(0.0, 0.999)
-                } else {
-                    0.0
-                };
+            // 積層ゴム系（天然・鉛・高減衰）。ゴム総厚 H>0 かつ歪依存係数が非自明なら
+            // 歪依存バイリニア、そうでなければ従来の定数バイリニア。
+            IsolatorKind::LaminatedRubber
+            | IsolatorKind::LeadRubber
+            | IsolatorKind::HighDampingRubber => {
                 let k1 = props.k1.max(1e-9);
-                ShearModel::Laminated {
-                    sy: Bilinear::new(k1, props.qd.max(1e-9), hardening),
-                    sz: Bilinear::new(k1, props.qd.max(1e-9), hardening),
+                let strain_dep = props.total_rubber_thickness > 0.0
+                    && (props.ckd_gamma != [1.0, 0.0, 0.0] || props.cqd_gamma != [1.0, 0.0, 0.0]);
+                if strain_dep {
+                    ShearModel::StrainDependent {
+                        sy: StrainBilinear::new(k1),
+                        sz: StrainBilinear::new(k1),
+                        qd0: props.qd.max(1e-9),
+                        k2_0: props.k2.max(0.0),
+                        h: props.total_rubber_thickness,
+                        cqd: props.cqd_gamma,
+                        ckd: props.ckd_gamma,
+                    }
+                } else {
+                    let hardening = if props.k1 > 0.0 {
+                        (props.k2 / props.k1).clamp(0.0, 0.999)
+                    } else {
+                        0.0
+                    };
+                    ShearModel::Laminated {
+                        sy: Bilinear::new(k1, props.qd.max(1e-9), hardening),
+                        sz: Bilinear::new(k1, props.qd.max(1e-9), hardening),
+                    }
                 }
             }
             IsolatorKind::ElasticSliding => ShearModel::Friction {
@@ -155,6 +257,25 @@ impl IsolatorElement {
                     *k1
                 };
                 ((*tr_fy, *tr_fz), (t, t))
+            }
+            ShearModel::StrainDependent {
+                sy,
+                sz,
+                qd0,
+                k2_0,
+                h,
+                cqd,
+                ckd,
+            } => {
+                // 非破壊評価: 複製して現在変位で試行。
+                let gamma = ((uy * uy + uz * uz).sqrt() / h.max(1e-9)).abs();
+                let qd = qd0 * poly3(cqd, gamma);
+                let k2 = k2_0 * poly3(ckd, gamma);
+                let mut sy2 = *sy;
+                let mut sz2 = *sz;
+                sy2.trial(uy, qd, k2);
+                sz2.trial(uz, qd, k2);
+                ((sy2.tr_f, sz2.tr_f), (sy2.tr_t, sz2.tr_t))
             }
         }
     }
@@ -265,6 +386,25 @@ impl ElementBehavior for IsolatorElement {
                     *pl_z = *tr_pl_z;
                 }
             }
+            ShearModel::StrainDependent {
+                sy,
+                sz,
+                qd0,
+                k2_0,
+                h,
+                cqd,
+                ckd,
+            } => {
+                let gamma = ((uy * uy + uz * uz).sqrt() / h.max(1e-9)).abs();
+                let qd = *qd0 * poly3(cqd, gamma);
+                let k2 = *k2_0 * poly3(ckd, gamma);
+                sy.trial(uy, qd, k2);
+                sz.trial(uz, qd, k2);
+                if commit {
+                    sy.commit();
+                    sz.commit();
+                }
+            }
         }
         if commit {
             self.committed_disp = self.trial_disp;
@@ -277,8 +417,9 @@ impl ElementBehavior for IsolatorElement {
 
     fn snapshot_state(&self) -> Box<dyn Any> {
         let shear = match &self.shear {
-            ShearModel::Laminated { sy, sz } => (Some((sy.clone(), sz.clone())), None),
-            ShearModel::Friction { pl_y, pl_z, .. } => (None, Some((*pl_y, *pl_z))),
+            ShearModel::Laminated { sy, sz } => (Some((sy.clone(), sz.clone())), None, None),
+            ShearModel::Friction { pl_y, pl_z, .. } => (None, Some((*pl_y, *pl_z)), None),
+            ShearModel::StrainDependent { sy, sz, .. } => (None, None, Some((sy.pl, sz.pl))),
         };
         Box::new((self.trial_disp, self.committed_disp, shear))
     }
@@ -288,12 +429,16 @@ impl ElementBehavior for IsolatorElement {
         if let Some((trial, committed, shear)) = state.downcast_ref::<(
             [f64; 12],
             [f64; 12],
-            (Option<(Bilinear, Bilinear)>, Option<(f64, f64)>),
+            (
+                Option<(Bilinear, Bilinear)>,
+                Option<(f64, f64)>,
+                Option<(f64, f64)>,
+            ),
         )>() {
             self.trial_disp = *trial;
             self.committed_disp = *committed;
-            match (&mut self.shear, &shear.0, &shear.1) {
-                (ShearModel::Laminated { sy, sz }, Some((sy0, sz0)), _) => {
+            match (&mut self.shear, &shear.0, &shear.1, &shear.2) {
+                (ShearModel::Laminated { sy, sz }, Some((sy0, sz0)), _, _) => {
                     *sy = sy0.clone();
                     *sz = sz0.clone();
                 }
@@ -307,11 +452,18 @@ impl ElementBehavior for IsolatorElement {
                     },
                     _,
                     Some((py, pz)),
+                    _,
                 ) => {
                     *pl_y = *py;
                     *pl_z = *pz;
                     *tr_pl_y = *py;
                     *tr_pl_z = *pz;
+                }
+                (ShearModel::StrainDependent { sy, sz, .. }, _, _, Some((py, pz))) => {
+                    sy.pl = *py;
+                    sy.tr_pl = *py;
+                    sz.pl = *pz;
+                    sz.tr_pl = *pz;
                 }
                 _ => {}
             }
@@ -334,6 +486,10 @@ impl ElementBehavior for IsolatorElement {
                 *pl_y = *tr_pl_y;
                 *pl_z = *tr_pl_z;
             }
+            ShearModel::StrainDependent { sy, sz, .. } => {
+                sy.commit();
+                sz.commit();
+            }
         }
         self.committed_disp = self.trial_disp;
     }
@@ -353,6 +509,10 @@ impl ElementBehavior for IsolatorElement {
             } => {
                 *tr_pl_y = *pl_y;
                 *tr_pl_z = *pl_z;
+            }
+            ShearModel::StrainDependent { sy, sz, .. } => {
+                sy.revert();
+                sz.revert();
             }
         }
         self.trial_disp = self.committed_disp;

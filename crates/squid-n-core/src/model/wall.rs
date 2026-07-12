@@ -256,10 +256,21 @@ pub struct BrbAttr {
 /// 免震支承材の種別（RESP-D マニュアル「05 非線形モデル」免震支承材）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IsolatorKind {
-    /// 積層ゴム系（マルチシアスプリング、水平バイリニア。鉛・高減衰含む）。
+    /// 天然ゴム系積層ゴム（マルチシアスプリング、水平バイリニア）。
     LaminatedRubber,
+    /// 鉛プラグ挿入型積層ゴム（LRB。鉛 Qd + ゴム二次剛性のバイリニア）。
+    LeadRubber,
+    /// 高減衰ゴム系積層ゴム（HDR。等価せん断剛性が歪 γ 依存）。
+    HighDampingRubber,
     /// 弾性すべり支承（摩擦ばね、Qmax=μ·N）。
     ElasticSliding,
+}
+
+fn default_ckd_gamma() -> [f64; 3] {
+    [1.0, 0.0, 0.0]
+}
+fn default_cqd_gamma() -> [f64; 3] {
+    [1.0, 0.0, 0.0]
 }
 
 /// 免震支承材の特性（`ElementKind::Isolator` 要素の非線形特性、
@@ -282,6 +293,16 @@ pub struct IsolatorProps {
     pub n_long: f64,
     /// マルチシアスプリング本数 n（既定 8、天然ゴム系 2。表示・低減率照合用）。
     pub n_springs: u32,
+    /// ゴム総厚 H [mm]（歪 γ=δ/H の算定用。0 以下で歪依存を無効化）。
+    #[serde(default)]
+    pub total_rubber_thickness: f64,
+    /// 二次剛性の歪依存係数 CKd(γ)=c0+c1·γ+c2·γ²（K2(γ)=K2·CKd(γ)）。
+    /// 既定 [1,0,0]（歪依存なし）。RESP-D「07」LRB 統一型・高減衰ゴムの歪依存。
+    #[serde(default = "default_ckd_gamma")]
+    pub ckd_gamma: [f64; 3],
+    /// 特性耐力の歪依存係数 CQd(γ)=c0+c1·γ+c2·γ²（Qd(γ)=Qd·CQd(γ)）。既定 [1,0,0]。
+    #[serde(default = "default_cqd_gamma")]
+    pub cqd_gamma: [f64; 3],
 }
 
 impl Default for IsolatorProps {
@@ -295,6 +316,9 @@ impl Default for IsolatorProps {
             mu: 0.1,
             n_long: 0.0,
             n_springs: 8,
+            total_rubber_thickness: 0.0,
+            ckd_gamma: default_ckd_gamma(),
+            cqd_gamma: default_cqd_gamma(),
         }
     }
 }
@@ -304,6 +328,68 @@ impl Default for IsolatorProps {
 pub struct IsolatorAttr {
     pub elem: ElemId,
     pub props: IsolatorProps,
+}
+
+/// 制振ダンパーの種別（RESP-D「07 非線形解析（動的解析）」制振要素）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum DamperKind {
+    /// マクスウェル要素（バネ Kd と粘性ダッシュポットの直列。速度依存型）。
+    #[default]
+    Maxwell,
+    /// 履歴型（弾塑性バイリニア）ダンパー。鋼材系ダンパー（SUB／アンボンドブレース／
+    /// 二重鋼管座屈補剛ブレース／鉛ダンパー／U 型ダンパー等、RESP-D の標準型バイリニア）。
+    HystereticBilinear,
+}
+
+fn default_damper_qy() -> f64 {
+    50_000.0
+}
+fn default_damper_k2_ratio() -> f64 {
+    0.02
+}
+
+/// 制振ダンパー要素（`ElementKind::Damper`）の特性（RESP-D「07」制振要素）。
+///
+/// - **マクスウェル（速度依存型）:** バネ剛性 `Kd` と粘性ダッシュポット
+///   （力 `Fc=C0·sign(V)·|V|^α`）の直列。α=1 で線形粘性。
+/// - **履歴型バイリニア:** 初期軸剛性 `Kd`（=k1）、降伏軸力 `qy`、第2剛性比 `k2_ratio`
+///   （k2=k2_ratio·k1）の弾塑性軸ばね（変位依存。静的・動的いずれでも作用）。
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DamperProps {
+    /// ダンパー種別。
+    pub kind: DamperKind,
+    /// バネ剛性 Kd [N/mm]（履歴型では初期軸剛性 k1）。
+    pub kd: f64,
+    /// 粘性係数 C0 [N·(s/mm)^α]（マクスウェルのみ）。
+    pub c0: f64,
+    /// 速度指数 α（1.0 で線形粘性。マクスウェルのみ）。
+    pub alpha: f64,
+    /// 降伏軸力 qy [N]（履歴型のみ）。
+    #[serde(default = "default_damper_qy")]
+    pub qy: f64,
+    /// 第2剛性比 k2/k1（履歴型のみ）。
+    #[serde(default = "default_damper_k2_ratio")]
+    pub k2_ratio: f64,
+}
+
+impl Default for DamperProps {
+    fn default() -> Self {
+        DamperProps {
+            kind: DamperKind::Maxwell,
+            kd: 100_000.0,
+            c0: 1_000.0,
+            alpha: 1.0,
+            qy: default_damper_qy(),
+            k2_ratio: default_damper_k2_ratio(),
+        }
+    }
+}
+
+/// 制振ダンパーの属性（要素 ID と特性の対、`Model::damper_attrs`）。
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DamperAttr {
+    pub elem: ElemId,
+    pub props: DamperProps,
 }
 
 /// PCa（プレキャスト）梁の水平接合面検定用属性（RESP-D マニュアル 04）。

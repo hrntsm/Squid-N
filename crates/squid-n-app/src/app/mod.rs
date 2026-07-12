@@ -40,6 +40,8 @@ pub enum ResultsView {
     Spatial,
     TimeHistory,
     Pushover,
+    /// 質点系（串団子）モデル（プッシュオーバーから生成）。
+    LumpedMass,
 }
 
 /// 設計タブ内の切替（検定表・終局検定表・MN相関曲面ビュー）。
@@ -164,6 +166,10 @@ pub struct AnalysisSettings {
     pub push_max_disp: f64,
     /// プッシュオーバー: 塑性率（ductility）の算定方式（RESP-D「05 非線形モデル」）。
     pub ductility_method: squid_n_solver::pushover::DuctilityMethod,
+    /// 質点系モデル生成: モデル化タイプ（等価せん断型など）。
+    pub lumped_mass_type: squid_n_solver::lumped_mass::LumpedMassType,
+    /// 質点系モデル生成: 第1折点判定の割線剛性比（0..1、既定 0.75）。
+    pub lumped_secant_ratio: f64,
     /// 時刻歴: 減衰比・サンプル波の刻み/継続時間/周期/振幅 [mm/s²]
     pub th_damping: f64,
     pub th_dt: f64,
@@ -178,6 +184,16 @@ pub struct AnalysisSettings {
     pub th_h2: f64,
     /// 時刻歴の積分法
     pub th_integrator: ThIntegrator,
+    /// 位相差入力（ねじれ加振）を考慮する（RESP-D「07」位相差入力解析）。
+    pub phase_diff_enabled: bool,
+    /// せん断波速度 Vs [m/s]。
+    pub phase_diff_vs: f64,
+    /// 矩形基礎長さ L [m]（位相遅れ方向の辺長）。
+    pub phase_diff_length_m: f64,
+    /// 入射角 θ [°]。
+    pub phase_diff_incidence_deg: f64,
+    /// 位相遅れ方向が Y なら true（X なら false）。基準の並進波もこの方向を用いる。
+    pub phase_diff_dir_y: bool,
     /// 荷重組合せ自動生成（種別ベース）の多雪区域フラグ（施行令86条・82条）。
     pub heavy_snow_zone: bool,
     /// 多雪区域の積雪荷重低減係数 δ1（長期 G+P+δ1・S。既定 0.7）。
@@ -209,11 +225,19 @@ pub enum ThDir {
     Xy,
 }
 
-/// 時刻歴の減衰モデル選択（UI 用）。
+/// 時刻歴の減衰モデル選択（UI 用）。RESP-D「07 非線形解析（動的解析）」減衰マトリクス。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThDampingModel {
+    /// 初期剛性比例（C=2h/ω1·Ke）。
     StiffnessProportional,
+    /// Rayleigh 減衰（1次・2次で目標減衰比）。
     Rayleigh,
+    /// モード別減衰（各モードに減衰比 h を与える。非線形では初期剛性モード）。
+    Modal,
+    /// 瞬間（接線）剛性比例・α1 一定（C=2h/ω1e·Kt を毎ステップ再構成）。
+    TangentAlpha1,
+    /// 瞬間（接線）剛性比例・h1 一定（ω1 を毎ステップ更新して減衰比 h1 を保つ）。
+    TangentH1,
 }
 
 /// 時刻歴の積分法選択（UI 用）。
@@ -236,6 +260,8 @@ impl Default for AnalysisSettings {
             push_steps: 50,
             push_max_disp: 500.0,
             ductility_method: squid_n_solver::pushover::DuctilityMethod::default(),
+            lumped_mass_type: squid_n_solver::lumped_mass::LumpedMassType::default(),
+            lumped_secant_ratio: 0.75,
             th_damping: 0.02,
             th_dt: 0.01,
             th_duration: 10.0,
@@ -245,6 +271,11 @@ impl Default for AnalysisSettings {
             th_damping_model: ThDampingModel::StiffnessProportional,
             th_h2: 0.02,
             th_integrator: ThIntegrator::NewmarkBeta,
+            phase_diff_enabled: false,
+            phase_diff_vs: 200.0,
+            phase_diff_length_m: 20.0,
+            phase_diff_incidence_deg: 30.0,
+            phase_diff_dir_y: false,
             heavy_snow_zone: false,
             snow_delta1: 0.7,
             snow_delta2: 0.35,
@@ -367,6 +398,8 @@ pub struct App {
     /// 時刻歴グラフの表示項目選択
     #[cfg(feature = "gui")]
     pub time_history_source: crate::time_history_view::TimeHistorySource,
+    /// 質点系（串団子）時刻歴応答の結果（結果タブ「質点系モデル」で実行・表示）。
+    pub stick_response: Option<squid_n_solver::lumped_mass::StickResponse>,
     /// 断面作成UI のドラフト（UI-3）
     #[cfg(feature = "gui")]
     pub section_draft: crate::section_editor::SectionEditorDraft,
@@ -486,6 +519,7 @@ impl Default for App {
             time_history_data: crate::time_history_view::TimeHistoryData::default(),
             #[cfg(feature = "gui")]
             time_history_source: crate::time_history_view::TimeHistorySource::default(),
+            stick_response: None,
             #[cfg(feature = "gui")]
             section_draft: crate::section_editor::SectionEditorDraft::default(),
             #[cfg(feature = "gui")]

@@ -80,6 +80,56 @@ pub fn time_history_panel(ui: &mut egui::Ui, app: &mut App) {
     let peak = series.iter().cloned().fold(0.0f64, |m, v| m.max(v.abs()));
     ui.label(format!("最大絶対値: {:.4e}", peak));
 
+    // レインフロー計数（RESP-D「07 非線形解析（動的解析）」その他の解析機能の
+    // 累積損傷度計算で用いる ASTM E1049 3 点法）。表示中の代表応答に対する
+    // 等価繰返し数・最大振れ幅を参考表示する（累積損傷度 D の梁端 μ 収集は今後の拡張）。
+    let cycles = squid_n_solver::damage::rainflow_cycles(series);
+    let neq: f64 = cycles.iter().map(|c| c.count).sum();
+    let max_range = cycles.iter().map(|c| c.range).fold(0.0f64, f64::max);
+    ui.label(format!(
+        "レインフロー(代表応答): 等価繰返し数 {:.1} 回 / 最大振れ幅 {:.4e}",
+        neq, max_range
+    ))
+    .on_hover_text("累積損傷度計算(レインフロー法)の基礎計数（ASTM E1049 3 点法）。");
+
+    // 梁端累積損傷度 D（RESP-D「07」鉄骨梁端部の累積損傷度計算）。非線形時刻歴で
+    // 各要素の危険断面塑性率 μ 時刻歴からレインフロー法で算定した値を表示する。
+    if let Some(res) = app.results.as_ref().and_then(|r| r.time_history.as_ref()) {
+        let dmax = res
+            .cumulative_ductility
+            .iter()
+            .cloned()
+            .fold(0.0f64, f64::max);
+        let n_damaged = res
+            .cumulative_ductility
+            .iter()
+            .filter(|&&d| d > 0.0)
+            .count();
+        if dmax > 0.0 {
+            // 最大 D の要素 ID。
+            let imax = res
+                .cumulative_ductility
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            ui.label(format!(
+                "梁端累積損傷度 D: 最大 {:.3}（部材 {}） / 損傷要素 {} 件（レインフロー法）",
+                dmax, imax, n_damaged
+            ))
+            .on_hover_text(
+                "非線形時刻歴で塑性化した要素の危険断面塑性率 μ の時刻歴から算定。\
+                 D≥1 で疲労破断（疲労特性 C・β は暫定既定、鋼種・接合形式で要照合）。",
+            );
+        } else {
+            ui.colored_label(
+                crate::theme::GRAY_600,
+                "梁端累積損傷度 D: 塑性化要素なし（非線形時刻歴で塑性率を収集）。",
+            );
+        }
+    }
+
     let plot = egui_plot::Plot::new("time_history_plot")
         .legend(egui_plot::Legend::default())
         .x_axis_label("時間 [s]")

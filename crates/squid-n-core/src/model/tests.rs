@@ -390,3 +390,33 @@ fn test_validate_index_mismatch() {
     };
     assert!(model.validate().is_err());
 }
+
+#[test]
+fn test_default_member_hysteresis_table() {
+    // RESP-D「07 非線形解析（動的解析）」既定の非線形特性: 梁曲げは
+    // RC/SRC/CFT=武田型、S=標準型。
+    assert_eq!(default_member_hysteresis(true), HysteresisModel::Takeda);
+    assert_eq!(default_member_hysteresis(false), HysteresisModel::Standard);
+}
+
+#[test]
+fn test_set_member_hysteresis_roundtrip() {
+    let mut model = Model::default();
+    let e = ElemId(3);
+    // 既定は None（＝Auto）。
+    assert_eq!(model.member_hysteresis(e), None);
+    let old = model.set_member_hysteresis(e, HysteresisModel::OriginOriented);
+    assert_eq!(old, None);
+    assert_eq!(
+        model.member_hysteresis(e),
+        Some(HysteresisModel::OriginOriented)
+    );
+    // 上書き。
+    let old = model.set_member_hysteresis(e, HysteresisModel::Takeda);
+    assert_eq!(old, Some(HysteresisModel::OriginOriented));
+    // Auto で解除。
+    let old = model.set_member_hysteresis(e, HysteresisModel::Auto);
+    assert_eq!(old, Some(HysteresisModel::Takeda));
+    assert_eq!(model.member_hysteresis(e), None);
+    assert!(model.member_hysteresis_attrs.is_empty());
+}

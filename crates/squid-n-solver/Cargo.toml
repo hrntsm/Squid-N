@@ -7,6 +7,7 @@ license = "MIT"
 [dependencies]
 squid-n-core   = { path = "../squid-n-core" }
 squid-n-math   = { path = "../squid-n-math" }
+squid-n-material = { path = "../squid-n-material" }
 squid-n-element = { path = "../squid-n-element" }
 squid-n-load   = { path = "../squid-n-load" }
 faer      = { workspace = true }

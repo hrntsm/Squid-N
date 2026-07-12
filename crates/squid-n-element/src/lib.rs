@@ -26,7 +26,7 @@ pub mod shell;
 // クレート内部の `crate::behavior`）を維持するための再エクスポート。
 pub use common::{behavior, transform};
 pub use frame::{beam, concentrated, fiber_elem, member_load, ms, truss};
-pub use springs::{isolator, panel, shear_spring, spring};
+pub use springs::{damper, isolator, panel, shear_spring, spring};
 pub use wall::{misc_wall, side_column, wall_panel};
 
 pub use behavior::*;

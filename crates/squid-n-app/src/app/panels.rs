@@ -892,9 +892,30 @@ impl App {
                     ThDampingModel::Rayleigh,
                     "Rayleigh",
                 );
+                ui.selectable_value(
+                    &mut self.analysis_cfg.th_damping_model,
+                    ThDampingModel::Modal,
+                    "モード別",
+                )
+                .on_hover_text("各モードに減衰比 h を与える（非線形は初期剛性モード）");
+                ui.selectable_value(
+                    &mut self.analysis_cfg.th_damping_model,
+                    ThDampingModel::TangentAlpha1,
+                    "接線(α1一定)",
+                )
+                .on_hover_text("瞬間剛性比例。C=2h/ω1e·Kt を毎ステップ再構成");
+                ui.selectable_value(
+                    &mut self.analysis_cfg.th_damping_model,
+                    ThDampingModel::TangentH1,
+                    "接線(h1一定)",
+                )
+                .on_hover_text("瞬間剛性比例。ω1 を毎ステップ更新し減衰比 h1 を保つ");
                 ui.separator();
                 ui.label(match self.analysis_cfg.th_damping_model {
-                    ThDampingModel::StiffnessProportional => "減衰比 h:",
+                    ThDampingModel::StiffnessProportional
+                    | ThDampingModel::TangentAlpha1
+                    | ThDampingModel::TangentH1 => "減衰比 h:",
+                    ThDampingModel::Modal => "減衰比 h(全モード):",
                     ThDampingModel::Rayleigh => "h1(1次):",
                 });
                 ui.add(
@@ -936,6 +957,41 @@ impl App {
                         .speed(50.0)
                         .range(10.0..=10000.0),
                 );
+            });
+            // 位相差入力（ねじれ加振）。RESP-D「07」位相差入力解析 t=(L·sinθ)/Vs。
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.analysis_cfg.phase_diff_enabled, "位相差入力")
+                    .on_hover_text(
+                        "見かけ速度で地震動が矩形基礎を通過する位相差からねじれ加振を生成",
+                    );
+                ui.add_enabled_ui(self.analysis_cfg.phase_diff_enabled, |ui| {
+                    ui.label("Vs[m/s]");
+                    ui.add(
+                        egui::DragValue::new(&mut self.analysis_cfg.phase_diff_vs)
+                            .speed(10.0)
+                            .range(50.0..=2000.0),
+                    );
+                    ui.label("L[m]");
+                    ui.add(
+                        egui::DragValue::new(&mut self.analysis_cfg.phase_diff_length_m)
+                            .speed(1.0)
+                            .range(1.0..=500.0),
+                    );
+                    ui.label("θ[°]");
+                    ui.add(
+                        egui::DragValue::new(&mut self.analysis_cfg.phase_diff_incidence_deg)
+                            .speed(1.0)
+                            .range(0.0..=90.0),
+                    );
+                    ui.selectable_value(&mut self.analysis_cfg.phase_diff_dir_y, false, "X");
+                    ui.selectable_value(&mut self.analysis_cfg.phase_diff_dir_y, true, "Y");
+                    let lag = squid_n_solver::phase_diff::phase_lag_time(
+                        self.analysis_cfg.phase_diff_length_m,
+                        self.analysis_cfg.phase_diff_incidence_deg,
+                        self.analysis_cfg.phase_diff_vs,
+                    );
+                    ui.label(format!("位相遅れ {:.4}s", lag));
+                });
             });
             ui.horizontal(|ui| {
                 if ui
@@ -1001,6 +1057,7 @@ impl App {
                 dt: self.analysis_cfg.th_dt,
                 accel_x: col1,
                 accel_y: col2,
+                accel_theta: None,
             },
         };
         self.start_time_history_job(wave);
@@ -1012,6 +1069,7 @@ impl App {
             let sel_spatial = self.results_view == ResultsView::Spatial;
             let sel_th = self.results_view == ResultsView::TimeHistory;
             let sel_po = self.results_view == ResultsView::Pushover;
+            let sel_lm = self.results_view == ResultsView::LumpedMass;
             if ui.selectable_label(sel_spatial, "3D/応力図").clicked() {
                 self.results_view = ResultsView::Spatial;
             }
@@ -1020,6 +1078,9 @@ impl App {
             }
             if ui.selectable_label(sel_po, "プッシュオーバー").clicked() {
                 self.results_view = ResultsView::Pushover;
+            }
+            if ui.selectable_label(sel_lm, "質点系モデル").clicked() {
+                self.results_view = ResultsView::LumpedMass;
             }
             ui.separator();
             // 結果サマリ
@@ -1039,6 +1100,7 @@ impl App {
             ResultsView::Spatial => crate::viewer::viewer_panel(ui, self),
             ResultsView::TimeHistory => crate::time_history_view::time_history_panel(ui, self),
             ResultsView::Pushover => self.pushover_panel(ui),
+            ResultsView::LumpedMass => self.lumped_mass_panel(ui),
         }
     }
 
@@ -1145,6 +1207,197 @@ impl App {
                 ui.label(format!("... 他 {} 件", po.hinges.len() - 20));
             }
         });
+    }
+
+    /// 質点系（串団子）モデルの表示。プッシュオーバー結果から層 Q-δ を
+    /// トリリニア縮約し、層ごとの質量・階高・復元力特性を一覧する
+    /// （RESP-D「07 非線形解析（動的解析）」質点系解析モデル）。
+    pub(crate) fn lumped_mass_panel(&mut self, ui: &mut egui::Ui) {
+        use squid_n_solver::lumped_mass::{build_lumped_mass_model, LumpedMassType};
+
+        let Some(po) = self.results.as_ref().and_then(|r| r.pushover.as_ref()) else {
+            ui.colored_label(
+                crate::theme::GRAY_600,
+                "プッシュオーバー結果がありません。質点系モデルは\
+                 プッシュオーバー結果から生成します。解析タブから実行してください。",
+            );
+            return;
+        };
+
+        // モデル化タイプ・第1折点判定の割線剛性比を選択。
+        ui.horizontal(|ui| {
+            ui.label("モデル化タイプ:");
+            let cur = self.analysis_cfg.lumped_mass_type;
+            egui::ComboBox::from_id_salt("lumped_mass_type")
+                .selected_text(cur.label())
+                .show_ui(ui, |ui| {
+                    for t in [
+                        LumpedMassType::EquivalentShear,
+                        LumpedMassType::EquivalentBendingShear,
+                        LumpedMassType::BendingShearSeparated,
+                    ] {
+                        ui.selectable_value(&mut self.analysis_cfg.lumped_mass_type, t, t.label());
+                    }
+                });
+            ui.separator();
+            ui.label("第1折点 割線比:");
+            ui.add(
+                egui::DragValue::new(&mut self.analysis_cfg.lumped_secant_ratio)
+                    .speed(0.01)
+                    .range(0.3..=0.95),
+            );
+        });
+        ui.separator();
+
+        // プッシュオーバーから串団子モデルを生成（軽量なので毎フレーム再構成）。
+        let lm = build_lumped_mass_model(
+            &self.model,
+            po,
+            self.analysis_cfg.lumped_mass_type,
+            self.analysis_cfg.lumped_secant_ratio,
+        );
+
+        let total_mass: f64 = lm.stories.iter().map(|s| s.mass).sum();
+        ui.horizontal(|ui| {
+            ui.label(format!("質点数: {}", lm.stories.len()));
+            ui.separator();
+            ui.label(format!("総質量: {:.1} t", total_mass));
+            ui.separator();
+            ui.label(format!("モデル: {}", lm.model_type.label()));
+        });
+        ui.separator();
+
+        // 層ごとの質点・復元力特性（トリリニア）を一覧。上層から順に表示。
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::Grid::new("lumped_mass_stories")
+                .num_columns(9)
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("階");
+                    ui.strong("質量[t]");
+                    ui.strong("階高[mm]");
+                    ui.strong("K1[kN/mm]");
+                    ui.strong("K2[kN/mm]");
+                    ui.strong("K3[kN/mm]");
+                    ui.strong("第1折点 δ1/Q1");
+                    ui.strong("第2折点 δ2/Q2");
+                    ui.strong("第3折点 δ3/Q3");
+                    ui.end_row();
+
+                    // model.stories と stick は同順（build_lumped_mass_model が順に生成）。
+                    for (i, stick) in lm.stories.iter().enumerate().rev() {
+                        let name = self
+                            .model
+                            .stories
+                            .get(i)
+                            .map(|s| s.name.as_str())
+                            .unwrap_or("-");
+                        let sk = &stick.skeleton;
+                        ui.label(name);
+                        ui.label(format!("{:.2}", stick.mass));
+                        ui.label(format!("{:.0}", stick.height));
+                        ui.label(format!("{:.1}", sk.k1 / 1000.0));
+                        ui.label(format!("{:.1}", sk.k2() / 1000.0));
+                        ui.label(format!("{:.1}", sk.k3() / 1000.0));
+                        ui.label(format!("{:.2} / {:.0}", sk.d1, sk.q1 / 1000.0));
+                        ui.label(format!("{:.2} / {:.0}", sk.d2, sk.q2 / 1000.0));
+                        ui.label(format!("{:.2} / {:.0}", sk.d3, sk.q3 / 1000.0));
+                        ui.end_row();
+                    }
+                });
+
+            ui.add_space(6.0);
+            ui.colored_label(
+                crate::theme::GRAY_600,
+                "K は [kN/mm]、Q は [kN]、δ は [mm]。骨格はプッシュオーバー層 Q-δ を\
+                 等包絡面積則でトリリニア縮約したもの。",
+            );
+        });
+
+        // ── 質点系（せん断型）時刻歴応答解析 ──────────────────────────
+        ui.separator();
+        let mut run_stick = false;
+        let mut clear_stick = false;
+        ui.horizontal(|ui| {
+            if ui
+                .button("▶ 質点系時刻歴を実行")
+                .on_hover_text(
+                    "サンプル波（解析設定の dt/継続/周期/振幅・減衰比）で串団子モデルの\
+                     非線形時刻歴（Newmark-β、各層トリリニア）を実行します",
+                )
+                .clicked()
+            {
+                run_stick = true;
+            }
+            if self.stick_response.is_some() && ui.button("結果クリア").clicked() {
+                clear_stick = true;
+            }
+        });
+        if run_stick {
+            let accel = Self::sample_wave(&self.analysis_cfg).accel_x;
+            let res = squid_n_solver::lumped_mass::lumped_mass_time_history(
+                &lm,
+                &accel,
+                self.analysis_cfg.th_dt,
+                self.analysis_cfg.th_damping,
+            );
+            self.stick_response = Some(res);
+        }
+        if clear_stick {
+            self.stick_response = None;
+        }
+        if let Some(res) = &self.stick_response {
+            let roof_peak = res
+                .roof_disp
+                .iter()
+                .cloned()
+                .fold(0.0f64, |m, v| m.max(v.abs()));
+            let mu_max = res.story_ductility.iter().cloned().fold(0.0f64, f64::max);
+            ui.horizontal(|ui| {
+                ui.label(format!("頂部最大変位: {:.2} mm", roof_peak));
+                ui.separator();
+                ui.label(format!("最大層塑性率 μ: {:.2}", mu_max));
+            });
+            egui::Grid::new("stick_th_result")
+                .striped(true)
+                .num_columns(4)
+                .show(ui, |ui| {
+                    ui.strong("階");
+                    ui.strong("最大層間変形[mm]");
+                    ui.strong("最大層せん断[kN]");
+                    ui.strong("塑性率μ");
+                    ui.end_row();
+                    for i in (0..res.story_peak_drift.len()).rev() {
+                        let name = self
+                            .model
+                            .stories
+                            .get(i)
+                            .map(|s| s.name.as_str())
+                            .unwrap_or("-");
+                        ui.label(name);
+                        ui.label(format!("{:.2}", res.story_peak_drift[i]));
+                        ui.label(format!("{:.0}", res.story_peak_shear[i] / 1000.0));
+                        ui.label(format!("{:.2}", res.story_ductility[i]));
+                        ui.end_row();
+                    }
+                });
+            let pts: Vec<[f64; 2]> = res
+                .time
+                .iter()
+                .zip(res.roof_disp.iter())
+                .map(|(&t, &d)| [t, d])
+                .collect();
+            egui_plot::Plot::new("stick_roof_plot")
+                .height(160.0)
+                .x_axis_label("時間[s]")
+                .y_axis_label("頂部変位[mm]")
+                .show(ui, |pu| {
+                    pu.line(
+                        egui_plot::Line::new("roof", egui_plot::PlotPoints::from(pts))
+                            .color(crate::theme::DATA_BLUE),
+                    );
+                });
+        }
     }
 
     /// レポートタブ：CSV レポートのプレビューとエクスポート。

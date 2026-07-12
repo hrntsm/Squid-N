@@ -712,6 +712,95 @@ fn test_pushover_flow() {
     assert!(!po.capacity_curve.is_empty());
 }
 
+/// プッシュオーバー結果から質点系（串団子）モデルを生成する配線の end-to-end 確認。
+#[test]
+fn test_lumped_mass_model_from_pushover() {
+    let mut app = App::default();
+    app.load_model(crate::sample::portal_frame());
+    app.generate_stories_action();
+    app.analysis_cfg.push_steps = 10;
+    app.run_pushover();
+    assert!(app.last_error.is_none(), "{:?}", app.last_error);
+    let po = app.results.as_ref().unwrap().pushover.as_ref().unwrap();
+
+    let lm = squid_n_solver::lumped_mass::build_lumped_mass_model(
+        &app.model,
+        po,
+        app.analysis_cfg.lumped_mass_type,
+        app.analysis_cfg.lumped_secant_ratio,
+    );
+    // 層数分の質点が生成され、各層のトリリニア骨格が妥当（K1>0・折点昇順）。
+    assert_eq!(lm.stories.len(), app.model.stories.len());
+    assert!(!lm.stories.is_empty());
+    for stick in &lm.stories {
+        let sk = &stick.skeleton;
+        assert!(sk.k1 > 0.0, "K1>0: {sk:?}");
+        assert!(sk.d1 <= sk.d2 && sk.d2 <= sk.d3, "折点昇順: {sk:?}");
+        assert!(stick.mass >= 0.0);
+    }
+}
+
+/// 制振ダンパーの作成→諸元変更→削除を app の undo スタック経由で確認する
+/// （部材表 UI が発行する編集コマンドの統合確認）。
+#[test]
+fn test_damper_create_edit_delete_via_undo() {
+    use squid_n_core::model::{
+        DamperProps, ElementData, ElementKind, EndCondition, ForceRegime, LocalAxis,
+    };
+    let mut app = App::default();
+    app.load_model(crate::sample::portal_frame());
+    let n = app.model.nodes.len();
+    assert!(n >= 2);
+    let (i_node, j_node) = (app.model.nodes[0].id, app.model.nodes[1].id);
+    let new_id = squid_n_core::ids::ElemId(app.model.elements.len() as u32);
+    let elem = ElementData {
+        id: new_id,
+        kind: ElementKind::Damper,
+        nodes: [i_node, j_node].into_iter().collect(),
+        section: None,
+        material: None,
+        local_axis: LocalAxis {
+            ref_vector: [0.0, 0.0, 1.0],
+        },
+        end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+        force_regime: ForceRegime::Auto,
+        rigid_zone: Default::default(),
+        plastic_zone: None,
+        spring: None,
+    };
+    // 作成。
+    app.undo.run(
+        &mut app.model,
+        Box::new(squid_n_edit::AddDamper {
+            elem,
+            props: DamperProps::default(),
+        }),
+    );
+    assert_eq!(app.model.damper_props(new_id), Some(DamperProps::default()));
+    // 諸元変更。
+    let edited = DamperProps {
+        kd: 150_000.0,
+        c0: 3_000.0,
+        alpha: 0.35,
+        ..Default::default()
+    };
+    app.undo.run(
+        &mut app.model,
+        Box::new(squid_n_edit::SetDamperProps {
+            elem: new_id,
+            props: Some(edited),
+        }),
+    );
+    assert_eq!(app.model.damper_props(new_id), Some(edited));
+    // 削除（要素も特性も消える）。
+    app.undo.run(
+        &mut app.model,
+        Box::new(squid_n_edit::DeleteMember { id: new_id }),
+    );
+    assert_eq!(app.model.damper_props(new_id), None);
+    assert!(app.model.elements.iter().all(|e| e.id != new_id));
+}
+
 /// `poll_job` が完了するまで待つ（タイムアウト5秒でパニック、10ms 間隔でポーリング）。
 fn wait_for_job(app: &mut App) {
     let start = std::time::Instant::now();

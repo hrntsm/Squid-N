@@ -534,3 +534,245 @@ fn test_build_behavior_wall_opening_reduces_shear_stiffness() {
     );
     assert!((axial_pattern(&k_open) - axial_pattern(&k_no)).abs() < 1e-6);
 }
+
+#[test]
+fn test_resolve_member_hysteresis_and_flexural_springs() {
+    use squid_n_core::model::HysteresisModel;
+    use squid_n_core::section_shape::{BarSet, RcRebar, SectionShape, ShearBar};
+
+    fn rebar() -> RcRebar {
+        RcRebar {
+            main_x: BarSet {
+                count: 4,
+                dia: 22.0,
+                layers: 1,
+            },
+            main_y: BarSet {
+                count: 4,
+                dia: 22.0,
+                layers: 1,
+            },
+            cover: 50.0,
+            shear: ShearBar {
+                dia: 10.0,
+                pitch: 100.0,
+                legs: 2,
+                grade: None,
+            },
+        }
+    }
+
+    let mut model = make_diaphragm_model();
+    let beam = ElementData {
+        id: ElemId(0),
+        kind: ElementKind::Beam,
+        nodes: smallvec::smallvec![NodeId(0), NodeId(1)],
+        section: Some(SectionId(0)),
+        material: Some(MaterialId(0)),
+        local_axis: LocalAxis {
+            ref_vector: [0.0, 1.0, 0.0],
+        },
+        end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+        force_regime: ForceRegime::Auto,
+        rigid_zone: Default::default(),
+        plastic_zone: None,
+        spring: None,
+    };
+    model.elements.push(beam.clone());
+
+    // 断面形状なし → 非 RC → 標準型（バイリニア、N-M 相関対象）。
+    assert!(!is_rc_like_section(&beam, &model));
+    assert_eq!(
+        resolve_member_hysteresis(&beam, &model),
+        HysteresisModel::Standard
+    );
+    let (_i, _j, use_mn) = build_flexural_springs(&beam, &model, HysteresisModel::Standard);
+    assert!(use_mn);
+
+    // RcRect + Fc → RC 系 → 既定=武田型（履歴材料、N-M 相関対象外）。
+    model.sections[0].shape = Some(SectionShape::RcRect {
+        b: 400.0,
+        d: 700.0,
+        rebar: rebar(),
+    });
+    model.sections[0].depth = 700.0;
+    model.sections[0].width = 400.0;
+    model.sections[0].iz = 400.0 * 700.0f64.powi(3) / 12.0;
+    model.materials[0].fc = Some(24.0);
+    model.materials[0].fy = Some(345.0);
+    assert!(is_rc_like_section(&beam, &model));
+    assert_eq!(
+        resolve_member_hysteresis(&beam, &model),
+        HysteresisModel::Takeda
+    );
+    let (_i, _j, use_mn) = build_flexural_springs(&beam, &model, HysteresisModel::Takeda);
+    assert!(!use_mn, "武田型(履歴材料)は N-M 相関(set_yield)対象外");
+
+    // SteelH → 非 RC → 標準型。
+    model.sections[0].shape = Some(SectionShape::SteelH {
+        height: 400.0,
+        width: 200.0,
+        web_thick: 8.0,
+        flange_thick: 13.0,
+    });
+    assert!(!is_rc_like_section(&beam, &model));
+    assert_eq!(
+        resolve_member_hysteresis(&beam, &model),
+        HysteresisModel::Standard
+    );
+
+    // 個別指定は既定表に優先する。
+    model.set_member_hysteresis(ElemId(0), HysteresisModel::MaxPointOriented);
+    assert_eq!(
+        resolve_member_hysteresis(&beam, &model),
+        HysteresisModel::MaxPointOriented
+    );
+    let (_i, _j, use_mn) = build_flexural_springs(&beam, &model, HysteresisModel::MaxPointOriented);
+    assert!(!use_mn);
+}
+
+#[test]
+fn test_rc_beam_flexural_spring_exhibits_takeda_degradation() {
+    // RC 梁の材端バネが解析で実際に武田型（除荷剛性が初期剛性より低下）で
+    // 応答することを、返却された復元力材料を直接駆動して確認する。
+    use squid_n_core::model::HysteresisModel;
+    use squid_n_core::section_shape::{BarSet, RcRebar, SectionShape, ShearBar};
+
+    let mut model = make_diaphragm_model();
+    let beam = ElementData {
+        id: ElemId(0),
+        kind: ElementKind::Beam,
+        nodes: smallvec::smallvec![NodeId(0), NodeId(1)],
+        section: Some(SectionId(0)),
+        material: Some(MaterialId(0)),
+        local_axis: LocalAxis {
+            ref_vector: [0.0, 1.0, 0.0],
+        },
+        end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+        force_regime: ForceRegime::Auto,
+        rigid_zone: Default::default(),
+        plastic_zone: None,
+        spring: None,
+    };
+    model.elements.push(beam.clone());
+    model.sections[0].shape = Some(SectionShape::RcRect {
+        b: 400.0,
+        d: 700.0,
+        rebar: RcRebar {
+            main_x: BarSet {
+                count: 4,
+                dia: 22.0,
+                layers: 1,
+            },
+            main_y: BarSet {
+                count: 4,
+                dia: 22.0,
+                layers: 1,
+            },
+            cover: 50.0,
+            shear: ShearBar {
+                dia: 10.0,
+                pitch: 100.0,
+                legs: 2,
+                grade: None,
+            },
+        },
+    });
+    model.sections[0].depth = 700.0;
+    model.sections[0].width = 400.0;
+    model.sections[0].iz = 400.0 * 700.0f64.powi(3) / 12.0;
+    model.materials[0].young = 25_000.0;
+    model.materials[0].fc = Some(24.0);
+    model.materials[0].fy = Some(345.0);
+
+    let rule = resolve_member_hysteresis(&beam, &model);
+    assert_eq!(rule, HysteresisModel::Takeda);
+    let (mut si, _sj, use_mn) = build_flexural_springs(&beam, &model, rule);
+    assert!(!use_mn);
+
+    // 初期（弾性）接線。
+    let (_m0, k0) = si.trial(1e-8);
+    si.commit();
+    assert!(k0 > 0.0);
+
+    // 十分大きい回転で降伏させ、スケルトン上のモーメントを得る。
+    let big = 0.02_f64;
+    let (m_peak, _) = si.trial(big);
+    si.commit();
+    assert!(m_peak > 0.0, "should carry positive moment at peak");
+
+    // 除荷: 武田型の除荷剛性は初期剛性より小さい（剛性低下）。
+    let (m1, _) = si.trial(big * 0.95);
+    let (m2, _) = si.trial(big * 0.90);
+    let ku = (m1 - m2) / (big * 0.05);
+    assert!(
+        ku < k0 * 0.999,
+        "Takeda unloading stiffness ({ku}) must be below initial ({k0})"
+    );
+    assert!(ku > 0.0, "unloading stiffness must stay positive");
+}
+
+#[test]
+fn test_steel_beam_flexural_spring_buckling_degrades() {
+    // 鉄骨梁に座屈考慮型を個別指定 → 材端バネが最大耐力後に耐力劣化することを、
+    // 返却された復元力材料を直接駆動して確認する。
+    use squid_n_core::model::HysteresisModel;
+    use squid_n_core::section_shape::SectionShape;
+
+    let mut model = make_diaphragm_model();
+    let beam = ElementData {
+        id: ElemId(0),
+        kind: ElementKind::Beam,
+        nodes: smallvec::smallvec![NodeId(0), NodeId(1)],
+        section: Some(SectionId(0)),
+        material: Some(MaterialId(0)),
+        local_axis: LocalAxis {
+            ref_vector: [0.0, 1.0, 0.0],
+        },
+        end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+        force_regime: ForceRegime::Auto,
+        rigid_zone: Default::default(),
+        plastic_zone: None,
+        spring: None,
+    };
+    model.elements.push(beam.clone());
+    model.sections[0].shape = Some(SectionShape::SteelH {
+        height: 400.0,
+        width: 200.0,
+        web_thick: 8.0,
+        flange_thick: 13.0,
+    });
+    model.sections[0].depth = 400.0;
+    model.sections[0].width = 200.0;
+    model.sections[0].iz = 200.0 * 400.0f64.powi(3) / 12.0;
+    model.materials[0].fy = Some(325.0);
+    model.set_member_hysteresis(ElemId(0), HysteresisModel::SteelBuckling);
+
+    let rule = resolve_member_hysteresis(&beam, &model);
+    assert_eq!(rule, HysteresisModel::SteelBuckling);
+    let (mut si, _sj, use_mn) = build_flexural_springs(&beam, &model, rule);
+    assert!(use_mn, "座屈考慮型は set_yield 対応で N-M 相関適用可");
+
+    let (_m0, k0) = si.trial(1e-9);
+    si.commit();
+    assert!(k0 > 0.0);
+    // 単調載荷でピーク → さらに大変形で耐力劣化。
+    let theta_y = {
+        // My は spring 内部だが、θy≈small。大きめの回転で骨格の各域を通過させる。
+        1e-3
+    };
+    let mut m_max = 0.0_f64;
+    let mut m_last = 0.0_f64;
+    for i in 1..=200 {
+        let th = theta_y * i as f64 * 0.5;
+        let (m, _) = si.trial(th);
+        si.commit();
+        m_max = m_max.max(m);
+        m_last = m;
+    }
+    assert!(m_max > 0.0);
+    assert!(
+        m_last < m_max * 0.999,
+        "buckling degradation: last M ({m_last}) must fall below peak ({m_max})"
+    );
+}

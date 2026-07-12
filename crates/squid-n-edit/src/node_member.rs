@@ -251,6 +251,27 @@ impl EditCommand for AddMember {
     }
 }
 
+/// 制振ダンパー要素の追加（RESP-D「07 非線形解析（動的解析）」制振要素）。
+/// 要素（`ElementKind::Damper`）と特性（`Model::damper_attrs`）を原子的に追加する。
+/// 逆操作は部材削除（`DeleteMember` が側テーブル属性も退避・復元する）。
+pub struct AddDamper {
+    pub elem: squid_n_core::model::ElementData,
+    pub props: squid_n_core::model::DamperProps,
+}
+
+impl EditCommand for AddDamper {
+    fn apply(&self, model: &mut Model) -> Box<dyn EditCommand> {
+        let id = self.elem.id;
+        model.elements.push(self.elem.clone());
+        model.set_damper_props(id, Some(self.props));
+        Box::new(DeleteMember { id })
+    }
+
+    fn label(&self) -> &str {
+        "制振ダンパー追加"
+    }
+}
+
 /// 部材削除（中間の部材も可）。逆操作は [`InsertMember`]。
 ///
 /// ID＝配列インデックスの不変条件を保つため、削除後は当該部材より後ろの
@@ -278,6 +299,8 @@ impl EditCommand for DeleteMember {
                 }
             }
         }
+        // 側テーブル属性（履歴則・ダンパー・免震等）を退避してから削除（残余は shift で繰上げ）。
+        let removed_attrs = model.take_elem_attrs(self.id);
         let removed = model.elements.remove(idx);
         shift_elem_ids(model, |id| {
             if id.0 > self.id.0 {
@@ -288,6 +311,7 @@ impl EditCommand for DeleteMember {
             index: idx,
             elem: removed,
             member_loads: removed_loads,
+            elem_attrs: removed_attrs,
         })
     }
 
@@ -303,6 +327,8 @@ pub struct InsertMember {
     pub elem: squid_n_core::model::ElementData,
     /// (荷重ケース index, 荷重 index, 内容)
     pub member_loads: Vec<(usize, usize, squid_n_core::model::MemberLoad)>,
+    /// 削除時に退避した側テーブル属性（履歴則・ダンパー・免震等）。
+    pub elem_attrs: squid_n_core::model::ElemAttrs,
 }
 
 impl EditCommand for InsertMember {
@@ -325,6 +351,8 @@ impl EditCommand for InsertMember {
                 lc.member.insert(pos, load.clone());
             }
         }
+        // 退避した側テーブル属性を再挿入 ID へ紐づけ直して復元。
+        model.restore_elem_attrs(id, self.elem_attrs.clone());
         Box::new(DeleteMember { id })
     }
 
@@ -333,7 +361,8 @@ impl EditCommand for InsertMember {
     }
 }
 
-/// モデル内の全ての `ElemId` 参照（部材自身の ID を含む）に `f` を適用する。
+/// モデル内の全ての `ElemId` 参照（部材自身の ID・部材荷重・要素キー付き側テーブル）に
+/// `f` を適用する。要素の削除・挿入に伴う ID 繰上げ／繰下げで参照整合を保つ。
 fn shift_elem_ids(model: &mut Model, mut f: impl FnMut(&mut ElemId)) {
     for elem in &mut model.elements {
         f(&mut elem.id);
@@ -343,6 +372,8 @@ fn shift_elem_ids(model: &mut Model, mut f: impl FnMut(&mut ElemId)) {
             f(&mut ml.elem);
         }
     }
+    // 壁・鉄骨・BRB・PCa・免震・履歴則・ダンパーの側テーブルも同様に繰上げ／繰下げする。
+    model.shift_elem_attr_refs(&mut f);
 }
 
 /// 何もしないコマンド（参照不正時の安全なフォールバック）。

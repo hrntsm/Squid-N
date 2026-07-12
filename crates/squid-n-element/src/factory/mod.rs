@@ -1,6 +1,9 @@
 use crate::behavior::{ElemState, ElementBehavior};
-use squid_n_core::model::{ElementData, ElementKind, ForceRegime, Model};
-use squid_n_material::uniaxial::Bilinear;
+use squid_n_core::model::{
+    default_member_hysteresis, ElementData, ElementKind, ForceRegime, HysteresisModel, Model,
+};
+use squid_n_material::uniaxial::{Bilinear, UniaxialMaterial};
+use squid_n_material::{HysteresisMaterial, HysteresisRule, SteelBuckling, TsujiYamada};
 
 /// ForceRegime の自動選択結果（P5 §5）
 pub enum ResolvedRegime {
@@ -221,6 +224,22 @@ pub fn build_behavior(data: &ElementData, model: &Model) -> (Box<dyn ElementBeha
             Box::new(crate::isolator::IsolatorElement::new(data, model)),
             ElemState::default(),
         ),
+        // 制振ダンパー（RESP-D「07」制振要素）。種別で要素を切替える。
+        // - マクスウェル（速度依存型）: 静的・線形では Δt=0 で不活性、時刻歴で活性化。
+        // - 履歴型バイリニア（鋼材系）: 変位依存の弾塑性軸ばね（静的・動的で作用）。
+        ElementKind::Damper => {
+            use squid_n_core::model::DamperKind;
+            let kind = model.damper_props(data.id).unwrap_or_default().kind;
+            let beh: Box<dyn ElementBehavior> = match kind {
+                DamperKind::Maxwell => {
+                    Box::new(crate::damper::MaxwellDamperElement::new(data, model))
+                }
+                DamperKind::HystereticBilinear => {
+                    Box::new(crate::damper::HystereticDamperElement::new(data, model))
+                }
+            };
+            (beh, ElemState::default())
+        }
     }
 }
 
@@ -243,19 +262,23 @@ pub fn build_nonlinear_behavior(
         ElementKind::Beam => match resolve_force_regime(data, model) {
             ResolvedRegime::ConcentratedSpring => {
                 let elem = crate::beam::BeamElement::new(data, model);
-                let (spring_i, spring_j) = build_rotational_springs(data, model);
-                // 端バネの N-M 相関（2バネ連成: M_lim = My0·(1-|N|/N許容)）。
-                // My0 はバネ生成と同じ弾性断面係数ベース、N許容 = σy·A。
-                let (my0, n_allow) = yield_moment_and_axial(data, model);
-                (
-                    Box::new(
-                        crate::concentrated::ConcentratedSpringBeam::new_one_component(
-                            elem, spring_i, spring_j,
-                        )
-                        .with_mn_interaction(my0, n_allow),
-                    ),
-                    ElemState::default(),
-                )
+                // 履歴則を解決（部材個別指定 → 構造種別ごとの既定表。RESP-D「07 非線形
+                // 解析（動的解析）」立体解析モデルの既定の非線形特性）。RC/SRC/CFT 梁は
+                // 武田型トリリニア、S 梁は標準型（kinematic バイリニア）を材端バネに用いる。
+                let rule = resolve_member_hysteresis(data, model);
+                let (spring_i, spring_j, use_mn) = build_flexural_springs(data, model, rule);
+                let beam = crate::concentrated::ConcentratedSpringBeam::new_one_component(
+                    elem, spring_i, spring_j,
+                );
+                // 端バネの N-M 相関（M_lim = My0·(1-|N|/N許容)）はバイリニア（標準型）
+                // のみ適用（`set_yield` 対応）。武田型等の履歴材料は骨格固定のため対象外。
+                let beam = if use_mn {
+                    let (my0, n_allow) = yield_moment_and_axial(data, model);
+                    beam.with_mn_interaction(my0, n_allow)
+                } else {
+                    beam
+                };
+                (Box::new(beam), ElemState::default())
             }
             ResolvedRegime::Fiber => (Box::new(build_fiber(data, model)), ElemState::default()),
         },
@@ -357,13 +380,9 @@ fn yield_moment_and_axial(data: &ElementData, model: &Model) -> (f64, f64) {
     (flexural_yield_moment(data, model), fy_sigma * area)
 }
 
-fn build_rotational_springs(
-    data: &ElementData,
-    model: &Model,
-) -> (
-    Box<dyn squid_n_material::uniaxial::UniaxialMaterial>,
-    Box<dyn squid_n_material::uniaxial::UniaxialMaterial>,
-) {
+/// 材端曲げバネの初期回転剛性 k_rot [N·mm/rad] と降伏モーメント My [N·mm]。
+/// k_rot は可とう長 L'（= L − 剛域長。§6.2.1）基準で評価する。
+fn rotational_spring_params(data: &ElementData, model: &Model) -> (f64, f64) {
     let sec = data.section.and_then(|sid| model.sections.get(sid.index()));
     let mat = data
         .material
@@ -379,9 +398,6 @@ fn build_rotational_springs(
         + (n1.coord[1] - n0.coord[1]).powi(2)
         + (n1.coord[2] - n0.coord[2]).powi(2))
     .sqrt();
-    // 集中ばねの初期剛性は可とう長 L'（= L − 剛域長。§6.2.1）基準で評価する。
-    // 剛域があるのに節点間長 L で評価すると初期剛性を過小評価するため、
-    // L' ≤ 0（剛域が全長を占める異常値）の場合のみ L にフォールバックする。
     let l_flex = l - data.rigid_zone.length_i - data.rigid_zone.length_j;
     let l_eff = if l_flex > 0.0 { l_flex } else { l };
     let k_rot = if l_eff > 0.0 {
@@ -389,10 +405,135 @@ fn build_rotational_springs(
     } else {
         1.0e12
     };
+    (k_rot, my)
+}
 
+fn build_rotational_springs(
+    data: &ElementData,
+    model: &Model,
+) -> (Box<dyn UniaxialMaterial>, Box<dyn UniaxialMaterial>) {
+    let (k_rot, my) = rotational_spring_params(data, model);
     let spring_i = Box::new(Bilinear::new(k_rot, my, 0.01));
     let spring_j = Box::new(Bilinear::new(k_rot, my, 0.01));
     (spring_i, spring_j)
+}
+
+/// 断面形状が RC/SRC/CFT（コンクリート系）か否か（既定履歴則の判定用）。
+fn is_rc_like_section(data: &ElementData, model: &Model) -> bool {
+    use squid_n_core::section_shape::SectionShape;
+    matches!(
+        data.section
+            .and_then(|sid| model.sections.get(sid.index()))
+            .and_then(|s| s.shape.as_ref()),
+        Some(
+            SectionShape::RcRect { .. }
+                | SectionShape::RcCircle { .. }
+                | SectionShape::SrcRect { .. }
+                | SectionShape::CftBox { .. }
+                | SectionShape::CftPipe { .. }
+                | SectionShape::RcWall { .. }
+        )
+    )
+}
+
+/// 部材の履歴則を解決する（属性 override → 構造種別ごとの既定表。RESP-D「07 非線形
+/// 解析（動的解析）」立体解析モデルの既定の非線形特性）。`HysteresisModel::Auto` は
+/// 構造種別ごとの既定（RC/SRC/CFT=武田型、S=標準型）へ解決される。UI 表示にも用いる。
+pub fn resolve_member_hysteresis(data: &ElementData, model: &Model) -> HysteresisModel {
+    match model.member_hysteresis(data.id) {
+        Some(r) if r != HysteresisModel::Auto => r,
+        _ => default_member_hysteresis(is_rc_like_section(data, model)),
+    }
+}
+
+/// 材端曲げバネのひび割れモーメント Mc [N·mm]。RC 系は Mc=0.56·Fc·Ze（κ=0.56、
+/// Ze=断面係数）、それ以外は My/3 で近似する。
+fn crack_moment(data: &ElementData, model: &Model, my: f64) -> f64 {
+    let sec = data.section.and_then(|sid| model.sections.get(sid.index()));
+    let mat = data
+        .material
+        .and_then(|mid| model.materials.get(mid.index()));
+    let depth = sec.map(|s| s.depth.max(s.width)).unwrap_or(100.0);
+    let iz = sec.map(|s| s.iz.max(s.iy)).unwrap_or(1.0e6);
+    let ze = if depth > 0.0 { iz / (depth / 2.0) } else { 0.0 };
+    match (is_rc_like_section(data, model), mat.and_then(|m| m.fc)) {
+        (true, Some(fc)) if fc > 0.0 && ze > 0.0 => (0.56 * fc * ze).clamp(my * 0.1, my * 0.9),
+        _ => my / 3.0,
+    }
+}
+
+/// 材端曲げバネの復元力材料を履歴則に応じて構築する（RESP-D「07 履歴特性」）。
+/// 戻り値の bool は N-M 相関（`set_yield`）を適用可能か（バイリニアのみ true）。
+/// 標準型・降伏モーメント不定は従来の kinematic バイリニアを用い、武田型/逆行型/
+/// 原点指向型/最大点指向型は [`HysteresisMaterial`] のトリリニア（原点指向はバイ
+/// リニア）を用いる。
+fn build_flexural_springs(
+    data: &ElementData,
+    model: &Model,
+    rule: HysteresisModel,
+) -> (Box<dyn UniaxialMaterial>, Box<dyn UniaxialMaterial>, bool) {
+    let (k_rot, my) = rotational_spring_params(data, model);
+    // 標準型・降伏モーメント不定は従来の kinematic バイリニア（＝標準型相当）。
+    if my <= 0.0 || k_rot <= 0.0 || rule == HysteresisModel::Standard {
+        let my = my.max(1.0);
+        return (
+            Box::new(Bilinear::new(k_rot, my, 0.01)),
+            Box::new(Bilinear::new(k_rot, my, 0.01)),
+            true,
+        );
+    }
+    // 辻・山田型（バイリニア＋β 混合硬化）。K2=0.01·k_rot、β=0.5（既定）。
+    // set_yield 対応のため N-M 相関を適用可能。
+    if rule == HysteresisModel::TsujiYamada {
+        let k2 = 0.01 * k_rot;
+        let mk = || Box::new(TsujiYamada::new(k_rot, my, k2, 0.5)) as Box<dyn UniaxialMaterial>;
+        return (mk(), mk(), true);
+    }
+    // 座屈考慮型（耐力劣化型＋RO 除荷）。既定 Mu=1.1·My（座屈細長比の精算は今後の課題。
+    // 断面の λb・κ・WF が得られる場合は lateral_buckling_mu_ratio で Mu/Mp を算定可）。
+    // set_yield 対応（Mu も比率を保持）のため N-M 相関を適用可能。
+    if rule == HysteresisModel::SteelBuckling {
+        let mk =
+            || Box::new(SteelBuckling::with_defaults(k_rot, my, 1.1)) as Box<dyn UniaxialMaterial>;
+        return (mk(), mk(), true);
+    }
+    // トリリニア折れ点: ひび割れ Mc/θc（初期勾配 k_rot）、降伏 My/θy（降伏時剛性
+    // 低下率 αy=0.3）、終局 Mu=1.1·My/θu（塑性率 4）。αy=0.3 は既定値であり、
+    // RESP-D 準拠の菅野 αy 精算はファイバ/skeleton 側で行う。
+    let mc = crack_moment(data, model, my);
+    let tc = (mc / k_rot).max(1e-9);
+    let alpha_y = 0.3;
+    let ty = (my / (alpha_y * k_rot)).max(tc * 1.5);
+    let mu = 1.1 * my;
+    let tu = ty * 4.0;
+    let alpha = 0.4;
+    let mk =
+        |r: HysteresisRule| -> Box<dyn UniaxialMaterial> { Box::new(HysteresisMaterial::new(r)) };
+    let make_pair = |r: HysteresisRule| (mk(r.clone()), mk(r));
+    let (a, b) = match rule {
+        HysteresisModel::Retrograde => make_pair(HysteresisRule::Retrograde {
+            crack: (mc, tc),
+            yield_point: (my, ty),
+            ultimate: (mu, tu),
+        }),
+        HysteresisModel::OriginOriented => make_pair(HysteresisRule::OriginOriented {
+            yield_point: (my, ty),
+            ultimate: (mu, tu),
+        }),
+        HysteresisModel::MaxPointOriented => make_pair(HysteresisRule::MaxPointOriented {
+            crack: (mc, tc),
+            yield_point: (my, ty),
+            ultimate: (mu, tu),
+        }),
+        // Takeda（RC 既定）とその他は武田型トリリニア。
+        _ => make_pair(HysteresisRule::Takeda {
+            crack: (mc, tc),
+            yield_point: (my, ty),
+            ultimate: (mu, tu),
+            alpha,
+        }),
+    };
+    (a, b, false)
 }
 
 #[cfg(test)]

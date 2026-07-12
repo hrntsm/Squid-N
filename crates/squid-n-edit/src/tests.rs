@@ -1612,3 +1612,199 @@ fn test_set_multi_opening_mode_same_value_is_symmetric() {
     stack.undo(&mut model);
     assert_eq!(model.multi_opening_mode, MultiOpeningMode::Equivalent);
 }
+
+#[test]
+fn test_set_member_hysteresis_roundtrip() {
+    use squid_n_core::model::HysteresisModel;
+    let mut model = empty_model();
+    model.nodes.push(Node {
+        id: NodeId(0),
+        coord: [0.0; 3],
+        restraint: Dof6Mask::FREE,
+        mass: None,
+        story: None,
+    });
+    model.nodes.push(Node {
+        id: NodeId(1),
+        coord: [1000.0, 0.0, 0.0],
+        restraint: Dof6Mask::FREE,
+        mass: None,
+        story: None,
+    });
+    model.elements.push(ElementData {
+        id: ElemId(0),
+        kind: ElementKind::Beam,
+        nodes: smallvec![NodeId(0), NodeId(1)],
+        section: None,
+        material: None,
+        local_axis: LocalAxis {
+            ref_vector: [0.0, 0.0, 1.0],
+        },
+        end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+        force_regime: ForceRegime::Auto,
+        rigid_zone: Default::default(),
+        plastic_zone: None,
+        spring: None,
+    });
+    let mut stack = UndoStack::new();
+    stack.run(
+        &mut model,
+        Box::new(SetMemberHysteresis {
+            elem: ElemId(0),
+            rule: HysteresisModel::Takeda,
+        }),
+    );
+    assert_eq!(
+        model.member_hysteresis(ElemId(0)),
+        Some(HysteresisModel::Takeda)
+    );
+    stack.undo(&mut model);
+    assert_eq!(model.member_hysteresis(ElemId(0)), None);
+    stack.redo(&mut model);
+    assert_eq!(
+        model.member_hysteresis(ElemId(0)),
+        Some(HysteresisModel::Takeda)
+    );
+
+    // 存在しない部材は Noop。
+    let mut stack2 = UndoStack::new();
+    stack2.run(
+        &mut model,
+        Box::new(SetMemberHysteresis {
+            elem: ElemId(99),
+            rule: HysteresisModel::Standard,
+        }),
+    );
+    assert_eq!(model.member_hysteresis(ElemId(99)), None);
+}
+
+#[test]
+fn test_add_damper_creates_element_and_attr_roundtrip() {
+    use squid_n_core::model::{DamperKind, DamperProps};
+    let mut model = two_member_model();
+    let before = model.clone();
+    let new_id = ElemId(model.elements.len() as u32);
+    let props = DamperProps {
+        kind: DamperKind::Maxwell,
+        kd: 120_000.0,
+        c0: 2_000.0,
+        alpha: 0.5,
+        ..Default::default()
+    };
+    let elem = ElementData {
+        id: new_id,
+        kind: ElementKind::Damper,
+        nodes: smallvec![NodeId(0), NodeId(2)],
+        section: None,
+        material: None,
+        local_axis: LocalAxis {
+            ref_vector: [0.0, 0.0, 1.0],
+        },
+        end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+        force_regime: ForceRegime::Auto,
+        rigid_zone: Default::default(),
+        plastic_zone: None,
+        spring: None,
+    };
+    let mut stack = UndoStack::new();
+    stack.run(&mut model, Box::new(AddDamper { elem, props }));
+    // 要素と特性が原子的に追加される。
+    assert_eq!(model.elements.len(), 3);
+    assert_eq!(model.elements[2].kind, ElementKind::Damper);
+    assert_eq!(model.damper_props(new_id), Some(props));
+
+    // undo で要素・特性ともに消える（完全復元）。
+    stack.undo(&mut model);
+    assert!(model.eq_ignoring_dofmap(&before));
+    assert_eq!(model.damper_props(new_id), None);
+
+    // redo で再生成。
+    stack.redo(&mut model);
+    assert_eq!(model.damper_props(new_id), Some(props));
+}
+
+#[test]
+fn test_set_damper_props_roundtrip() {
+    use squid_n_core::model::DamperProps;
+    let mut model = two_member_model();
+    let e = ElemId(1);
+    let p1 = DamperProps {
+        kd: 100.0,
+        c0: 10.0,
+        alpha: 1.0,
+        ..Default::default()
+    };
+    let mut stack = UndoStack::new();
+    stack.run(
+        &mut model,
+        Box::new(SetDamperProps {
+            elem: e,
+            props: Some(p1),
+        }),
+    );
+    assert_eq!(model.damper_props(e), Some(p1));
+    // 解除。
+    stack.run(
+        &mut model,
+        Box::new(SetDamperProps {
+            elem: e,
+            props: None,
+        }),
+    );
+    assert_eq!(model.damper_props(e), None);
+    stack.undo(&mut model);
+    assert_eq!(model.damper_props(e), Some(p1));
+    stack.undo(&mut model);
+    assert_eq!(model.damper_props(e), None);
+
+    // 存在しない部材は Noop。
+    let mut stack2 = UndoStack::new();
+    stack2.run(
+        &mut model,
+        Box::new(SetDamperProps {
+            elem: ElemId(99),
+            props: Some(p1),
+        }),
+    );
+    assert_eq!(model.damper_props(ElemId(99)), None);
+}
+
+#[test]
+fn test_delete_member_shifts_and_restores_side_table_attrs() {
+    use squid_n_core::model::{DamperProps, HysteresisModel};
+    let mut model = two_member_model();
+    // 部材0に履歴則、部材1にダンパー特性を付与。
+    model.set_member_hysteresis(ElemId(0), HysteresisModel::Takeda);
+    let props = DamperProps {
+        kd: 90_000.0,
+        c0: 1_500.0,
+        alpha: 0.4,
+        ..Default::default()
+    };
+    model.set_damper_props(ElemId(1), Some(props));
+    let before = model.clone();
+
+    let mut stack = UndoStack::new();
+    // 部材0を削除 → 部材1が ElemId(0) へ繰り上がり、その側テーブル参照も追従する。
+    stack.run(&mut model, Box::new(DeleteMember { id: ElemId(0) }));
+    assert_eq!(model.elements.len(), 1);
+    // 削除された部材0の履歴則は消える。
+    assert_eq!(model.member_hysteresis(ElemId(0)), None);
+    // 元・部材1のダンパー特性は新 ElemId(0) を指す（参照整合）。
+    assert_eq!(model.damper_props(ElemId(0)), Some(props));
+    assert!(model.validate().is_ok());
+
+    // undo で側テーブル属性も含め完全復元。
+    stack.undo(&mut model);
+    assert!(model.eq_ignoring_dofmap(&before));
+    assert_eq!(
+        model.member_hysteresis(ElemId(0)),
+        Some(HysteresisModel::Takeda)
+    );
+    assert_eq!(model.damper_props(ElemId(1)), Some(props));
+
+    // redo で再削除・再整合。
+    stack.redo(&mut model);
+    assert_eq!(model.damper_props(ElemId(0)), Some(props));
+    assert_eq!(model.member_hysteresis(ElemId(0)), None);
+}

@@ -269,15 +269,42 @@ pub fn design_table(ui: &mut egui::Ui, app: &mut App) {
             let p = a.props;
             let ks = squid_n_design_jp::isolator::multi_shear_stiffness_reduction(p.n_springs);
             let qs = squid_n_design_jp::isolator::multi_shear_strength_reduction(p.n_springs);
+            use squid_n_core::model::IsolatorKind;
             let desc = match p.kind {
-                squid_n_core::model::IsolatorKind::LaminatedRubber => format!(
-                    "積層ゴム系 K1={:.0} K2={:.0} Qd={:.0}kN Kv={:.0}",
-                    p.k1,
-                    p.k2,
-                    p.qd / 1000.0,
-                    p.kv
-                ),
-                squid_n_core::model::IsolatorKind::ElasticSliding => format!(
+                IsolatorKind::LaminatedRubber
+                | IsolatorKind::LeadRubber
+                | IsolatorKind::HighDampingRubber => {
+                    // 等価水平剛性 keq・等価粘性減衰定数 Heq を設計変位 200mm（参考）で算定
+                    // （RESP-D「07」LRB 統一型 keq=Qd/δ+Kd、Heq=(2/π)Qd(δ−Qd/((β−1)Kd))/(keq·δ²)）。
+                    let disp = 200.0;
+                    let keq = squid_n_design_jp::isolator::equivalent_stiffness(p.k2, p.qd, disp);
+                    let heq =
+                        squid_n_design_jp::isolator::equivalent_damping(p.k1, p.k2, p.qd, disp);
+                    let kind_label = match p.kind {
+                        IsolatorKind::LeadRubber => "鉛プラグ積層ゴム(LRB)",
+                        IsolatorKind::HighDampingRubber => "高減衰ゴム(HDR)",
+                        _ => "天然ゴム積層ゴム",
+                    };
+                    let strain_dep = if p.total_rubber_thickness > 0.0
+                        && (p.ckd_gamma != [1.0, 0.0, 0.0] || p.cqd_gamma != [1.0, 0.0, 0.0])
+                    {
+                        format!("／ 歪依存 H={:.0}mm", p.total_rubber_thickness)
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        "{} K1={:.0} K2={:.0} Qd={:.0}kN Kv={:.0} ／ δ=200mm時 keq={:.1} Heq={:.3} {}",
+                        kind_label,
+                        p.k1,
+                        p.k2,
+                        p.qd / 1000.0,
+                        p.kv,
+                        keq,
+                        heq,
+                        strain_dep
+                    )
+                }
+                IsolatorKind::ElasticSliding => format!(
                     "弾性すべり μ={:.3} N={:.0}kN Qmax={:.0}kN Kv={:.0}",
                     p.mu,
                     p.n_long / 1000.0,
@@ -291,6 +318,66 @@ pub fn design_table(ui: &mut egui::Ui, app: &mut App) {
             ));
         }
     }
+
+    // ── 制振ダンパーの非線形特性（RESP-D「07 非線形解析（動的解析）」制振要素） ──
+    if !app.model.damper_attrs.is_empty() {
+        ui.add_space(12.0);
+        ui.strong("制振ダンパーの非線形特性");
+        for a in &app.model.damper_attrs {
+            let p = a.props;
+            match p.kind {
+                squid_n_core::model::DamperKind::Maxwell => {
+                    // 緩和時間 τ=C0/Kd。線形マクスウェルの損失は ωτ≈1 で最大。
+                    let tau = if p.kd > 0.0 { p.c0 / p.kd } else { 0.0 };
+                    ui.label(format!(
+                        "部材{}: マクスウェル Kd={:.0} C0={:.0} α={:.2} ／ 緩和時間 τ={:.3}s（時刻歴で作用）",
+                        a.elem.0, p.kd, p.c0, p.alpha, tau
+                    ));
+                }
+                squid_n_core::model::DamperKind::HystereticBilinear => {
+                    // 降伏変位 δy=Qy/k1。
+                    let dy = if p.kd > 0.0 { p.qy / p.kd } else { 0.0 };
+                    ui.label(format!(
+                        "部材{}: 履歴型ﾊﾞｲﾘﾆｱ k1={:.0} Qy={:.0} k2/k1={:.3} ／ 降伏変位 δy={:.2}mm（静的・動的で作用）",
+                        a.elem.0, p.kd, p.qy, p.k2_ratio, dy
+                    ));
+                }
+            }
+        }
+    }
+
+    // ── 非線形解析の材端履歴則（RESP-D 07 非線形解析（動的解析）履歴特性） ──
+    ui.add_space(12.0);
+    egui::CollapsingHeader::new("非線形解析の材端履歴則（RESP-D 07）")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label(
+                "材端曲げバネの復元力履歴則。既定は RC/SRC/CFT 梁=武田型、S 梁=標準型（部材表で個別指定可）。",
+            );
+            use std::collections::BTreeMap;
+            let mut counts: BTreeMap<&'static str, u32> = BTreeMap::new();
+            let mut overrides: Vec<String> = Vec::new();
+            for e in &app.model.elements {
+                if e.kind != squid_n_core::model::ElementKind::Beam {
+                    continue;
+                }
+                let eff = squid_n_element::factory::resolve_member_hysteresis(e, &app.model);
+                *counts.entry(eff.label()).or_default() += 1;
+                if let Some(r) = app.model.member_hysteresis(e.id) {
+                    overrides.push(format!("部材{}: {}", e.id.0, r.label()));
+                }
+            }
+            if counts.is_empty() {
+                ui.label("梁部材がありません。");
+            } else {
+                for (label, cnt) in &counts {
+                    ui.label(format!("{}: {} 部材", label, cnt));
+                }
+            }
+            if !overrides.is_empty() {
+                ui.label(format!("個別指定: {}", overrides.join(", ")));
+            }
+        });
 
     // ── 二次設計: 層指標（層間変形角・剛性率・偏心率） ────────────
     ui.add_space(12.0);

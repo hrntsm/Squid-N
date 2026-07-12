@@ -56,7 +56,7 @@ fn test_timehistory_config_deterministic() {
 // ===== §8.1 SDOF / §8.2 減衰 検証テスト =====
 
 use crate::constraint::Reducer;
-use crate::damping::{Damping, StiffnessKind};
+use crate::damping::{Damping, DampingAccumulation, StiffnessKind};
 use squid_n_core::dof::{Dof6Mask, DofMap};
 use squid_n_core::ids::{ElemId, MaterialId, NodeId, SectionId};
 use squid_n_core::model::{
@@ -209,6 +209,7 @@ fn zero_wave(dt: f64, n_steps: usize) -> GroundMotion {
         dt,
         accel_x: vec![0.0; n_steps],
         accel_y: None,
+        accel_theta: None,
     }
 }
 
@@ -1001,6 +1002,7 @@ fn test_y_direction_wave_selects_y_record_dir() {
         dt,
         accel_x: vec![0.0; n_steps],
         accel_y: Some(accel_y),
+        accel_theta: None,
     };
     let newmark = NewmarkCfg {
         beta: 0.25,
@@ -1035,6 +1037,88 @@ fn test_y_direction_wave_selects_y_record_dir() {
     assert_eq!(result.peak_disp[1][0], 0.0);
     // Y 方向は実際に応答している。
     assert!(result.peak_disp[1][1] > 0.0);
+}
+
+/// 位相差入力（ねじれ地動加速度 `accel_theta`）が、節点重心から偏心した自由節点の
+/// 並進応答を励起することを検証する。並進入力（accel_x/y）はゼロで、ねじれ入力のみ。
+#[test]
+fn test_phase_diff_torsion_excites_eccentric_node() {
+    // sdof_model と同構成だが、自由節点を (1000,1000,0) へ置き、重心(500,500)から
+    // Y 方向に偏心させる。ねじれ加振の回転影響 ax=−(y−yc)≠0 が ux を励起する。
+    let mut model = sdof_model();
+    model.nodes[1].coord = [1000.0, 1000.0, 0.0];
+    let dofmap = DofMap::build(&model);
+    let reducer = Reducer::build(&model, &dofmap);
+
+    let omega = (1000.0_f64 / 1.0).sqrt();
+    let damping = Damping::StiffnessProportional {
+        h: 0.02,
+        omega,
+        basis: StiffnessKind::Initial,
+    };
+    let dt = 0.001;
+    let n_steps = 500;
+    let theta: Vec<f64> = (0..n_steps)
+        .map(|i| {
+            let t = i as f64 * dt;
+            // ねじれ地動加速度 [rad/s²]。
+            1e-3 * (2.0 * std::f64::consts::PI * 3.0 * t).sin()
+        })
+        .collect();
+    let newmark = NewmarkCfg {
+        beta: 0.25,
+        gamma: 0.5,
+        dt,
+    };
+
+    // (1) ねじれ入力ありの応答。
+    let wave_t = GroundMotion {
+        dt,
+        accel_x: vec![0.0; n_steps],
+        accel_y: None,
+        accel_theta: Some(theta.clone()),
+    };
+    let res_t = linear_time_history_analysis(
+        &model,
+        &dofmap,
+        &reducer,
+        &wave_t,
+        &newmark,
+        &damping,
+        &[0.0],
+        &[0.0],
+        false,
+    )
+    .expect("torsion time history should converge");
+
+    // (2) ねじれ入力なし（並進もゼロ）→ 応答ゼロ。
+    let wave_0 = GroundMotion {
+        dt,
+        accel_x: vec![0.0; n_steps],
+        accel_y: None,
+        accel_theta: None,
+    };
+    let res_0 = linear_time_history_analysis(
+        &model,
+        &dofmap,
+        &reducer,
+        &wave_0,
+        &newmark,
+        &damping,
+        &[0.0],
+        &[0.0],
+        false,
+    )
+    .expect("zero input should converge");
+
+    // ねじれ入力ありは偏心節点の ux を励起（非ゼロ）。
+    assert!(
+        res_t.peak_disp[1][0] > 1e-9,
+        "torsion should excite eccentric node ux: {}",
+        res_t.peak_disp[1][0]
+    );
+    // 入力ゼロは応答ゼロ。
+    assert_eq!(res_0.peak_disp[1][0], 0.0);
 }
 
 // ===== 非線形時刻歴応答解析テスト =====
@@ -1163,6 +1247,7 @@ fn test_nonlinear_time_history_sdof_elastic() {
         &wave,
         &newmark,
         &damping,
+        DampingAccumulation::NonCumulative,
         &[1.0],
         &[0.0],
         false,
@@ -1240,6 +1325,7 @@ fn test_nonlinear_time_history_sdof_plastic() {
         &wave,
         &newmark,
         &damping,
+        DampingAccumulation::NonCumulative,
         &[50.0],
         &[0.0],
         false,
@@ -1256,6 +1342,141 @@ fn test_nonlinear_time_history_sdof_plastic() {
         result.peak_disp[1][0] >= 1.0,
         "peak should be reasonable, got {}",
         result.peak_disp[1][0]
+    );
+    // 累積損傷度（RESP-D「07」鉄骨梁端部の累積損傷度）: 塑性化した要素で非ゼロになる。
+    assert_eq!(result.cumulative_ductility.len(), model.elements.len());
+    assert!(
+        result.cumulative_ductility.iter().any(|&d| d > 0.0),
+        "塑性化した要素の累積損傷度が非ゼロであるべき: {:?}",
+        result.cumulative_ductility
+    );
+}
+
+/// 接線剛性比例(α1一定・h1一定)・モード別の減衰が非線形時刻歴で収束し有限応答を返す
+/// ことを確認する（RESP-D「07」減衰マトリクス「剛性変更に伴う減衰項の変更」）。
+#[test]
+fn test_nonlinear_time_history_extended_damping_models_run() {
+    let base = fiber_column_model(100.0);
+    let dofmap0 = DofMap::build(&base);
+    let reducer0 = Reducer::build(&base, &dofmap0);
+    let m_red = reducer0.reduce_k(&assemble_global_m(&base, &dofmap0, MassOption::Consistent));
+    let k_red = reducer0.reduce_k(&assemble_global_k(&base, &dofmap0));
+    let m_val = *m_red.get(0, 0).unwrap_or(&1.0);
+    let omega = (*k_red.get(0, 0).unwrap_or(&0.0) / m_val).sqrt();
+
+    let dt = 0.001;
+    let n_steps = 200;
+    let wave = zero_wave(dt, n_steps);
+    let newmark = NewmarkCfg {
+        beta: 0.25,
+        gamma: 0.5,
+        dt,
+    };
+
+    let dampings = vec![
+        Damping::StiffnessProportional {
+            h: 0.05,
+            omega,
+            basis: StiffnessKind::Tangent,
+        },
+        Damping::TangentStiffnessConstantH {
+            h1: 0.05,
+            omega1e: omega,
+        },
+        Damping::modal(&[vec![1.0 / m_val.sqrt()]], &[omega], &[0.05]),
+    ];
+
+    for damping in &dampings {
+        let mut model = fiber_column_model(100.0);
+        let dofmap = DofMap::build(&model);
+        let reducer = Reducer::build(&model, &dofmap);
+        let result = nonlinear_time_history_analysis(
+            &mut model,
+            &dofmap,
+            &reducer,
+            &wave,
+            &newmark,
+            damping,
+            DampingAccumulation::NonCumulative,
+            &[50.0],
+            &[0.0],
+            false,
+            20,
+            1e-6,
+        )
+        .expect("extended damping nonlinear TH should converge");
+        assert!(
+            result.peak_disp[1][0].is_finite() && result.peak_disp[1][0] >= 1.0,
+            "peak={}",
+            result.peak_disp[1][0]
+        );
+    }
+}
+
+/// 累積型/非累積型（RESP-D「07」）: C 一定なら両者は一致し、接線比例（C 変化）でも
+/// 累積型が収束して有限応答を返す。
+#[test]
+fn test_nonlinear_time_history_cumulative_vs_noncumulative() {
+    let base = fiber_column_model(100.0);
+    let dof0 = DofMap::build(&base);
+    let red0 = Reducer::build(&base, &dof0);
+    let m_red = red0.reduce_k(&assemble_global_m(&base, &dof0, MassOption::Consistent));
+    let k_red = red0.reduce_k(&assemble_global_k(&base, &dof0));
+    let omega = (*k_red.get(0, 0).unwrap_or(&0.0) / *m_red.get(0, 0).unwrap_or(&1.0)).sqrt();
+    let dt = 0.001;
+    let n_steps = 200;
+    let wave = zero_wave(dt, n_steps);
+    let newmark = NewmarkCfg {
+        beta: 0.25,
+        gamma: 0.5,
+        dt,
+    };
+
+    let run = |damping: &Damping, acc: DampingAccumulation| {
+        let mut m = fiber_column_model(100.0);
+        let d = DofMap::build(&m);
+        let r = Reducer::build(&m, &d);
+        nonlinear_time_history_analysis(
+            &mut m,
+            &d,
+            &r,
+            &wave,
+            &newmark,
+            damping,
+            acc,
+            &[50.0],
+            &[0.0],
+            false,
+            20,
+            1e-6,
+        )
+        .expect("should converge")
+        .peak_disp[1][0]
+    };
+
+    // C 一定（初期剛性比例）: 累積型 ≈ 非累積型。
+    let const_c = Damping::StiffnessProportional {
+        h: 0.05,
+        omega,
+        basis: StiffnessKind::Initial,
+    };
+    let non = run(&const_c, DampingAccumulation::NonCumulative);
+    let cum = run(&const_c, DampingAccumulation::Cumulative);
+    assert!(
+        (non - cum).abs() < non.abs() * 1e-4 + 1e-6,
+        "constant C: cumulative≈non-cumulative (non={non}, cum={cum})"
+    );
+
+    // 接線比例（C 変化）でも累積型が収束し有限応答を返す。
+    let tangent_c = Damping::StiffnessProportional {
+        h: 0.05,
+        omega,
+        basis: StiffnessKind::Tangent,
+    };
+    let cum_t = run(&tangent_c, DampingAccumulation::Cumulative);
+    assert!(
+        cum_t.is_finite() && cum_t >= 1.0,
+        "tangent cumulative peak={cum_t}"
     );
 }
 
@@ -1298,6 +1519,7 @@ fn test_nonlinear_time_history_convergence() {
         &wave,
         &newmark,
         &damping,
+        DampingAccumulation::NonCumulative,
         &[50.0],
         &[0.0],
         false,
@@ -1318,6 +1540,7 @@ fn test_nonlinear_time_history_convergence() {
         &wave,
         &newmark,
         &damping,
+        DampingAccumulation::NonCumulative,
         &[50.0],
         &[0.0],
         false,
@@ -1329,5 +1552,89 @@ fn test_nonlinear_time_history_convergence() {
     assert!(
         result2.is_err(),
         "should fail to converge with only 1 iteration"
+    );
+}
+
+/// 制振（マクスウェル）ダンパーが自由振動の応答を低減する（RESP-D「07」制振要素）。
+#[test]
+fn test_maxwell_damper_reduces_free_vibration() {
+    use squid_n_core::model::{DamperAttr, DamperKind, DamperProps};
+
+    let run = |with_damper: bool| -> f64 {
+        let mut model = sdof_model(); // node0 固定, node1 自由(UX, m=1), 軸剛性 k=1000
+        if with_damper {
+            let did = ElemId(model.elements.len() as u32);
+            model.elements.push(ElementData {
+                id: did,
+                kind: ElementKind::Damper,
+                nodes: smallvec::smallvec![NodeId(0), NodeId(1)],
+                section: None,
+                material: None,
+                local_axis: LocalAxis {
+                    ref_vector: [0.0, 0.0, 1.0],
+                },
+                end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+                force_regime: ForceRegime::Auto,
+                rigid_zone: Default::default(),
+                plastic_zone: None,
+                spring: None,
+            });
+            model.damper_attrs.push(DamperAttr {
+                elem: did,
+                props: DamperProps {
+                    kind: DamperKind::Maxwell,
+                    kd: 1000.0,
+                    c0: 30.0,
+                    alpha: 1.0,
+                    ..Default::default()
+                },
+            });
+        }
+        let dofmap = DofMap::build(&model);
+        let reducer = Reducer::build(&model, &dofmap);
+        let omega = (1000.0_f64 / 1.0).sqrt();
+        let damping = Damping::StiffnessProportional {
+            h: 0.001,
+            omega,
+            basis: StiffnessKind::Initial,
+        };
+        let dt = 0.001;
+        let n_steps = 1000;
+        let wave = zero_wave(dt, n_steps);
+        let newmark = NewmarkCfg {
+            beta: 0.25,
+            gamma: 0.5,
+            dt,
+        };
+        let result = nonlinear_time_history_analysis(
+            &mut model,
+            &dofmap,
+            &reducer,
+            &wave,
+            &newmark,
+            &damping,
+            DampingAccumulation::NonCumulative,
+            &[10.0],
+            &[0.0],
+            false,
+            30,
+            1e-8,
+        )
+        .expect("should converge");
+        // 後半区間の応答振幅（自由振動の減衰を測る）。
+        let nd = &result.history.node_disp;
+        let n = nd.len();
+        nd[n * 3 / 4..].iter().fold(0.0f64, |m, &v| m.max(v.abs()))
+    };
+
+    let no_damp = run(false);
+    let with_damp = run(true);
+    assert!(
+        no_damp > 1.0,
+        "undamped late amplitude should be sizeable: {no_damp}"
+    );
+    assert!(
+        with_damp < no_damp * 0.8,
+        "Maxwell damper should reduce late response: no_damp={no_damp}, with_damp={with_damp}"
     );
 }

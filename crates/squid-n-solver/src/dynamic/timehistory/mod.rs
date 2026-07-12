@@ -7,7 +7,7 @@
 
 use crate::assemble::{assemble_global_k, assemble_global_m};
 use crate::constraint::Reducer;
-use crate::damping::Damping;
+use crate::damping::{Damping, DampingAccumulation};
 use crate::pushover::{assemble_k, compute_f_int};
 use crate::transaction::{StateSnapshot, StatefulModel};
 use smallvec::SmallVec;
@@ -58,10 +58,13 @@ impl HhtCfg {
 
 /// 地動加速度入力（基盤一様加振）。水平1〜2方向（R8）。
 /// `dt` はサンプリング間隔。`accel_x`/`accel_y` は同長さの時系列。
+/// `accel_theta` は位相差入力によるねじれ地動加速度 [rad/s²]（鉛直軸まわり。
+/// RESP-D「07」位相差入力解析。`None` はねじれ加振なし）。
 pub struct GroundMotion {
     pub dt: f64,
     pub accel_x: Vec<f64>,
     pub accel_y: Option<Vec<f64>>,
+    pub accel_theta: Option<Vec<f64>>,
 }
 
 /// 時刻歴応答解析の結果（設計書 §10.5）。
@@ -103,6 +106,53 @@ fn choose_record_dir_y(wave: &GroundMotion) -> bool {
         .map(|a| a.iter().map(|v| v.abs()).sum())
         .unwrap_or(0.0);
     wave.accel_y.is_some() && sum_y > sum_x
+}
+
+/// 位相差入力（ねじれ加振）用の回転影響ベクトル × 質量 `M·r_θ` を構築する
+/// （RESP-D「07」位相差入力解析）。鉛直（Z）軸まわりの単位角加速度に対し、各節点は
+/// 剛体回転 `ax=−(y−yc)`, `ay=(x−xc)` の並進と、回転自由度 rz=1 の影響を受ける
+/// （`(xc,yc)`＝節点幾何重心）。返り値は自由 DOF 空間の `M·r_θ`。
+fn theta_influence_m(
+    model: &Model,
+    dofmap: &DofMap,
+    m_free: &faer::sparse::SparseColMat<usize, f64>,
+) -> Vec<f64> {
+    let n_free = dofmap.n_active();
+    // 節点幾何重心。
+    let (mut cx, mut cy, mut cnt) = (0.0, 0.0, 0.0f64);
+    for node in &model.nodes {
+        cx += node.coord[0];
+        cy += node.coord[1];
+        cnt += 1.0;
+    }
+    if cnt > 0.0 {
+        cx /= cnt;
+        cy /= cnt;
+    }
+    let mut r_theta = vec![0.0; n_free];
+    for (ni, node) in model.nodes.iter().enumerate() {
+        let g_ux = ni * DOF_PER_NODE;
+        let g_uy = ni * DOF_PER_NODE + 1;
+        let g_rz = ni * DOF_PER_NODE + 5;
+        if let Some(a) = dofmap.active(g_ux) {
+            r_theta[a as usize] = -(node.coord[1] - cy);
+        }
+        if let Some(a) = dofmap.active(g_uy) {
+            r_theta[a as usize] = node.coord[0] - cx;
+        }
+        if let Some(a) = dofmap.active(g_rz) {
+            r_theta[a as usize] = 1.0;
+        }
+    }
+    sparse_matvec(m_free, &r_theta)
+}
+
+/// 位相差入力のねじれ地動加速度をステップ `n` で取得（未指定は 0）。
+fn theta_accel_at(wave: &GroundMotion, n: usize) -> f64 {
+    wave.accel_theta
+        .as_ref()
+        .and_then(|a| a.get(n).copied())
+        .unwrap_or(0.0)
 }
 
 /// 記録節点を選ぶ: 記録方向（`dir_idx`: 0=X, 1=Y）が自由な節点のうち
@@ -308,6 +358,8 @@ pub fn linear_time_history_with_state(
     }
     let m_r_x = sparse_matvec(&m_free, &r_x_free);
     let m_r_y = sparse_matvec(&m_free, &r_y_free);
+    // 位相差入力（ねじれ加振）用の回転影響 M·r_θ。
+    let m_r_theta = theta_influence_m(model, dofmap, &m_free);
 
     // --- Newmark-β 係数 ---
     let beta = newmark.beta;
@@ -344,10 +396,12 @@ pub fn linear_time_history_with_state(
         .and_then(|a| a.first())
         .copied()
         .unwrap_or(0.0);
+    let xg0_theta = theta_accel_at(wave, 0);
     let p_free_0: Vec<f64> = m_r_x
         .iter()
         .zip(m_r_y.iter())
-        .map(|(mx, my)| -(mx * xg0_x + my * xg0_y))
+        .zip(m_r_theta.iter())
+        .map(|((mx, my), mt)| -(mx * xg0_x + my * xg0_y + mt * xg0_theta))
         .collect();
     let p_red_0 = reducer.reduce_f(&p_free_0);
 
@@ -369,6 +423,7 @@ pub fn linear_time_history_with_state(
         0,
         &m_r_x,
         &m_r_y,
+        &m_r_theta,
         &m_red,
         &c_red,
         &mut solver,
@@ -442,6 +497,8 @@ pub fn linear_time_history_from_state(
     }
     let m_r_x = sparse_matvec(&m_free, &r_x_free);
     let m_r_y = sparse_matvec(&m_free, &r_y_free);
+    // 位相差入力（ねじれ加振）用の回転影響 M·r_θ。
+    let m_r_theta = theta_influence_m(model, dofmap, &m_free);
 
     let beta = newmark.beta;
     let gamma = newmark.gamma;
@@ -473,6 +530,7 @@ pub fn linear_time_history_from_state(
         state.step,
         &m_r_x,
         &m_r_y,
+        &m_r_theta,
         &m_red,
         &c_red,
         &mut solver,
@@ -550,6 +608,8 @@ pub fn linear_hht_alpha_analysis(
     }
     let m_r_x = sparse_matvec(&m_free, &r_x_free);
     let m_r_y = sparse_matvec(&m_free, &r_y_free);
+    // 位相差入力（ねじれ加振）用の回転影響 M·r_θ。
+    let m_r_theta = theta_influence_m(model, dofmap, &m_free);
 
     // HHT-α は β=0.25, γ=0.5 で固定（平均加速度法ベース）
     let beta = 0.25;
@@ -590,10 +650,12 @@ pub fn linear_hht_alpha_analysis(
         .and_then(|a| a.first())
         .copied()
         .unwrap_or(0.0);
+    let xg0_theta = theta_accel_at(wave, 0);
     let p_free_0: Vec<f64> = m_r_x
         .iter()
         .zip(m_r_y.iter())
-        .map(|(mx, my)| -(mx * xg0_x + my * xg0_y))
+        .zip(m_r_theta.iter())
+        .map(|((mx, my), mt)| -(mx * xg0_x + my * xg0_y + mt * xg0_theta))
         .collect();
     let p_red_0 = reducer.reduce_f(&p_free_0);
 
@@ -614,6 +676,7 @@ pub fn linear_hht_alpha_analysis(
         0,
         &m_r_x,
         &m_r_y,
+        &m_r_theta,
         &m_red,
         &c_red,
         &k_red,
@@ -674,6 +737,7 @@ fn run_steps_hht(
     start_step: u64,
     m_r_x: &[f64],
     m_r_y: &[f64],
+    m_r_theta: &[f64],
     m_red: &faer::sparse::SparseColMat<usize, f64>,
     c_red: &faer::sparse::SparseColMat<usize, f64>,
     k_red: &faer::sparse::SparseColMat<usize, f64>,
@@ -747,10 +811,12 @@ fn run_steps_hht(
             .map(|a| a.get(n).copied().unwrap_or(0.0))
             .unwrap_or(0.0);
 
+        let xg_theta = theta_accel_at(wave, n);
         let p_free: Vec<f64> = m_r_x
             .iter()
             .zip(m_r_y.iter())
-            .map(|(mx, my)| -(mx * xg_x + my * xg_y))
+            .zip(m_r_theta.iter())
+            .map(|((mx, my), mt)| -(mx * xg_x + my * xg_y + mt * xg_theta))
             .collect();
         let p_red = reducer.reduce_f(&p_free);
 
@@ -862,6 +928,7 @@ fn run_steps(
     start_step: u64,
     m_r_x: &[f64],
     m_r_y: &[f64],
+    m_r_theta: &[f64],
     m_red: &faer::sparse::SparseColMat<usize, f64>,
     c_red: &faer::sparse::SparseColMat<usize, f64>,
     solver: &mut Box<dyn squid_n_math::solver::LinearSolver>,
@@ -933,10 +1000,12 @@ fn run_steps(
             .map(|a| a.get(n).copied().unwrap_or(0.0))
             .unwrap_or(0.0);
 
+        let xg_theta = theta_accel_at(wave, n);
         let p_free: Vec<f64> = m_r_x
             .iter()
             .zip(m_r_y.iter())
-            .map(|(mx, my)| -(mx * xg_x + my * xg_y))
+            .zip(m_r_theta.iter())
+            .map(|((mx, my), mt)| -(mx * xg_x + my * xg_y + mt * xg_theta))
             .collect();
         let p_red = reducer.reduce_f(&p_free);
 
@@ -1096,6 +1165,7 @@ pub fn nonlinear_time_history_analysis(
     wave: &GroundMotion,
     newmark: &NewmarkCfg,
     damping: &Damping,
+    accumulation: DampingAccumulation,
     initial_disp: &[f64],
     initial_vel: &[f64],
     use_kg: bool,
@@ -1127,6 +1197,15 @@ pub fn nonlinear_time_history_analysis(
     }
 
     let mut behaviors = build_behaviors(model);
+    // 制振（速度依存）要素へ時間刻みを通知する（RESP-D「07」制振要素）。マクスウェル
+    // 要素はこれで後退 Euler のダッシュポット積分が有効になる。dt<=0 の静的・線形解析
+    // では通知されず不活性のまま。
+    for b in behaviors.iter_mut() {
+        b.set_time_step(dt);
+    }
+    // 累積損傷度用の塑性率 μ 時刻歴（要素ごと。塑性率プローブを持つ要素のみ収集）。
+    // RESP-D「07」その他の解析機能「鉄骨梁端部の累積損傷度計算」。
+    let mut mu_hist: Vec<Vec<f64>> = vec![Vec::new(); model.elements.len()];
 
     // 行列組立（縮約空間）
     let m_free = assemble_global_m(model, dofmap, MassOption::Consistent);
@@ -1152,6 +1231,8 @@ pub fn nonlinear_time_history_analysis(
     }
     let m_r_x = sparse_matvec(&m_free, &r_x_free);
     let m_r_y = sparse_matvec(&m_free, &r_y_free);
+    // 位相差入力（ねじれ加振）用の回転影響 M·r_θ。
+    let m_r_theta = theta_influence_m(model, dofmap, &m_free);
 
     // Newmark-β 係数
     let beta = newmark.beta;
@@ -1170,6 +1251,10 @@ pub fn nonlinear_time_history_analysis(
     u[..n_init_d].copy_from_slice(&initial_disp[..n_init_d]);
     let n_init_v = n_indep.min(initial_vel.len());
     v[..n_init_v].copy_from_slice(&initial_vel[..n_init_v]);
+
+    // 累積型減衰力 {Cn}（初期は C·v0）と、各ステップ収束時の減衰力（累積更新用）。
+    let mut f_damp = sparse_matvec(&c_red, &v);
+    let mut c_v_last = vec![0.0; n_indep];
 
     // 初期変位を要素状態に反映
     {
@@ -1203,10 +1288,12 @@ pub fn nonlinear_time_history_analysis(
         .and_then(|a| a.first())
         .copied()
         .unwrap_or(0.0);
+    let xg0_theta = theta_accel_at(wave, 0);
     let p_free_0: Vec<f64> = m_r_x
         .iter()
         .zip(m_r_y.iter())
-        .map(|(mx, my)| -(mx * xg0_x + my * xg0_y))
+        .zip(m_r_theta.iter())
+        .map(|((mx, my), mt)| -(mx * xg0_x + my * xg0_y + mt * xg0_theta))
         .collect();
     let p_red_0 = reducer.reduce_f(&p_free_0);
 
@@ -1283,10 +1370,12 @@ pub fn nonlinear_time_history_analysis(
             .as_ref()
             .map(|a| a.get(n).copied().unwrap_or(0.0))
             .unwrap_or(0.0);
+        let xg_theta = theta_accel_at(wave, n);
         let p_free: Vec<f64> = m_r_x
             .iter()
             .zip(m_r_y.iter())
-            .map(|(mx, my)| -(mx * xg_x + my * xg_y))
+            .zip(m_r_theta.iter())
+            .map(|((mx, my), mt)| -(mx * xg_x + my * xg_y + mt * xg_theta))
             .collect();
         let p_red = reducer.reduce_f(&p_free);
 
@@ -1308,8 +1397,22 @@ pub fn nonlinear_time_history_analysis(
             let k_t_free = assemble_k(model, dofmap, &behaviors, use_kg, None);
             let k_t_red = reducer.reduce_k(&k_t_free);
 
+            // 接線比例減衰（α1 一定 / h1 一定）は瞬間剛性から C を毎ステップ再構成する
+            // （RESP-D「07」減衰マトリクス「剛性変更に伴う減衰項の変更」）。それ以外は
+            // 初期減衰 c_red を用いる。
+            let c_tan = if damping.is_tangent_based() {
+                let mut u_cur = u.clone();
+                for i in 0..n_indep {
+                    u_cur[i] += du_total[i];
+                }
+                Some(damping.assemble_c_tangent(&m_red, &k_t_red, &k_red, &u_cur))
+            } else {
+                None
+            };
+            let c_cur = c_tan.as_ref().unwrap_or(&c_red);
+
             // 有効剛性
-            let k_eff = weighted_sum_csc(n_indep, &[(1.0, &k_t_red), (c2, &c_red), (c1, &m_red)]);
+            let k_eff = weighted_sum_csc(n_indep, &[(1.0, &k_t_red), (c2, c_cur), (c1, &m_red)]);
 
             let mut solver = make_solver(SolverBackend::DirectSparseCholesky);
             solver
@@ -1320,8 +1423,17 @@ pub fn nonlinear_time_history_analysis(
             let f_int_free = compute_f_int(model, dofmap, &behaviors);
             let f_int_red = reducer.reduce_f(&f_int_free);
 
-            // C·v と M·a（縮約空間）
-            let c_v_red = sparse_matvec(&c_red, &v_trial);
+            // 減衰力（縮約空間）。非累積型は瞬間 C×速度、累積型は増分減衰力の積分
+            // （{Cn}={Cn−1}+[Cn]{Δẋn}、Δẋn=v_trial−v_前ステップ）。
+            let c_v_red = match accumulation {
+                DampingAccumulation::NonCumulative => sparse_matvec(c_cur, &v_trial),
+                DampingAccumulation::Cumulative => {
+                    let dv: Vec<f64> = (0..n_indep).map(|i| v_trial[i] - v[i]).collect();
+                    let c_dv = sparse_matvec(c_cur, &dv);
+                    (0..n_indep).map(|i| f_damp[i] + c_dv[i]).collect()
+                }
+            };
+            c_v_last.clone_from(&c_v_red);
             let m_a_red = sparse_matvec(&m_red, &a_trial);
 
             // 残差
@@ -1371,11 +1483,22 @@ pub fn nonlinear_time_history_analysis(
             for i in 0..n_indep {
                 u[i] += du_total[i];
             }
+            // 累積型: 収束した減衰力を次ステップの積分開始値として保持する。
+            if accumulation == DampingAccumulation::Cumulative {
+                f_damp.clone_from(&c_v_last);
+            }
             v.copy_from_slice(&v_trial);
             a.copy_from_slice(&a_trial);
 
             for b in behaviors.iter_mut() {
                 b.commit_state();
+            }
+
+            // 累積損傷度用に、各要素の危険断面塑性率 μ（=max_yield_ratio）を収集する。
+            for (i, b) in behaviors.iter().enumerate() {
+                if let Some(p) = b.ductility_probe() {
+                    mu_hist[i].push(p.max_yield_ratio);
+                }
             }
 
             time.push(t_next);
@@ -1425,11 +1548,20 @@ pub fn nonlinear_time_history_analysis(
         }
     }
 
+    // 各要素の μ 時刻歴からレインフロー法で累積損傷度 D を算定する
+    // （RESP-D「07」鉄骨梁端部の累積損傷度計算）。μ 時刻歴が空（塑性率プローブ
+    // 非対応要素）の場合は 0。疲労特性 C・β は既定（要原典照合）。
+    let fatigue = crate::damage::FatigueParams::default();
+    let cumulative_ductility: Vec<f64> = mu_hist
+        .iter()
+        .map(|series| crate::damage::cumulative_damage_rainflow(series, fatigue))
+        .collect();
+
     Ok(ResponseResult {
         time,
         peak_disp,
         story_drift_angle,
-        cumulative_ductility: vec![0.0; model.elements.len()],
+        cumulative_ductility,
         history,
     })
 }
