@@ -312,4 +312,6 @@ fn test_collect_cft_ultimate_checks() {
     assert!((c.axial_margin - c.ncu / 3_000_000.0).abs() < 1e-6);
     // lk=3000, D=400 → lk/D=7.5 → 中柱。
     assert_eq!(c.class, CftColumnClass::Medium);
+    // 短柱 N-M 曲げ耐力 Mu(N) が正（圧縮軸力 3000kN 時）。
+    assert!(c.mu_nm > 0.0, "mu_nm={}", c.mu_nm);
 }

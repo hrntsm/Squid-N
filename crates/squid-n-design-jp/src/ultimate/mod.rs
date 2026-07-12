@@ -32,15 +32,17 @@ use squid_n_core::rc_capacity::{rc_column_mu_simple, rc_mu_simple, RcCapacityInp
 use squid_n_core::section_shape::{BarSet, RcRebar, SectionShape};
 
 pub mod cft;
+pub mod cft_nm;
 pub mod joint;
 pub mod rc_axial;
 pub mod rc_column_aci;
 pub mod rc_shear;
 
 pub use cft::{
-    cft_axial_ultimate, cft_column_class, cft_concrete_buckling_stress, CftAxialInput,
+    cft_axial_ultimate, cft_column_class, cft_concrete_buckling_stress, cft_ncu1, CftAxialInput,
     CftAxialUltimate, CftColumnClass,
 };
+pub use cft_nm::{cft_short_column_mu, CftBendingInput};
 pub use joint::{
     joint_fj, joint_kappa, rc_joint_ultimate, RcJointUltimateInput, RcJointUltimateResult,
 };
@@ -525,6 +527,9 @@ pub struct CftUltimateCheck {
     pub ncu: f64,
     /// 軸引張終局耐力 Ntu [N]。
     pub ntu: f64,
+    /// 設計軸力における短柱 N-M 相互作用の終局曲げ耐力 Mu [N·mm]
+    /// （短柱の式に基づく。中柱・長柱では上限側の目安）。
+    pub mu_nm: f64,
     /// 設計軸力 [N]（圧縮正）。
     pub n_design: f64,
     /// 軸余裕度（圧縮 Ncu/N、引張 Ntu/|N|。N=0 は `f64::INFINITY`）。
@@ -625,6 +630,39 @@ pub fn collect_cft_ultimate_checks(
             .find(|(id, _)| *id == elem.id)
             .map(|(_, n)| *n)
             .unwrap_or(0.0);
+
+        // 短柱 N-M 相互作用の終局曲げ耐力 Mu(N)。曲げは強軸（せい方向）で評価する。
+        let (bd, bb, bcd, bcb) = match *shape {
+            SectionShape::CftBox {
+                height,
+                width,
+                thick,
+            } => (height, width, height - 2.0 * thick, width - 2.0 * thick),
+            SectionShape::CftPipe { outer_dia, thick } => (
+                outer_dia,
+                outer_dia,
+                outer_dia - 2.0 * thick,
+                outer_dia - 2.0 * thick,
+            ),
+            _ => (d_section, d_section, d_section, d_section),
+        };
+        let ncu1 = cft_ncu1(&inp);
+        let mu_nm = cft_short_column_mu(
+            &CftBendingInput {
+                circular,
+                d_steel: bd,
+                b_steel: bb,
+                c_d: bcd,
+                c_b: bcb,
+                t: thick,
+                fc,
+                fy,
+            },
+            n_design,
+            ncu1,
+            r.ntu,
+        );
+
         let axial_margin = if n_design > 0.0 {
             if r.ncu > 0.0 {
                 r.ncu / n_design
@@ -646,15 +684,16 @@ pub fn collect_cft_ultimate_checks(
             CftColumnClass::Long => "長柱",
         };
         let detail = format!(
-            "分類={class_label}, Ncu={:.0} N, Ntu={:.0} N, N={:.0} N, lk={:.0} mm, \
-             cA={:.0} mm², sA={:.0} mm², Fc={:.1}, Fy={:.1}, 軸余裕度={:.3}",
-            r.ncu, r.ntu, n_design, lk, c_area, s_area, fc, fy, axial_margin
+            "分類={class_label}, Ncu={:.0} N, Ntu={:.0} N, Mu(N-M)={:.0} N·mm, N={:.0} N, \
+             lk={:.0} mm, cA={:.0} mm², sA={:.0} mm², Fc={:.1}, Fy={:.1}, 軸余裕度={:.3}",
+            r.ncu, r.ntu, mu_nm, n_design, lk, c_area, s_area, fc, fy, axial_margin
         );
         out.push(CftUltimateCheck {
             elem: elem.id,
             class: r.class,
             ncu: r.ncu,
             ntu: r.ntu,
+            mu_nm,
             n_design,
             axial_margin,
             ok: axial_margin >= 1.0,

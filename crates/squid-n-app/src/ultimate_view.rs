@@ -215,6 +215,7 @@ pub fn ultimate_table(ui: &mut egui::Ui, app: &mut App) {
                 .column(Column::initial(48.0))
                 .column(Column::initial(90.0))
                 .column(Column::initial(90.0))
+                .column(Column::initial(100.0))
                 .column(Column::initial(90.0))
                 .column(Column::initial(72.0))
                 .column(Column::initial(50.0))
@@ -224,6 +225,7 @@ pub fn ultimate_table(ui: &mut egui::Ui, app: &mut App) {
                         "分類",
                         "Ncu[kN]",
                         "Ntu[kN]",
+                        "Mu(N-M)[kN·m]",
                         "N[kN]",
                         "軸余裕度",
                         "判定",
@@ -248,6 +250,9 @@ pub fn ultimate_table(ui: &mut egui::Ui, app: &mut App) {
                         });
                         row.col(|ui| {
                             ui.label(format!("{:.0}", c.ntu / 1000.0));
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("{:.1}", c.mu_nm / 1.0e6));
                         });
                         row.col(|ui| {
                             ui.label(format!("{:.0}", c.n_design / 1000.0));

@@ -694,6 +694,7 @@ fn compute_ultimate_check_job(model: &Model, load_case: Option<u32>) -> Result<J
                 "class": format!("{:?}", c.class),
                 "ncu": c.ncu,
                 "ntu": c.ntu,
+                "mu_nm": c.mu_nm,
                 "n_design": c.n_design,
                 "axial_margin": c.axial_margin,
                 "ok": c.ok,
