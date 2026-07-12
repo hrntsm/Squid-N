@@ -182,6 +182,16 @@ pub struct AnalysisSettings {
     pub th_h2: f64,
     /// 時刻歴の積分法
     pub th_integrator: ThIntegrator,
+    /// 位相差入力（ねじれ加振）を考慮する（RESP-D「07」位相差入力解析）。
+    pub phase_diff_enabled: bool,
+    /// せん断波速度 Vs [m/s]。
+    pub phase_diff_vs: f64,
+    /// 矩形基礎長さ L [m]（位相遅れ方向の辺長）。
+    pub phase_diff_length_m: f64,
+    /// 入射角 θ [°]。
+    pub phase_diff_incidence_deg: f64,
+    /// 位相遅れ方向が Y なら true（X なら false）。基準の並進波もこの方向を用いる。
+    pub phase_diff_dir_y: bool,
     /// 荷重組合せ自動生成（種別ベース）の多雪区域フラグ（施行令86条・82条）。
     pub heavy_snow_zone: bool,
     /// 多雪区域の積雪荷重低減係数 δ1（長期 G+P+δ1・S。既定 0.7）。
@@ -259,6 +269,11 @@ impl Default for AnalysisSettings {
             th_damping_model: ThDampingModel::StiffnessProportional,
             th_h2: 0.02,
             th_integrator: ThIntegrator::NewmarkBeta,
+            phase_diff_enabled: false,
+            phase_diff_vs: 200.0,
+            phase_diff_length_m: 20.0,
+            phase_diff_incidence_deg: 30.0,
+            phase_diff_dir_y: false,
             heavy_snow_zone: false,
             snow_delta1: 0.7,
             snow_delta2: 0.35,

@@ -290,6 +290,7 @@ fn compute_time_history_job(
             dt,
             accel_x: accel,
             accel_y: None,
+            accel_theta: None,
         },
         JobDir::Y => {
             let n = accel.len();
@@ -297,6 +298,7 @@ fn compute_time_history_job(
                 dt,
                 accel_x: vec![0.0; n],
                 accel_y: Some(accel),
+                accel_theta: None,
             }
         }
     };

@@ -746,12 +746,42 @@ impl App {
     /// 線形時刻歴応答解析の純粋計算部分。所有権を取り `&self` を使わないため、
     /// バックグラウンドジョブ（`start_time_history_job`）からも呼び出せる。
     /// 減衰モデル・積分法は `cfg` に従う（剛性比例／Rayleigh、Newmark-β／HHT-α）。
+    /// 位相差入力（ねじれ加振）を `wave` へ付加する（RESP-D「07」位相差入力解析）。
+    /// `phase_diff_enabled` が false なら `wave` をそのまま返す。位相遅れ時間
+    /// `t=(L·sinθ)/Vs` を求め、位相遅れ方向の並進波からねじれ地動加速度を生成する。
+    fn apply_phase_diff(
+        cfg: &AnalysisSettings,
+        mut wave: squid_n_solver::timehistory::GroundMotion,
+    ) -> squid_n_solver::timehistory::GroundMotion {
+        if !cfg.phase_diff_enabled {
+            return wave;
+        }
+        use squid_n_solver::phase_diff::{phase_lag_time, torsional_accel_series};
+        let lag = phase_lag_time(
+            cfg.phase_diff_length_m,
+            cfg.phase_diff_incidence_deg,
+            cfg.phase_diff_vs,
+        );
+        // 位相遅れ方向の並進加速度を基準波とする。
+        let base: Vec<f64> = if cfg.phase_diff_dir_y {
+            wave.accel_y.clone().unwrap_or_else(|| wave.accel_x.clone())
+        } else {
+            wave.accel_x.clone()
+        };
+        let l_mm = (cfg.phase_diff_length_m * 1000.0).max(1.0);
+        let theta = torsional_accel_series(&base, wave.dt, lag, l_mm);
+        wave.accel_theta = Some(theta);
+        wave
+    }
+
     fn compute_time_history(
         model: squid_n_core::model::Model,
         cfg: AnalysisSettings,
         wave: squid_n_solver::timehistory::GroundMotion,
     ) -> Result<squid_n_solver::timehistory::ResponseResult, String> {
         let mut model = model;
+        // 位相差入力（ねじれ加振）を指定時に付加する（RESP-D「07」位相差入力解析）。
+        let wave = Self::apply_phase_diff(&cfg, wave);
         // 解析前に剛域を自動算定（設計書 §6.2.1、標準実装）。
         squid_n_element::beam::apply_auto_rigid_zones(
             &mut model,
@@ -1000,6 +1030,7 @@ impl App {
                 dt,
                 accel_x: accel,
                 accel_y: None,
+                accel_theta: None,
             },
             ThDir::Y => {
                 let n = accel.len();
@@ -1007,12 +1038,14 @@ impl App {
                     dt,
                     accel_x: vec![0.0; n],
                     accel_y: Some(accel),
+                    accel_theta: None,
                 }
             }
             ThDir::Xy => squid_n_solver::timehistory::GroundMotion {
                 dt,
                 accel_x: accel.clone(),
                 accel_y: Some(accel),
+                accel_theta: None,
             },
         }
     }

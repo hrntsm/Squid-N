@@ -958,6 +958,41 @@ impl App {
                         .range(10.0..=10000.0),
                 );
             });
+            // 位相差入力（ねじれ加振）。RESP-D「07」位相差入力解析 t=(L·sinθ)/Vs。
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.analysis_cfg.phase_diff_enabled, "位相差入力")
+                    .on_hover_text(
+                        "見かけ速度で地震動が矩形基礎を通過する位相差からねじれ加振を生成",
+                    );
+                ui.add_enabled_ui(self.analysis_cfg.phase_diff_enabled, |ui| {
+                    ui.label("Vs[m/s]");
+                    ui.add(
+                        egui::DragValue::new(&mut self.analysis_cfg.phase_diff_vs)
+                            .speed(10.0)
+                            .range(50.0..=2000.0),
+                    );
+                    ui.label("L[m]");
+                    ui.add(
+                        egui::DragValue::new(&mut self.analysis_cfg.phase_diff_length_m)
+                            .speed(1.0)
+                            .range(1.0..=500.0),
+                    );
+                    ui.label("θ[°]");
+                    ui.add(
+                        egui::DragValue::new(&mut self.analysis_cfg.phase_diff_incidence_deg)
+                            .speed(1.0)
+                            .range(0.0..=90.0),
+                    );
+                    ui.selectable_value(&mut self.analysis_cfg.phase_diff_dir_y, false, "X");
+                    ui.selectable_value(&mut self.analysis_cfg.phase_diff_dir_y, true, "Y");
+                    let lag = squid_n_solver::phase_diff::phase_lag_time(
+                        self.analysis_cfg.phase_diff_length_m,
+                        self.analysis_cfg.phase_diff_incidence_deg,
+                        self.analysis_cfg.phase_diff_vs,
+                    );
+                    ui.label(format!("位相遅れ {:.4}s", lag));
+                });
+            });
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(!running, egui::Button::new("▶ サンプル波で実行"))
@@ -1022,6 +1057,7 @@ impl App {
                 dt: self.analysis_cfg.th_dt,
                 accel_x: col1,
                 accel_y: col2,
+                accel_theta: None,
             },
         };
         self.start_time_history_job(wave);

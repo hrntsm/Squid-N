@@ -58,10 +58,13 @@ impl HhtCfg {
 
 /// 地動加速度入力（基盤一様加振）。水平1〜2方向（R8）。
 /// `dt` はサンプリング間隔。`accel_x`/`accel_y` は同長さの時系列。
+/// `accel_theta` は位相差入力によるねじれ地動加速度 [rad/s²]（鉛直軸まわり。
+/// RESP-D「07」位相差入力解析。`None` はねじれ加振なし）。
 pub struct GroundMotion {
     pub dt: f64,
     pub accel_x: Vec<f64>,
     pub accel_y: Option<Vec<f64>>,
+    pub accel_theta: Option<Vec<f64>>,
 }
 
 /// 時刻歴応答解析の結果（設計書 §10.5）。
@@ -103,6 +106,53 @@ fn choose_record_dir_y(wave: &GroundMotion) -> bool {
         .map(|a| a.iter().map(|v| v.abs()).sum())
         .unwrap_or(0.0);
     wave.accel_y.is_some() && sum_y > sum_x
+}
+
+/// 位相差入力（ねじれ加振）用の回転影響ベクトル × 質量 `M·r_θ` を構築する
+/// （RESP-D「07」位相差入力解析）。鉛直（Z）軸まわりの単位角加速度に対し、各節点は
+/// 剛体回転 `ax=−(y−yc)`, `ay=(x−xc)` の並進と、回転自由度 rz=1 の影響を受ける
+/// （`(xc,yc)`＝節点幾何重心）。返り値は自由 DOF 空間の `M·r_θ`。
+fn theta_influence_m(
+    model: &Model,
+    dofmap: &DofMap,
+    m_free: &faer::sparse::SparseColMat<usize, f64>,
+) -> Vec<f64> {
+    let n_free = dofmap.n_active();
+    // 節点幾何重心。
+    let (mut cx, mut cy, mut cnt) = (0.0, 0.0, 0.0f64);
+    for node in &model.nodes {
+        cx += node.coord[0];
+        cy += node.coord[1];
+        cnt += 1.0;
+    }
+    if cnt > 0.0 {
+        cx /= cnt;
+        cy /= cnt;
+    }
+    let mut r_theta = vec![0.0; n_free];
+    for (ni, node) in model.nodes.iter().enumerate() {
+        let g_ux = ni * DOF_PER_NODE;
+        let g_uy = ni * DOF_PER_NODE + 1;
+        let g_rz = ni * DOF_PER_NODE + 5;
+        if let Some(a) = dofmap.active(g_ux) {
+            r_theta[a as usize] = -(node.coord[1] - cy);
+        }
+        if let Some(a) = dofmap.active(g_uy) {
+            r_theta[a as usize] = node.coord[0] - cx;
+        }
+        if let Some(a) = dofmap.active(g_rz) {
+            r_theta[a as usize] = 1.0;
+        }
+    }
+    sparse_matvec(m_free, &r_theta)
+}
+
+/// 位相差入力のねじれ地動加速度をステップ `n` で取得（未指定は 0）。
+fn theta_accel_at(wave: &GroundMotion, n: usize) -> f64 {
+    wave.accel_theta
+        .as_ref()
+        .and_then(|a| a.get(n).copied())
+        .unwrap_or(0.0)
 }
 
 /// 記録節点を選ぶ: 記録方向（`dir_idx`: 0=X, 1=Y）が自由な節点のうち
@@ -308,6 +358,8 @@ pub fn linear_time_history_with_state(
     }
     let m_r_x = sparse_matvec(&m_free, &r_x_free);
     let m_r_y = sparse_matvec(&m_free, &r_y_free);
+    // 位相差入力（ねじれ加振）用の回転影響 M·r_θ。
+    let m_r_theta = theta_influence_m(model, dofmap, &m_free);
 
     // --- Newmark-β 係数 ---
     let beta = newmark.beta;
@@ -344,10 +396,12 @@ pub fn linear_time_history_with_state(
         .and_then(|a| a.first())
         .copied()
         .unwrap_or(0.0);
+    let xg0_theta = theta_accel_at(wave, 0);
     let p_free_0: Vec<f64> = m_r_x
         .iter()
         .zip(m_r_y.iter())
-        .map(|(mx, my)| -(mx * xg0_x + my * xg0_y))
+        .zip(m_r_theta.iter())
+        .map(|((mx, my), mt)| -(mx * xg0_x + my * xg0_y + mt * xg0_theta))
         .collect();
     let p_red_0 = reducer.reduce_f(&p_free_0);
 
@@ -369,6 +423,7 @@ pub fn linear_time_history_with_state(
         0,
         &m_r_x,
         &m_r_y,
+        &m_r_theta,
         &m_red,
         &c_red,
         &mut solver,
@@ -442,6 +497,8 @@ pub fn linear_time_history_from_state(
     }
     let m_r_x = sparse_matvec(&m_free, &r_x_free);
     let m_r_y = sparse_matvec(&m_free, &r_y_free);
+    // 位相差入力（ねじれ加振）用の回転影響 M·r_θ。
+    let m_r_theta = theta_influence_m(model, dofmap, &m_free);
 
     let beta = newmark.beta;
     let gamma = newmark.gamma;
@@ -473,6 +530,7 @@ pub fn linear_time_history_from_state(
         state.step,
         &m_r_x,
         &m_r_y,
+        &m_r_theta,
         &m_red,
         &c_red,
         &mut solver,
@@ -550,6 +608,8 @@ pub fn linear_hht_alpha_analysis(
     }
     let m_r_x = sparse_matvec(&m_free, &r_x_free);
     let m_r_y = sparse_matvec(&m_free, &r_y_free);
+    // 位相差入力（ねじれ加振）用の回転影響 M·r_θ。
+    let m_r_theta = theta_influence_m(model, dofmap, &m_free);
 
     // HHT-α は β=0.25, γ=0.5 で固定（平均加速度法ベース）
     let beta = 0.25;
@@ -590,10 +650,12 @@ pub fn linear_hht_alpha_analysis(
         .and_then(|a| a.first())
         .copied()
         .unwrap_or(0.0);
+    let xg0_theta = theta_accel_at(wave, 0);
     let p_free_0: Vec<f64> = m_r_x
         .iter()
         .zip(m_r_y.iter())
-        .map(|(mx, my)| -(mx * xg0_x + my * xg0_y))
+        .zip(m_r_theta.iter())
+        .map(|((mx, my), mt)| -(mx * xg0_x + my * xg0_y + mt * xg0_theta))
         .collect();
     let p_red_0 = reducer.reduce_f(&p_free_0);
 
@@ -614,6 +676,7 @@ pub fn linear_hht_alpha_analysis(
         0,
         &m_r_x,
         &m_r_y,
+        &m_r_theta,
         &m_red,
         &c_red,
         &k_red,
@@ -674,6 +737,7 @@ fn run_steps_hht(
     start_step: u64,
     m_r_x: &[f64],
     m_r_y: &[f64],
+    m_r_theta: &[f64],
     m_red: &faer::sparse::SparseColMat<usize, f64>,
     c_red: &faer::sparse::SparseColMat<usize, f64>,
     k_red: &faer::sparse::SparseColMat<usize, f64>,
@@ -747,10 +811,12 @@ fn run_steps_hht(
             .map(|a| a.get(n).copied().unwrap_or(0.0))
             .unwrap_or(0.0);
 
+        let xg_theta = theta_accel_at(wave, n);
         let p_free: Vec<f64> = m_r_x
             .iter()
             .zip(m_r_y.iter())
-            .map(|(mx, my)| -(mx * xg_x + my * xg_y))
+            .zip(m_r_theta.iter())
+            .map(|((mx, my), mt)| -(mx * xg_x + my * xg_y + mt * xg_theta))
             .collect();
         let p_red = reducer.reduce_f(&p_free);
 
@@ -862,6 +928,7 @@ fn run_steps(
     start_step: u64,
     m_r_x: &[f64],
     m_r_y: &[f64],
+    m_r_theta: &[f64],
     m_red: &faer::sparse::SparseColMat<usize, f64>,
     c_red: &faer::sparse::SparseColMat<usize, f64>,
     solver: &mut Box<dyn squid_n_math::solver::LinearSolver>,
@@ -933,10 +1000,12 @@ fn run_steps(
             .map(|a| a.get(n).copied().unwrap_or(0.0))
             .unwrap_or(0.0);
 
+        let xg_theta = theta_accel_at(wave, n);
         let p_free: Vec<f64> = m_r_x
             .iter()
             .zip(m_r_y.iter())
-            .map(|(mx, my)| -(mx * xg_x + my * xg_y))
+            .zip(m_r_theta.iter())
+            .map(|((mx, my), mt)| -(mx * xg_x + my * xg_y + mt * xg_theta))
             .collect();
         let p_red = reducer.reduce_f(&p_free);
 
@@ -1159,6 +1228,8 @@ pub fn nonlinear_time_history_analysis(
     }
     let m_r_x = sparse_matvec(&m_free, &r_x_free);
     let m_r_y = sparse_matvec(&m_free, &r_y_free);
+    // 位相差入力（ねじれ加振）用の回転影響 M·r_θ。
+    let m_r_theta = theta_influence_m(model, dofmap, &m_free);
 
     // Newmark-β 係数
     let beta = newmark.beta;
@@ -1214,10 +1285,12 @@ pub fn nonlinear_time_history_analysis(
         .and_then(|a| a.first())
         .copied()
         .unwrap_or(0.0);
+    let xg0_theta = theta_accel_at(wave, 0);
     let p_free_0: Vec<f64> = m_r_x
         .iter()
         .zip(m_r_y.iter())
-        .map(|(mx, my)| -(mx * xg0_x + my * xg0_y))
+        .zip(m_r_theta.iter())
+        .map(|((mx, my), mt)| -(mx * xg0_x + my * xg0_y + mt * xg0_theta))
         .collect();
     let p_red_0 = reducer.reduce_f(&p_free_0);
 
@@ -1294,10 +1367,12 @@ pub fn nonlinear_time_history_analysis(
             .as_ref()
             .map(|a| a.get(n).copied().unwrap_or(0.0))
             .unwrap_or(0.0);
+        let xg_theta = theta_accel_at(wave, n);
         let p_free: Vec<f64> = m_r_x
             .iter()
             .zip(m_r_y.iter())
-            .map(|(mx, my)| -(mx * xg_x + my * xg_y))
+            .zip(m_r_theta.iter())
+            .map(|((mx, my), mt)| -(mx * xg_x + my * xg_y + mt * xg_theta))
             .collect();
         let p_red = reducer.reduce_f(&p_free);
 

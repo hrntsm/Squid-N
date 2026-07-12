@@ -209,6 +209,7 @@ fn zero_wave(dt: f64, n_steps: usize) -> GroundMotion {
         dt,
         accel_x: vec![0.0; n_steps],
         accel_y: None,
+        accel_theta: None,
     }
 }
 
@@ -1001,6 +1002,7 @@ fn test_y_direction_wave_selects_y_record_dir() {
         dt,
         accel_x: vec![0.0; n_steps],
         accel_y: Some(accel_y),
+        accel_theta: None,
     };
     let newmark = NewmarkCfg {
         beta: 0.25,
@@ -1035,6 +1037,88 @@ fn test_y_direction_wave_selects_y_record_dir() {
     assert_eq!(result.peak_disp[1][0], 0.0);
     // Y 方向は実際に応答している。
     assert!(result.peak_disp[1][1] > 0.0);
+}
+
+/// 位相差入力（ねじれ地動加速度 `accel_theta`）が、節点重心から偏心した自由節点の
+/// 並進応答を励起することを検証する。並進入力（accel_x/y）はゼロで、ねじれ入力のみ。
+#[test]
+fn test_phase_diff_torsion_excites_eccentric_node() {
+    // sdof_model と同構成だが、自由節点を (1000,1000,0) へ置き、重心(500,500)から
+    // Y 方向に偏心させる。ねじれ加振の回転影響 ax=−(y−yc)≠0 が ux を励起する。
+    let mut model = sdof_model();
+    model.nodes[1].coord = [1000.0, 1000.0, 0.0];
+    let dofmap = DofMap::build(&model);
+    let reducer = Reducer::build(&model, &dofmap);
+
+    let omega = (1000.0_f64 / 1.0).sqrt();
+    let damping = Damping::StiffnessProportional {
+        h: 0.02,
+        omega,
+        basis: StiffnessKind::Initial,
+    };
+    let dt = 0.001;
+    let n_steps = 500;
+    let theta: Vec<f64> = (0..n_steps)
+        .map(|i| {
+            let t = i as f64 * dt;
+            // ねじれ地動加速度 [rad/s²]。
+            1e-3 * (2.0 * std::f64::consts::PI * 3.0 * t).sin()
+        })
+        .collect();
+    let newmark = NewmarkCfg {
+        beta: 0.25,
+        gamma: 0.5,
+        dt,
+    };
+
+    // (1) ねじれ入力ありの応答。
+    let wave_t = GroundMotion {
+        dt,
+        accel_x: vec![0.0; n_steps],
+        accel_y: None,
+        accel_theta: Some(theta.clone()),
+    };
+    let res_t = linear_time_history_analysis(
+        &model,
+        &dofmap,
+        &reducer,
+        &wave_t,
+        &newmark,
+        &damping,
+        &[0.0],
+        &[0.0],
+        false,
+    )
+    .expect("torsion time history should converge");
+
+    // (2) ねじれ入力なし（並進もゼロ）→ 応答ゼロ。
+    let wave_0 = GroundMotion {
+        dt,
+        accel_x: vec![0.0; n_steps],
+        accel_y: None,
+        accel_theta: None,
+    };
+    let res_0 = linear_time_history_analysis(
+        &model,
+        &dofmap,
+        &reducer,
+        &wave_0,
+        &newmark,
+        &damping,
+        &[0.0],
+        &[0.0],
+        false,
+    )
+    .expect("zero input should converge");
+
+    // ねじれ入力ありは偏心節点の ux を励起（非ゼロ）。
+    assert!(
+        res_t.peak_disp[1][0] > 1e-9,
+        "torsion should excite eccentric node ux: {}",
+        res_t.peak_disp[1][0]
+    );
+    // 入力ゼロは応答ゼロ。
+    assert_eq!(res_0.peak_disp[1][0], 0.0);
 }
 
 // ===== 非線形時刻歴応答解析テスト =====
