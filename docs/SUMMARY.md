@@ -6,6 +6,20 @@
 
 - [アーキテクチャ](./architecture.md)
 
+# 計算根拠（理論・出典）
+
+- [計算根拠について](./calc_basis/README.md)
+- [1. 荷重・外力](./calc_basis/01_荷重.md)
+- [2. 材料構成則・材料強度](./calc_basis/02_材料.md)
+- [3. 断面性能](./calc_basis/03_断面性能.md)
+- [4. 要素の定式化・剛性](./calc_basis/04_要素剛性.md)
+- [5. 構造解析](./calc_basis/05_構造解析.md)
+- [6. 一次設計（許容応力度計算）](./calc_basis/06_一次設計.md)
+- [7. 二次設計（保有水平耐力計算）](./calc_basis/07_二次設計.md)
+- [8. 部材終局耐力](./calc_basis/08_部材終局耐力.md)
+- [9. 限界耐力計算](./calc_basis/09_限界耐力計算.md)
+- [10. 免震・制振](./calc_basis/10_免震制振.md)
+
 # 設計仕様（specs）
 
 - [仕様書について](./specs/README.md)
