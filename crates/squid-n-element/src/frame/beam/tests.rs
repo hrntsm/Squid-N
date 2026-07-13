@@ -283,6 +283,114 @@ fn test_beam_new_slab_cooperation_width_amplifies_iy() {
     assert!((beam0.iy - i0).abs() < 1e-9);
 }
 
+/// S 造合成梁の剛性（スラブ考慮換算断面と鉄骨単独の平均。計算編 02「合成梁の
+/// 断面性能」）。
+#[test]
+fn test_beam_new_composite_steel_beam_averages_stiffness() {
+    use squid_n_core::dof::Dof6Mask;
+    use squid_n_core::ids::{MaterialId, SectionId, SlabId};
+    use squid_n_core::model::{
+        DistributionMethod, EndCondition, ForceRegime, LocalAxis, Model, Slab,
+    };
+    use squid_n_core::section_shape::SectionShape;
+
+    let make_node = |id: u32, coord: [f64; 3]| Node {
+        id: NodeId(id),
+        coord,
+        restraint: Dof6Mask::FREE,
+        mass: None,
+        story: None,
+    };
+    let shape = SectionShape::SteelH {
+        height: 400.0,
+        width: 200.0,
+        web_thick: 8.0,
+        flange_thick: 13.0,
+    };
+    let mut model = Model {
+        nodes: vec![
+            make_node(0, [0.0, 0.0, 3000.0]),
+            make_node(1, [6000.0, 0.0, 3000.0]),
+            make_node(2, [6000.0, 2500.0, 3000.0]),
+            make_node(3, [0.0, 2500.0, 3000.0]),
+        ],
+        sections: vec![shape.to_section(SectionId(0), "H-400x200".into())],
+        materials: vec![Material {
+            concrete_class: Default::default(),
+            id: MaterialId(0),
+            name: "SN400B".into(),
+            young: 205000.0,
+            poisson: 0.3,
+            density: 7.85e-9,
+            shear: None,
+            fc: None,
+            fy: Some(235.0),
+        }],
+        slabs: vec![Slab {
+            id: SlabId(0),
+            boundary: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)],
+            joists: vec![],
+            loads: vec![],
+            method: DistributionMethod::TriTrapezoid,
+            kind: Default::default(),
+            one_way: None,
+            edge_supported: None,
+        }],
+        slab_thickness: 150.0,
+        ..Default::default()
+    };
+    let elem = ElementData {
+        id: ElemId(0),
+        kind: ElementKind::Beam,
+        nodes: smallvec::smallvec![NodeId(0), NodeId(1)],
+        section: Some(SectionId(0)),
+        material: Some(MaterialId(0)),
+        local_axis: LocalAxis {
+            ref_vector: [0.0, 1.0, 0.0],
+        },
+        end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+        force_regime: ForceRegime::Auto,
+        rigid_zone: Default::default(),
+        plastic_zone: None,
+        spring: None,
+    };
+
+    // 期待値: 協力幅 bf = b + ba（片側のみ）。a=2500−100−100=2300 < l/2
+    // → ba=(0.5−0.6·2300/6000)·2300=621。合成断面（スラブ上端基準・Hd=0・
+    // スラブ Fc21）と鉄骨単独の平均。
+    let sec = &model.sections[0];
+    let (sa, si, sh) = (sec.area, sec.iy, 400.0_f64);
+    let (es, t, l) = (205000.0_f64, 150.0_f64, 6000.0_f64);
+    let a_clear = 2500.0 - 100.0 - 100.0;
+    let ba = (0.5 - 0.6 * a_clear / l) * a_clear;
+    assert!((ba - 621.0).abs() < 1e-9);
+    let bf = 200.0 + ba;
+    let ec = squid_n_core::section_shape::concrete_young_modulus(21.0);
+    let ca = bf * t;
+    let g = (ec * ca * (t / 2.0) + es * sa * (t + sh / 2.0)) / (ec * ca + es * sa);
+    let i_comp = (ec / es) * (bf * t.powi(3) / 12.0 + ca * (g - t / 2.0).powi(2))
+        + si
+        + sa * (g - t - sh / 2.0).powi(2);
+    let expected = (i_comp + si) / 2.0;
+
+    let beam = BeamElement::new(&elem, &model);
+    assert!(
+        (beam.iy - expected).abs() / expected < 1e-12,
+        "iy={} expected={}",
+        beam.iy,
+        expected
+    );
+    // 平均法: 鉄骨単独 < 採用剛性 < 完全合成
+    assert!(beam.iy > si && beam.iy < i_comp);
+    // 弱軸は増大しない
+    assert!((beam.iz - model.sections[0].iz).abs() < 1e-9);
+
+    // 床厚 0(既定)では鉄骨単独のまま
+    model.slab_thickness = 0.0;
+    let beam0 = BeamElement::new(&elem, &model);
+    assert!((beam0.iy - si).abs() < 1e-9);
+}
+
 #[test]
 fn test_local_stiffness_symmetric() {
     let beam = make_test_beam();

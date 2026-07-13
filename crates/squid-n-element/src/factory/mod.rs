@@ -380,6 +380,22 @@ fn yield_moment_and_axial(data: &ElementData, model: &Model) -> (f64, f64) {
     (flexural_yield_moment(data, model), fy_sigma * area)
 }
 
+/// 部材の可撓長さ [mm]（= 節点間長 − 両端剛域長。剛域控除後が非正なら全長）。
+fn flexible_length(data: &ElementData, model: &Model) -> f64 {
+    let n0 = &model.nodes[data.nodes[0].index()];
+    let n1 = &model.nodes[data.nodes[1].index()];
+    let l = ((n1.coord[0] - n0.coord[0]).powi(2)
+        + (n1.coord[1] - n0.coord[1]).powi(2)
+        + (n1.coord[2] - n0.coord[2]).powi(2))
+    .sqrt();
+    let l_flex = l - data.rigid_zone.length_i - data.rigid_zone.length_j;
+    if l_flex > 0.0 {
+        l_flex
+    } else {
+        l
+    }
+}
+
 /// 材端曲げバネの初期回転剛性 k_rot [N·mm/rad] と降伏モーメント My [N·mm]。
 /// k_rot は可とう長 L'（= L − 剛域長。§6.2.1）基準で評価する。
 fn rotational_spring_params(data: &ElementData, model: &Model) -> (f64, f64) {
@@ -389,17 +405,10 @@ fn rotational_spring_params(data: &ElementData, model: &Model) -> (f64, f64) {
         .and_then(|mid| model.materials.get(mid.index()));
     let e = mat.map(|m| m.young).unwrap_or(205000.0);
     let iz = sec.map(|s| s.iz.max(s.iy)).unwrap_or(1.0e6);
-    // 材端バネの降伏モーメントは規準の曲げ終局強度（RC=0.9atσyj、鉄骨=Zpσy）を用いる。
+    // 材端バネの降伏モーメントは規準の曲げ終局強度（RC=0.9·at·σy·d、鉄骨=Zp·σy）を用いる。
     let my = flexural_yield_moment(data, model);
 
-    let n0 = &model.nodes[data.nodes[0].index()];
-    let n1 = &model.nodes[data.nodes[1].index()];
-    let l = ((n1.coord[0] - n0.coord[0]).powi(2)
-        + (n1.coord[1] - n0.coord[1]).powi(2)
-        + (n1.coord[2] - n0.coord[2]).powi(2))
-    .sqrt();
-    let l_flex = l - data.rigid_zone.length_i - data.rigid_zone.length_j;
-    let l_eff = if l_flex > 0.0 { l_flex } else { l };
+    let l_eff = flexible_length(data, model);
     let k_rot = if l_eff > 0.0 {
         6.0 * e * iz / l_eff
     } else {
@@ -446,8 +455,9 @@ pub fn resolve_member_hysteresis(data: &ElementData, model: &Model) -> Hysteresi
     }
 }
 
-/// 材端曲げバネのひび割れモーメント Mc [N·mm]。RC 系は Mc=0.56·Fc·Ze（κ=0.56、
-/// Ze=断面係数）、それ以外は My/3 で近似する。
+/// 材端曲げバネのひび割れモーメント Mc [N·mm]。RC 系は Mc=0.56·√Fc·Ze
+/// （Fc [N/mm²]、Ze=断面係数。技術基準解説書 P.621-623）、それ以外は My/3 で
+/// 近似する。
 fn crack_moment(data: &ElementData, model: &Model, my: f64) -> f64 {
     let sec = data.section.and_then(|sid| model.sections.get(sid.index()));
     let mat = data
@@ -457,8 +467,58 @@ fn crack_moment(data: &ElementData, model: &Model, my: f64) -> f64 {
     let iz = sec.map(|s| s.iz.max(s.iy)).unwrap_or(1.0e6);
     let ze = if depth > 0.0 { iz / (depth / 2.0) } else { 0.0 };
     match (is_rc_like_section(data, model), mat.and_then(|m| m.fc)) {
-        (true, Some(fc)) if fc > 0.0 && ze > 0.0 => (0.56 * fc * ze).clamp(my * 0.1, my * 0.9),
+        (true, Some(fc)) if fc > 0.0 && ze > 0.0 => {
+            (0.56 * fc.sqrt() * ze).clamp(my * 0.1, my * 0.9)
+        }
         _ => my / 3.0,
+    }
+}
+
+/// 材端曲げバネの降伏時剛性低下率 αy。
+///
+/// RC 矩形断面の梁（水平材）は菅野式
+/// （[`squid_n_core::rc_capacity::rc_alpha_y_sugano`]、梅村魁『鉄筋コンクリート
+/// 建物の動的耐震設計法』P.106-108）で算定する:
+/// - `pt` = at/(b·D)（at=main_x の半分を引張側と仮定）
+/// - `a` = 可撓長さ/2（せん断スパン）、`a/D` は式側で [1,5] にクランプ
+/// - `d` = 有効せい（D − かぶり − 主筋半径）
+/// - `n` = Es/Ec（部材材料のヤング係数を Ec とみなす）
+///
+/// 柱（鉛直材）は菅野式に軸力項を要するため対象外（柱の既定はファイバー
+/// モデルで、本バネ経路に乗る場合は従来既定 0.3）。鉄骨・SRC・CFT・情報不足も
+/// 従来既定 0.3 を用いる。
+fn flexural_alpha_y(data: &ElementData, model: &Model) -> f64 {
+    use squid_n_core::section_shape::SectionShape;
+    const DEFAULT_ALPHA_Y: f64 = 0.3;
+    if is_vertical_member(data, model) {
+        return DEFAULT_ALPHA_Y;
+    }
+    let sec = data.section.and_then(|sid| model.sections.get(sid.index()));
+    let Some(SectionShape::RcRect { b, d, rebar }) = sec.and_then(|s| s.shape.as_ref()) else {
+        return DEFAULT_ALPHA_Y;
+    };
+    if *b <= 0.0 || *d <= 0.0 {
+        return DEFAULT_ALPHA_Y;
+    }
+    let at = squid_n_core::section_shape::bar_set_area(&rebar.main_x) / 2.0;
+    let pt = at / (b * d);
+    let d_eff = (d - rebar.cover - rebar.main_x.dia / 2.0).max(0.0);
+    let ec = data
+        .material
+        .and_then(|mid| model.materials.get(mid.index()))
+        .map(|m| m.young)
+        .unwrap_or(0.0);
+    let n = if ec > 0.0 {
+        squid_n_core::section_shape::E_STEEL / ec
+    } else {
+        15.0
+    };
+    let a = flexible_length(data, model) / 2.0;
+    let ay = squid_n_core::rc_capacity::rc_alpha_y_sugano(pt, a / d, d_eff / d, n);
+    if ay.is_finite() && ay > 1e-6 {
+        ay.min(1.0)
+    } else {
+        DEFAULT_ALPHA_Y
     }
 }
 
@@ -498,11 +558,11 @@ fn build_flexural_springs(
         return (mk(), mk(), true);
     }
     // トリリニア折れ点: ひび割れ Mc/θc（初期勾配 k_rot）、降伏 My/θy（降伏時剛性
-    // 低下率 αy=0.3）、終局 Mu=1.1·My/θu（塑性率 4）。αy=0.3 は既定値であり、
-    // RESP-D 準拠の菅野 αy 精算はファイバ/skeleton 側で行う。
+    // 低下率 αy。RC 矩形梁は菅野式、その他は既定 0.3 = [`flexural_alpha_y`]）、
+    // 終局 Mu=1.1·My/θu（塑性率 4）。
     let mc = crack_moment(data, model, my);
     let tc = (mc / k_rot).max(1e-9);
-    let alpha_y = 0.3;
+    let alpha_y = flexural_alpha_y(data, model);
     let ty = (my / (alpha_y * k_rot)).max(tc * 1.5);
     let mu = 1.1 * my;
     let tu = ty * 4.0;

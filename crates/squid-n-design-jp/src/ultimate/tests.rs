@@ -147,6 +147,40 @@ fn test_collect_rc_ultimate_checks_column_and_beam() {
 }
 
 #[test]
+fn test_ultimate_check_ql_q0_substitution_for_mk785() {
+    // MK785/SPR785/SPR685 使用時は余裕率の QL 控除を QL=Q0（単純梁せん断）と
+    // 読み替える。普通強度筋は q_long のまま。
+    let ql = 50_000.0;
+    let q0 = 80_000.0;
+    let demand = vec![(
+        ElemId(1),
+        MemberDemand {
+            q_long: Some(ql),
+            q_simple: Some(q0),
+            ..MemberDemand::axial(0.0)
+        },
+    )];
+    let opts = UltimateShearOptions::default();
+
+    // 普通強度（grade=None）: QL 控除。
+    let model = column_and_beam_model();
+    let checks = collect_rc_ultimate_checks(&model, &demand, &opts);
+    let beam = checks.iter().find(|c| c.elem == ElemId(1)).unwrap();
+    assert!((beam.shear_margin - (beam.qsu - ql).max(0.0) / beam.qmu).abs() < 1e-9);
+
+    // MK785: Q0 控除（σwy も製品値に変わるため Qsu 自体も変化する）。
+    let mut model_mk = column_and_beam_model();
+    if let Some(SectionShape::RcRect { rebar, .. }) = model_mk.sections[1].shape.as_mut() {
+        rebar.shear.grade = Some("MK785".to_string());
+    }
+    let checks_mk = collect_rc_ultimate_checks(&model_mk, &demand, &opts);
+    let beam_mk = checks_mk.iter().find(|c| c.elem == ElemId(1)).unwrap();
+    assert!((beam_mk.shear_margin - (beam_mk.qsu - q0).max(0.0) / beam_mk.qmu).abs() < 1e-9);
+    // 製品別 σwy=min(25·24, 785)=600 > 既定 295 のため Qsu は増える方向。
+    assert!(beam_mk.qsu > beam.qsu);
+}
+
+#[test]
 fn test_ultimate_check_lightweight_reduces_qsu() {
     let model = column_and_beam_model();
     let std = collect_rc_ultimate_checks(&model, &[], &UltimateShearOptions::default());

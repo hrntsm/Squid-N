@@ -421,7 +421,7 @@ fn shear_capacity_for(
 /// `q_index`: 長期内力配列 `[N,Qy,Qz,Mx,My,Mz]` のせん断成分位置（qy=1, qz=2）。
 /// `sum_mu`: 部材両端の終局曲げモーメントの絶対値和 ΣMy [N·mm]。0 以下または
 /// `clear_length` が 0 以下の場合、QD1 は無効（QD2 のみ）とする。
-fn seismic_design_shear(
+pub(crate) fn seismic_design_shear(
     ctx: &DesignCtx,
     pos: f64,
     q_signed: f64,

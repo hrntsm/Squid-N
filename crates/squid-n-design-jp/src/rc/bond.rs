@@ -71,9 +71,11 @@ pub fn rc_beam_bond_check_1991(
 //   として同じ式（ld=(Lo+d)/2）を用いる。
 // - Lo（柱面間距離、内法スパン）はモデルに保持されていないため、
 //   `DesignCtx.length`（部材の幾何学的長さ）で代用する。
-// - K・W・fb は RC 規準1999 の標準式（1段筋代表）とし、2段目以降で
-//   規定される fb の 0.6 倍低減は未実装（1段筋の値を全断面の代表値と
-//   して扱う）。
+// - K・W は RC 規準1999 の標準式を 1 段目のあき・かぶりで代表させる
+//   （2段目のあき・割裂面の個別評価は行わない）。fb は多段配筋
+//   （`BarSet.layers ≥ 2`）のとき 0.6 倍に低減し（RC 規準1999 の
+//   「1段筋以外は 0.6 を乗じる」）、必要付着長さが最大となる 2 段目以降の
+//   鉄筋列で代表して検定する（1段筋は同 σt・同 K なら常にこれを下回る）。
 // - 上端筋/下端筋の判定は、梁端部は負曲げ（上端引張）が生じるものとして
 //   「端部＝上端筋（fb×0.8）」「中央＝下端筋（低減なし）」と仮定する
 //   （実際の応力分布・配筋詳細に依らない保守側の簡略化）。
@@ -178,9 +180,16 @@ pub fn rc_beam_bond_check(
     }
 
     // fb: 長期「その他鉄筋」= Fc/60+0.6、上端筋はその 0.8 倍。短期は長期の 1.5 倍。
+    // 多段配筋（layers ≥ 2）は 1 段筋以外の 0.6 倍低減を乗じ、必要付着長さが
+    // 最大となる 2 段目以降の鉄筋列で代表して検定する（RC 規準1999）。
     let fb_other = fc_raw / 60.0 + 0.6;
     let fb_long = if is_end { 0.8 * fb_other } else { fb_other };
-    let fb = if long_term { fb_long } else { fb_long * 1.5 };
+    let fb_row1 = if long_term { fb_long } else { fb_long * 1.5 };
+    let fb = if main.layers >= 2 {
+        0.6 * fb_row1
+    } else {
+        fb_row1
+    };
     if fb <= 0.0 {
         return None;
     }
@@ -430,6 +439,48 @@ mod tests {
         )
         .unwrap();
         assert!((result.k - 2.5).abs() < 1e-9, "K={}", result.k);
+    }
+
+    #[test]
+    fn test_bond_fb_second_row_factor_0_6() {
+        // 多段配筋（layers=2）の fb は 1 段配筋の 0.6 倍（2段目以降の鉄筋列で
+        // 代表して検定。RC 規準1999「1段筋以外は 0.6 を乗じる」）。
+        // 1段あたり本数 n1=count/layers を 6 本で揃え、K・W を同一にして
+        // fb の低減だけを比較する。
+        let (main1, rebar1) = bond_test_rebar();
+        let main2 = BarSet {
+            count: 12,
+            layers: 2,
+            ..main1.clone()
+        };
+        let rebar2 = RcRebar {
+            main_x: main2.clone(),
+            ..rebar1.clone()
+        };
+        let run = |main: &BarSet, rebar: &RcRebar| {
+            rc_beam_bond_check(
+                0.1,
+                3000.0,
+                300.0,
+                539.0,
+                471.625,
+                1140.4,
+                30_000_000.0,
+                main,
+                rebar,
+                24.0,
+                false,
+            )
+            .unwrap()
+        };
+        let one = run(&main1, &rebar1);
+        let two = run(&main2, &rebar2);
+        assert!((two.k - one.k).abs() < 1e-9, "K は同一条件");
+        assert!((two.fb - 0.6 * one.fb).abs() < 1e-9, "fb={}", two.fb);
+        assert!(
+            (two.ratio - one.ratio / 0.6).abs() / one.ratio < 1e-9,
+            "検定比は 1/0.6 倍厳しくなる"
+        );
     }
 
     #[test]

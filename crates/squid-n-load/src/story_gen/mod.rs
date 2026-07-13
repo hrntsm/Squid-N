@@ -149,6 +149,9 @@ pub(crate) enum SelfWeightItem {
 ///   （マニュアル「壁に三方スリットが指定されている場合、壁荷重は全て上部の大梁に伝達」）。
 ///   §1.2: マニュアル「壁の重量を階高の中央で上下階の節点に分配」に対応
 ///   （矩形壁なら上下2節点ずつに1/4ずつ配分される）。
+///   §壁自重: 4 節点の耐震壁は「周辺の柱梁の内法寸法」で面積を評価する
+///   （[`wall_clear_area_factor`]。芯々面積に内法係数を乗じる。控除相手の
+///   柱・梁が見つからない辺は控除なし＝芯々のまま保守側）。
 /// - ダンパー（`load_cfg.dampers` に登録された Beam/Brace 要素）: 断面自重
 ///   （ρ·A·L·g）は使わず、装置重量＋支持部重量に置き換える（§ダンパー自重。
 ///   `device_weight=0` かつ `support_area>0` の場合は支持部のみが算入され、
@@ -295,7 +298,8 @@ pub(crate) fn enumerate_self_weight(model: &Model, load_cfg: &LoadCfg) -> Vec<Se
                     .iter()
                     .map(|n| model.nodes[n.index()].coord)
                     .collect();
-                let area = polygon_area_3d(&pts);
+                // §壁自重: 耐震壁は周辺柱梁の内法寸法で面積を評価する。
+                let area = polygon_area_3d(&pts) * wall_clear_area_factor(model, elem, &pts);
 
                 // §壁自重: 開口控除・開口重量。三方スリットは全量を最上位標高の頂点へ。
                 let attr = model.wall_attrs.iter().find(|a| a.elem == elem.id);
@@ -329,6 +333,79 @@ pub(crate) fn enumerate_self_weight(model: &Model, load_cfg: &LoadCfg) -> Vec<Se
         }
     }
     items
+}
+
+/// 耐震壁の自重面積算定用の**内法係数**（芯々面積に乗じる係数、(0,1]）。
+///
+/// マニュアル §壁自重「耐震壁の重量は周辺の柱梁の内法寸法で計算します」に対応。
+/// 対象は 4 節点の `ElementKind::Wall` のみ（シェル床・多角形壁は 1.0）。
+/// 各辺を鉛直辺（側柱候補）・水平辺（上下梁候補）に分類し、辺の節点対に一致する
+/// 線材（`ElementKind::Beam`）の断面寸法の半分を芯々寸法から控除する:
+/// - 水平辺（上下梁）: 梁せい `sec.depth` の半分を高さから控除
+/// - 鉛直辺（側柱）: 平面内の向きが特定できないため `min(width, depth)` の半分を
+///   長さから控除（控除を小さくとる保守側の近似）
+///
+/// ハンチ・セットバック等で柱梁が斜めの場合の個別考慮は行わない。控除相手の
+/// 部材が見つからない辺は控除なし（芯々のまま＝保守側）。
+fn wall_clear_area_factor(model: &Model, elem: &ElementData, pts: &[[f64; 3]]) -> f64 {
+    if elem.kind != ElementKind::Wall || elem.nodes.len() != 4 || pts.len() != 4 {
+        return 1.0;
+    }
+    let n = 4usize;
+    let mut l_len = 0.0; // 水平辺（芯々長さ）の合計
+    let mut l_cnt = 0u32;
+    let mut h_len = 0.0; // 鉛直辺（芯々高さ）の合計
+    let mut h_cnt = 0u32;
+    let mut l_deduct = 0.0; // 側柱の半幅の和（長さ方向の控除）
+    let mut h_deduct = 0.0; // 上下梁の半せいの和（高さ方向の控除）
+    for i in 0..n {
+        let (a, b) = (elem.nodes[i], elem.nodes[(i + 1) % n]);
+        let (pa, pb) = (pts[i], pts[(i + 1) % n]);
+        let dz = (pb[2] - pa[2]).abs();
+        let dh = ((pb[0] - pa[0]).powi(2) + (pb[1] - pa[1]).powi(2)).sqrt();
+        let len = (dz * dz + dh * dh).sqrt();
+        if len <= 0.0 {
+            continue;
+        }
+        // 辺の節点対に一致する線材（柱・梁）の断面。
+        let member_sec = model
+            .elements
+            .iter()
+            .find(|e| {
+                e.kind == ElementKind::Beam && e.nodes.len() >= 2 && {
+                    let (m0, m1) = (e.nodes[0], e.nodes[e.nodes.len() - 1]);
+                    (m0 == a && m1 == b) || (m0 == b && m1 == a)
+                }
+            })
+            .and_then(|e| e.section)
+            .and_then(|sid| model.sections.get(sid.index()));
+        if dz > dh {
+            // 鉛直辺 = 側柱候補
+            h_len += len;
+            h_cnt += 1;
+            if let Some(sec) = member_sec {
+                l_deduct += sec.width.min(sec.depth).max(0.0) / 2.0;
+            }
+        } else {
+            // 水平辺 = 上下梁候補
+            l_len += len;
+            l_cnt += 1;
+            if let Some(sec) = member_sec {
+                h_deduct += sec.depth.max(0.0) / 2.0;
+            }
+        }
+    }
+    if l_cnt == 0 || h_cnt == 0 {
+        return 1.0;
+    }
+    let l = l_len / l_cnt as f64;
+    let h = h_len / h_cnt as f64;
+    if l <= 0.0 || h <= 0.0 {
+        return 1.0;
+    }
+    let fl = ((l - l_deduct) / l).clamp(0.0, 1.0);
+    let fh = ((h - h_deduct) / h).clamp(0.0, 1.0);
+    (fl * fh).clamp(0.0, 1.0)
 }
 
 /// モデル全節点のうち、指定点に最も近い節点。

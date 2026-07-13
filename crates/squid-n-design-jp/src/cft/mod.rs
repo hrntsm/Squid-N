@@ -17,11 +17,10 @@
 //!   実運用では鋼種名を確認すること）。
 //!
 //! # マニュアルからの主な簡略化（doc 内に個別関数でも記載）
-//! 1. CFT 柱の設計用せん断力は `QD2 = |QL| + n・|Q−QL|` のみ実装し、
-//!    `QD1`（複合断面の終局曲げによる算定、`ΣcMy/h′`）は実装しない
-//!    （CFT の終局曲げは鋼管・充填コンクリートの複合断面として別途
-//!    定式化が必要なため）。`ctx.seismic_qd` が Some の場合は常に QD2 を
-//!    用いる（[`cft_q_design`] 参照）。
+//! 1. CFT 柱の設計用せん断力は `QD = min(QD1, QD2)`（`ctx.seismic_qd.method`
+//!    に従う）。`QD1 = ΣcMy/h′` の cMy には CFT 指針の N-M 相互作用による
+//!    終局曲げ耐力 Mu(N)（[`crate::ultimate::cft_mu_nm`]、柱分類対応）を用い、
+//!    柱頭・柱脚同一断面の仮定で `ΣcMy = 2·Mu(N)` とする（[`cft_q_design`]）。
 //! 2. CFT 柱の鋼管部分の許容圧縮応力度 `s_fc` は座屈を考慮する
 //!    （λ = lk/i を**鋼管単体**の断面二次半径で評価。充填コンクリートの
 //!    剛性寄与を無視するため安全側。[`cft_common_steel`] 参照）。
@@ -253,25 +252,19 @@ fn cft_pipe_steel_props(outer_dia: f64, thick: f64) -> (f64, f64) {
     (a, sz)
 }
 
-/// CFT 柱の設計用せん断力成分 `QD2 = |QL| + n・|Q−QL|`（RESP-D マニュアル
-/// 04 断面検定。CFT は QD1（複合断面の終局曲げによる算定）を実装しないため
-/// 常に QD2 を用いる。モジュール doc「簡略化」参照）。
+/// CFT 柱の設計用せん断力 `QD`（RESP-D マニュアル 04 断面検定）。
+///
+/// - `QD1 = ΣcMy/h′`。cMy は CFT 指針の N-M 相互作用による終局曲げ耐力
+///   Mu(N)（[`crate::ultimate::cft_mu_nm`]、柱分類対応）とし、柱頭・柱脚
+///   同一断面の仮定で `ΣcMy = 2·Mu(N)` とする（RC 柱の QD1 と同じ扱い）。
+/// - `QD2 = |QL| + n・|Q−QL|`。
+/// - `ctx.seismic_qd.method`（QD1/QD2/min）の選択は RC と共通の
+///   [`crate::rc::seismic_design_shear`] に委譲する。
 ///
 /// `ctx.seismic_qd` が None、または長期内力に同一評価位置が見つからない
 /// 場合は解析せん断力 `|q_signed|` をそのまま返す（従来動作）。
-fn cft_q_design(ctx: &DesignCtx, pos: f64, q_signed: f64, q_index: usize) -> f64 {
-    let Some(qd) = &ctx.seismic_qd else {
-        return q_signed.abs();
-    };
-    let Some(ql_signed) = qd
-        .long_at
-        .iter()
-        .find(|(p, _)| (p - pos).abs() < 1e-6)
-        .map(|(_, f)| f[q_index])
-    else {
-        return q_signed.abs();
-    };
-    ql_signed.abs() + qd.n_factor * (q_signed - ql_signed).abs()
+fn cft_q_design(ctx: &DesignCtx, pos: f64, q_signed: f64, q_index: usize, sum_c_my: f64) -> f64 {
+    crate::rc::seismic_design_shear(ctx, pos, q_signed, q_index, sum_c_my, true)
 }
 
 // ============================================================================
@@ -346,10 +339,26 @@ fn cft_box_check(
     let s_aw_z = 2.0 * thick * (width - 2.0 * thick).max(0.0);
     let s_qa_y = s_aw_y * s_fs;
     let s_qa_z = s_aw_z * s_fs;
-    // 地震時短期は QD2 = |QL| + n・|Q−QL| を qy/qz 各成分に適用する
-    // （ctx.seismic_qd が None なら解析せん断力のまま）。
-    let q_design_y = cft_q_design(ctx, forces.pos, forces.qy, 1);
-    let q_design_z = cft_q_design(ctx, forces.pos, forces.qz, 2);
+    // 地震時短期は QD = min(QD1, QD2)（method に従う）を qy/qz 各成分に適用する。
+    // QD1 の ΣcMy は N-M 相互作用の終局曲げ Mu(N)（CFT 指針・Fc は raw、Fy は F 値）
+    // ×2（柱頭・柱脚同一断面）。ctx.seismic_qd が None なら解析せん断力のまま。
+    let (sum_c_my_z, sum_c_my_y) = if ctx.seismic_qd.is_some() {
+        let shape = SectionShape::CftBox {
+            height,
+            width,
+            thick,
+        };
+        let lk = ctx.lk.unwrap_or(ctx.length);
+        let mu_z =
+            crate::ultimate::cft_mu_nm(&shape, fc_raw, f_value, n_design, lk, false).unwrap_or(0.0);
+        let mu_y =
+            crate::ultimate::cft_mu_nm(&shape, fc_raw, f_value, n_design, lk, true).unwrap_or(0.0);
+        (2.0 * mu_z, 2.0 * mu_y)
+    } else {
+        (0.0, 0.0)
+    };
+    let q_design_y = cft_q_design(ctx, forces.pos, forces.qy, 1, sum_c_my_z);
+    let q_design_z = cft_q_design(ctx, forces.pos, forces.qz, 2, sum_c_my_y);
     let ratio_shear_y = if s_qa_y > 1e-9 {
         q_design_y / s_qa_y
     } else {
@@ -441,10 +450,19 @@ fn cft_pipe_check(
 
     let s_aw = sa / 2.0;
     let s_qa = s_aw * s_fs;
-    // 地震時短期は QD2 = |QL| + n・|Q−QL| を qy/qz 各成分に適用してから
-    // 合成する（ctx.seismic_qd が None なら解析せん断力のまま）。
-    let q_design_y = cft_q_design(ctx, forces.pos, forces.qy, 1);
-    let q_design_z = cft_q_design(ctx, forces.pos, forces.qz, 2);
+    // 地震時短期は QD = min(QD1, QD2)（method に従う）を qy/qz 各成分に適用して
+    // から合成する。QD1 の ΣcMy は N-M 相互作用の終局曲げ Mu(N)×2（円形は
+    // 方向によらず同値）。ctx.seismic_qd が None なら解析せん断力のまま。
+    let sum_c_my = if ctx.seismic_qd.is_some() {
+        let shape = SectionShape::CftPipe { outer_dia, thick };
+        let lk = ctx.lk.unwrap_or(ctx.length);
+        2.0 * crate::ultimate::cft_mu_nm(&shape, fc_raw, f_value, n_design, lk, false)
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    let q_design_y = cft_q_design(ctx, forces.pos, forces.qy, 1, sum_c_my);
+    let q_design_z = cft_q_design(ctx, forces.pos, forces.qz, 2, sum_c_my);
     let q_res = (q_design_y.powi(2) + q_design_z.powi(2)).sqrt();
     let ratio_shear = if s_qa > 1e-9 { q_res / s_qa } else { 0.0 };
 

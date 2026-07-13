@@ -38,7 +38,12 @@ pub fn plastic_nu0(fc: f64) -> f64 {
 /// `Rp ≤ 0`（塑性化前）は `ν = ν0`（`Rp→0` の極限）とする。`(1−15·Rp)` は
 /// `Rp=0.05` で 0.25 に一致し、両分岐は連続する。負値にはクランプする。
 pub fn plastic_nu(fc: f64, rp: f64) -> f64 {
-    let nu0 = plastic_nu0(fc);
+    plastic_nu_from_nu0(plastic_nu0(fc), rp)
+}
+
+/// ν0 を与えて Rp 依存の有効係数 ν を求める（[`plastic_nu`] の一般形。
+/// 高強度せん断補強筋の製品別 ν0 上書き用）。
+pub fn plastic_nu_from_nu0(nu0: f64, rp: f64) -> f64 {
     let factor = if rp <= 0.0 {
         1.0
     } else if rp <= 0.05 {
@@ -112,6 +117,10 @@ pub struct RcPlasticShearInput {
     pub rp: f64,
     /// 軽量コンクリートを使用する場合 true（せん断終局耐力を 0.9 倍に低減）。
     pub lightweight: bool,
+    /// ν0 の製品別上書き（高強度せん断補強筋使用時。
+    /// [`crate::material_strength::ultimate_hoop_nu0`]）。`None` は標準式
+    /// `ν0 = 0.7 − Fc/200`（[`plastic_nu0`]）。
+    pub nu0_override: Option<f64>,
 }
 
 /// 塑性理論式による終局せん断強度 `Qsu` [N]（RESP-D「06 終局検定」）。
@@ -133,7 +142,8 @@ pub fn rc_shear_qsu_plastic(inp: &RcPlasticShearInput) -> f64 {
     if inp.b <= 0.0 || inp.d_full <= 0.0 || inp.jt <= 0.0 || inp.fc <= 0.0 {
         return 0.0;
     }
-    let nu = plastic_nu(inp.fc, inp.rp);
+    let nu0 = inp.nu0_override.unwrap_or_else(|| plastic_nu0(inp.fc));
+    let nu = plastic_nu_from_nu0(nu0, inp.rp);
     let cot_phi = plastic_cot_phi(inp.rp);
     let k1 = plastic_k1(inp.l_clear, inp.d_full);
 
@@ -349,7 +359,35 @@ mod tests {
             fc: 24.0,
             rp: 0.0,
             lightweight: false,
+            nu0_override: None,
         }
+    }
+
+    #[test]
+    fn test_rc_shear_qsu_plastic_nu0_override() {
+        // 高強度せん断補強筋の製品別 ν0（785/685 級 0.7·(0.7−Fc/200)）を
+        // 与えた場合、標準 ν0=0.7−Fc/200 の結果と一致しないこと、および
+        // 手計算と整合すること。なお 1275 級の 0.7·(1.0−Fc/140) は恒等的に
+        // 標準式と一致する（0.7/140=1/200）ため差は生じない。
+        let base = sample_qsu();
+        let nu0 = 0.7 * (0.7 - 24.0 / 200.0);
+        let over = RcPlasticShearInput {
+            nu0_override: Some(nu0),
+            ..base
+        };
+        let q_base = rc_shear_qsu_plastic(&base);
+        let q_over = rc_shear_qsu_plastic(&over);
+        assert!(q_base > 0.0 && q_over > 0.0);
+        assert!((q_base - q_over).abs() > 1.0, "ν0 上書きが反映されること");
+        // 手計算（Rp=0: cotφ=2.0, ν=ν0_override）。
+        let cot = 2.0_f64;
+        let ld: f64 = 3000.0 / 600.0;
+        let k1 = ((ld * ld + 1.0).sqrt() - ld) / 2.0;
+        let pw_sigma = (0.003_f64 * 295.0).min(nu0 * 24.0 / 2.0);
+        let k2 = (2.0 * 0.003 * 295.0 / (nu0 * 24.0)).min(1.0);
+        let truss = 400.0 * (7.0 * 530.0 / 8.0) * pw_sigma * cot;
+        let arch = k1 * (1.0 - k2) * 400.0 * 600.0 * nu0 * 24.0;
+        assert!((q_over - (truss + arch)).abs() / (truss + arch) < 1e-12);
     }
 
     #[test]

@@ -300,7 +300,7 @@ fn test_cft_shape_mismatch_skip() {
 // ------------------------------------------------------------------
 
 /// CFT 柱の設計用せん断力を QD2 = |QL| + n・|Q−QL| に置き換えると
-/// （QL=0 のとき）せん断検定比が n 倍になることを確認する。
+/// （QL=0 のとき）せん断検定比が n 倍になることを確認する（method=Qd2）。
 #[test]
 fn test_cft_box_seismic_qd2_scales_shear_ratio_by_n() {
     use crate::{QdMethod, SeismicQd};
@@ -333,7 +333,7 @@ fn test_cft_box_seismic_qd2_scales_shear_ratio_by_n() {
             long_at: vec![(0.0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])], // QL=0
             n_factor,
             clear_length: 4000.0,
-            method: QdMethod::Min,
+            method: QdMethod::Qd2,
         }),
         ..Default::default()
     };
@@ -345,6 +345,68 @@ fn test_cft_box_seismic_qd2_scales_shear_ratio_by_n() {
         r_none.ratio,
         r_qd.ratio,
         n_factor
+    );
+}
+
+/// QD1 = ΣcMy/h′（cMy = N-M 相互作用の Mu(N)、ΣcMy=2·Mu）が QD2 より
+/// 小さい場合、method=Min では QD1 が設計用せん断力として採用される。
+#[test]
+fn test_cft_box_seismic_qd1_governs_when_smaller() {
+    use crate::{QdMethod, SeismicQd};
+
+    let (height, width, thick) = (400.0, 300.0, 9.0);
+    let sec = cft_box_section(height, width, thick);
+    let mat = make_material(24.0, "SN400B");
+    let design = CftDesign;
+
+    let f_value = steel_f_value_prefix("SN400B", thick).unwrap();
+    let s_fs = steel_fs(f_value, LoadTerm::Short);
+    let s_aw = 2.0 * thick * (height - 2.0 * thick);
+    let s_qa = s_aw * s_fs;
+
+    // 解析せん断を大きくして QD2 = n・Q を QD1 より大きくする。
+    let q_test = s_qa * 0.6;
+    let forces = MemberForcesAt {
+        qy: q_test,
+        ..zero_forces()
+    };
+
+    let n_factor = 1.5;
+    let h_clear = 4000.0;
+    let length = 4000.0;
+    let ctx_qd = DesignCtx {
+        term: LoadTerm::Short,
+        kind: crate::MemberKind::Column,
+        length,
+        seismic_qd: Some(SeismicQd {
+            long_at: vec![(0.0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])], // QL=0
+            n_factor,
+            clear_length: h_clear,
+            method: QdMethod::Min,
+        }),
+        ..Default::default()
+    };
+    let r_qd = design.check(&forces, &sec, &mat, &ctx_qd);
+
+    // 期待値: QD1 = 2·Mu(N=0)/h′（強軸。qy に対応）。
+    let shape = SectionShape::CftBox {
+        height,
+        width,
+        thick,
+    };
+    let mu = crate::ultimate::cft_mu_nm(&shape, 24.0, f_value, 0.0, length, false).unwrap();
+    let qd1 = 2.0 * mu / h_clear;
+    assert!(
+        qd1 < n_factor * q_test,
+        "前提: QD1({qd1}) < QD2({})",
+        n_factor * q_test
+    );
+    let expected_ratio = qd1 / s_qa;
+    assert!(
+        (r_qd.ratio - expected_ratio).abs() / expected_ratio < 1e-6,
+        "ratio={}, expected={}",
+        r_qd.ratio,
+        expected_ratio
     );
 }
 

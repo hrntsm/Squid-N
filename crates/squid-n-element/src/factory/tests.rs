@@ -632,6 +632,84 @@ fn test_resolve_member_hysteresis_and_flexural_springs() {
 }
 
 #[test]
+fn test_flexural_alpha_y_sugano_for_rc_beam() {
+    use squid_n_core::section_shape::{BarSet, RcRebar, SectionShape, ShearBar};
+
+    let mut model = make_diaphragm_model();
+    let beam = ElementData {
+        id: ElemId(0),
+        kind: ElementKind::Beam,
+        nodes: smallvec::smallvec![NodeId(0), NodeId(1)],
+        section: Some(SectionId(0)),
+        material: Some(MaterialId(0)),
+        local_axis: LocalAxis {
+            ref_vector: [0.0, 1.0, 0.0],
+        },
+        end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+        force_regime: ForceRegime::Auto,
+        rigid_zone: Default::default(),
+        plastic_zone: None,
+        spring: None,
+    };
+    model.elements.push(beam.clone());
+
+    // 断面形状なし（非 RC）→ 既定 0.3。
+    assert!((flexural_alpha_y(&beam, &model) - 0.3).abs() < 1e-12);
+
+    // RC 矩形梁（水平材）→ 菅野式。b=400, D=700, 4-D22（at=半分）, かぶり50,
+    // L=5000（a=2500, a/D≈3.57）, Ec=20000 → n=10.25。
+    model.sections[0].shape = Some(SectionShape::RcRect {
+        b: 400.0,
+        d: 700.0,
+        rebar: RcRebar {
+            main_x: BarSet {
+                count: 4,
+                dia: 22.0,
+                layers: 1,
+            },
+            main_y: BarSet {
+                count: 4,
+                dia: 22.0,
+                layers: 1,
+            },
+            cover: 50.0,
+            shear: ShearBar {
+                dia: 10.0,
+                pitch: 100.0,
+                legs: 2,
+                grade: None,
+            },
+        },
+    });
+    let at = squid_n_core::section_shape::bar_set_area(&BarSet {
+        count: 4,
+        dia: 22.0,
+        layers: 1,
+    }) / 2.0;
+    let expected = squid_n_core::rc_capacity::rc_alpha_y_sugano(
+        at / (400.0 * 700.0),
+        2500.0 / 700.0,
+        (700.0 - 50.0 - 11.0) / 700.0,
+        205000.0 / 20000.0,
+    );
+    let got = flexural_alpha_y(&beam, &model);
+    assert!(
+        (got - expected).abs() < 1e-12,
+        "αy: got={got}, expected={expected}"
+    );
+    assert!(got > 0.0 && got < 1.0);
+    assert!(
+        (got - 0.3).abs() > 1e-3,
+        "菅野式の値が既定 0.3 と区別できること（got={got}）"
+    );
+
+    // 鉛直材（柱扱い）→ 既定 0.3（菅野式は軸力項を要するため対象外）。
+    let mut column = beam.clone();
+    column.nodes = smallvec::smallvec![NodeId(0), NodeId(2)];
+    assert!((flexural_alpha_y(&column, &model) - 0.3).abs() < 1e-12);
+}
+
+#[test]
 fn test_rc_beam_flexural_spring_exhibits_takeda_degradation() {
     // RC 梁の材端バネが解析で実際に武田型（除荷剛性が初期剛性より低下）で
     // 応答することを、返却された復元力材料を直接駆動して確認する。

@@ -346,6 +346,124 @@ pub fn high_strength_pw_cap(grade: &str, term: LoadTerm, damage_control: bool, f
 }
 
 // ============================================================================
+// 3b. 高強度せん断補強筋の終局検定用 σwy・ν0・pw 上限
+//     （「06 終局検定」の製品別表。各製品の技術評定値）
+// ============================================================================
+
+/// 終局検定用の高強度せん断補強筋の製品判別（大文字化・前方一致）。
+/// 1275 級（ウルボン1275=SBPD1275/1420・リバーボン1275=SBPDN1275/1420）なら true。
+fn is_ultimate_hoop_1275_class(grade: &str) -> bool {
+    let g = grade.trim().to_uppercase();
+    [
+        "SBPD1275",
+        "SBPDN1275",
+        "ウルボン1275",
+        "リバーボン1275",
+        "ｳﾙﾎﾞﾝ1275",
+        "ﾘﾊﾞｰﾎﾞﾝ1275",
+    ]
+    .iter()
+    .any(|c| g.starts_with(c.to_uppercase().as_str()))
+}
+
+/// 高強度せん断補強筋の**終局検定用** σwy（せん断補強筋の降伏強度算定用強度）
+/// [N/mm²]。製品別の技術評定値の表による。`fc` は Fc(raw) [N/mm²]。
+///
+/// | 製品 | σwy |
+/// |---|---|
+/// | ウルボン1275(SBPD1275/1420)・リバーボン1275(SBPDN1275/1420) | min(25·Fc, 1275) |
+/// | ウルボン785(UB785)・リバーボン785(KW785)・スミフープ/ストロングフープ/デーフープ(KSS785) | min(25·Fc, 785) |
+/// | UHYフープ(SHD685)・パワーリング685(SPR685) | min(25·Fc, 685) |
+/// | エヌエスハイデック685H(HDC685) | 685 |
+/// | スーパーフープ(KH785) | 25·Fc (Fc＜27.4) / 785 (27.4≦Fc) |
+/// | パワーリング785(SPR785) | 25·Fc (Fc＜32.0) / 785 (32.0≦Fc) |
+/// | エムケーフープ785(MK785) | 25·Fc (Fc＜31.4) / 785 (31.4≦Fc) |
+///
+/// 判別できない製品名は `None`（呼び出し側の既定 σwy を用いる）。
+/// 許容応力度検定用の w_ft（[`high_strength_w_ft`]）とは別物であることに注意。
+pub fn ultimate_hoop_sigma_wy(grade: &str, fc: f64) -> Option<f64> {
+    let g = grade.trim().to_uppercase();
+    let m = |cands: &[&str]| {
+        cands
+            .iter()
+            .any(|c| g.starts_with(c.to_uppercase().as_str()))
+    };
+    let v = if is_ultimate_hoop_1275_class(grade) {
+        (25.0 * fc).min(1275.0)
+    } else if m(&[
+        "UB785",
+        "KW785",
+        "KSS785",
+        "ウルボン785",
+        "リバーボン785",
+        "ｳﾙﾎﾞﾝ785",
+        "ﾘﾊﾞｰﾎﾞﾝ785",
+        "スミフープ",
+        "ストロングフープ",
+        "デーフープ",
+    ]) {
+        (25.0 * fc).min(785.0)
+    } else if m(&["SHD685", "SPR685"]) {
+        (25.0 * fc).min(685.0)
+    } else if m(&["HDC685"]) {
+        685.0
+    } else if m(&["KH785"]) {
+        if fc < 27.4 {
+            25.0 * fc
+        } else {
+            785.0
+        }
+    } else if m(&["SPR785"]) {
+        if fc < 32.0 {
+            25.0 * fc
+        } else {
+            785.0
+        }
+    } else if m(&["MK785"]) {
+        if fc < 31.4 {
+            25.0 * fc
+        } else {
+            785.0
+        }
+    } else {
+        return None;
+    };
+    Some(v)
+}
+
+/// 高強度せん断補強筋使用時のコンクリート圧縮強度有効係数 ν0（終局検定・
+/// 塑性理論式用の製品別式）。
+///
+/// - 1275 級（ウルボン1275・リバーボン1275）: `ν0 = 0.7·(1.0 − Fc/140)`
+///   （恒等的に標準式 `0.7 − Fc/200` と一致する。0.7/140 = 1/200）
+/// - その他の判別できた高強度製品（785/685 級）: `ν0 = 0.7·(0.7 − Fc/200)`
+/// - 判別できない製品名は `None`（標準式 `ν0 = 0.7 − Fc/200` を用いる）
+pub fn ultimate_hoop_nu0(grade: &str, fc: f64) -> Option<f64> {
+    if is_ultimate_hoop_1275_class(grade) {
+        Some((0.7 * (1.0 - fc / 140.0)).max(0.0))
+    } else if ultimate_hoop_sigma_wy(grade, fc).is_some() {
+        Some((0.7 * (0.7 - fc / 200.0)).max(0.0))
+    } else {
+        None
+    }
+}
+
+/// 高強度せん断補強筋の**終局検定用** pw 上限（小数）。
+///
+/// 1275 級は柱かつ Fc＜27 N/mm² のとき 0.8%、それ以外 1.2%。その他の判別できた
+/// 高強度製品は 1.2%。判別できない製品名は `None`（上限なし＝pw·σwy ≤ ν·Fc/2 の
+/// 一般制約のみ）。許容応力度検定用の [`high_strength_pw_cap`] とは別物。
+pub fn ultimate_hoop_pw_cap(grade: &str, fc: f64, is_column: bool) -> Option<f64> {
+    if is_ultimate_hoop_1275_class(grade) {
+        Some(if is_column && fc < 27.0 { 0.008 } else { 0.012 })
+    } else if ultimate_hoop_sigma_wy(grade, fc).is_some() {
+        Some(0.012)
+    } else {
+        None
+    }
+}
+
+// ============================================================================
 // 4. 鋼材（鋼構造設計規準 1973・構造規定。板厚 [mm] 区分対応の F 値）
 // ============================================================================
 
@@ -647,6 +765,46 @@ mod tests {
         assert!((high_strength_w_ft("SBPD1275", false) - 585.0).abs() < 1e-9);
         assert!((high_strength_w_ft("UB785", false) - 590.0).abs() < 1e-9);
         assert!((high_strength_w_ft("KH785", true) - 195.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_ultimate_hoop_sigma_wy_products() {
+        // min(25Fc, 上限) 系: Fc=24 → 25·24=600 が支配。Fc=60 → 上限が支配。
+        assert!((ultimate_hoop_sigma_wy("SBPD1275", 24.0).unwrap() - 600.0).abs() < 1e-9);
+        assert!((ultimate_hoop_sigma_wy("SBPD1275", 60.0).unwrap() - 1275.0).abs() < 1e-9);
+        assert!((ultimate_hoop_sigma_wy("SBPDN1275/1420", 60.0).unwrap() - 1275.0).abs() < 1e-9);
+        assert!((ultimate_hoop_sigma_wy("UB785", 60.0).unwrap() - 785.0).abs() < 1e-9);
+        assert!((ultimate_hoop_sigma_wy("KSS785", 24.0).unwrap() - 600.0).abs() < 1e-9);
+        assert!((ultimate_hoop_sigma_wy("SHD685", 60.0).unwrap() - 685.0).abs() < 1e-9);
+        // HDC685 は Fc 非依存の 685。
+        assert!((ultimate_hoop_sigma_wy("HDC685", 24.0).unwrap() - 685.0).abs() < 1e-9);
+        // しきい値切替系: KH785 は Fc=27.4 で 25Fc→785 に跳ぶ。
+        assert!((ultimate_hoop_sigma_wy("KH785", 27.0).unwrap() - 675.0).abs() < 1e-9);
+        assert!((ultimate_hoop_sigma_wy("KH785", 27.4).unwrap() - 785.0).abs() < 1e-9);
+        assert!((ultimate_hoop_sigma_wy("SPR785", 31.0).unwrap() - 775.0).abs() < 1e-9);
+        assert!((ultimate_hoop_sigma_wy("SPR785", 32.0).unwrap() - 785.0).abs() < 1e-9);
+        assert!((ultimate_hoop_sigma_wy("MK785", 31.0).unwrap() - 775.0).abs() < 1e-9);
+        assert!((ultimate_hoop_sigma_wy("MK785", 31.4).unwrap() - 785.0).abs() < 1e-9);
+        // 未知製品は None。
+        assert!(ultimate_hoop_sigma_wy("SD295", 24.0).is_none());
+        assert!(ultimate_hoop_sigma_wy("XYZ999", 24.0).is_none());
+    }
+
+    #[test]
+    fn test_ultimate_hoop_nu0_and_pw_cap() {
+        // 1275 級: ν0 = 0.7·(1.0−Fc/140)。
+        let nu = ultimate_hoop_nu0("SBPD1275", 24.0).unwrap();
+        assert!((nu - 0.7 * (1.0 - 24.0 / 140.0)).abs() < 1e-12);
+        // 785/685 級: ν0 = 0.7·(0.7−Fc/200)。
+        let nu2 = ultimate_hoop_nu0("UB785", 24.0).unwrap();
+        assert!((nu2 - 0.7 * (0.7 - 24.0 / 200.0)).abs() < 1e-12);
+        assert!(ultimate_hoop_nu0("SD295", 24.0).is_none());
+        // pw 上限: 1275 級の柱かつ Fc<27 のみ 0.8%、それ以外 1.2%。
+        assert!((ultimate_hoop_pw_cap("SBPD1275", 24.0, true).unwrap() - 0.008).abs() < 1e-12);
+        assert!((ultimate_hoop_pw_cap("SBPD1275", 24.0, false).unwrap() - 0.012).abs() < 1e-12);
+        assert!((ultimate_hoop_pw_cap("SBPD1275", 30.0, true).unwrap() - 0.012).abs() < 1e-12);
+        assert!((ultimate_hoop_pw_cap("KH785", 24.0, true).unwrap() - 0.012).abs() < 1e-12);
+        assert!(ultimate_hoop_pw_cap("SD295", 24.0, true).is_none());
     }
 
     // ------------------------------------------------------------------

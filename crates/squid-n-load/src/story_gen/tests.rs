@@ -725,6 +725,77 @@ fn test_wall_self_weight_included_in_story_weight() {
 }
 
 #[test]
+fn test_wall_self_weight_uses_clear_dimensions_of_boundary_members() {
+    // §壁自重: 耐震壁の重量は周辺の柱梁の内法寸法で計算する。
+    // 側柱 500 角 ×2、上下梁 400×700 を壁の 4 辺に配置すると、
+    // 内法係数 = (L−500/2×2)/L × (H−700/2×2)/H が芯々面積に乗じられる。
+    let mut model = wall_model();
+    // 側柱・上下梁用の断面（線材）。
+    model.sections.push(Section {
+        id: SectionId(1),
+        name: "C500".into(),
+        area: 0.0, // 自重 0（壁重量のみを観測するため）
+        iy: 1.0,
+        iz: 1.0,
+        j: 1.0,
+        depth: 500.0,
+        width: 500.0,
+        as_y: 0.0,
+        as_z: 0.0,
+        panel_thickness: None,
+        thickness: None,
+        shape: None,
+    });
+    model.sections.push(Section {
+        id: SectionId(2),
+        name: "G400x700".into(),
+        area: 0.0,
+        iy: 1.0,
+        iz: 1.0,
+        j: 1.0,
+        depth: 700.0,
+        width: 400.0,
+        as_y: 0.0,
+        as_z: 0.0,
+        panel_thickness: None,
+        thickness: None,
+        shape: None,
+    });
+    let line = |id: u32, sec: u32, n0: u32, n1: u32| ElementData {
+        id: ElemId(id),
+        kind: ElementKind::Beam,
+        nodes: [NodeId(n0), NodeId(n1)].into_iter().collect(),
+        section: Some(SectionId(sec)),
+        material: Some(MaterialId(0)),
+        local_axis: LocalAxis {
+            ref_vector: [0.0, 0.0, 1.0],
+        },
+        end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+        force_regime: ForceRegime::Auto,
+        rigid_zone: Default::default(),
+        plastic_zone: None,
+        spring: None,
+    };
+    // 壁節点順は [0,1,2,3] = 下辺(0-1)・右柱(1-2)・上辺(2-3)・左柱(3-0)。
+    model.elements.push(line(1, 1, 1, 2)); // 右側柱
+    model.elements.push(line(2, 1, 3, 0)); // 左側柱
+    model.elements.push(line(3, 2, 0, 1)); // 下梁
+    model.elements.push(line(4, 2, 2, 3)); // 上梁
+
+    let gen = generate_stories(&model, None).unwrap();
+    let (l, h) = (4000.0_f64, 3000.0_f64);
+    let factor = ((l - 2.0 * 250.0) / l) * ((h - 2.0 * 350.0) / h);
+    let w_total = 2.4e-9 * 150.0 * (l * h * factor) * GRAVITY_MM_S2;
+    let expected = w_total / 2.0; // 上端2節点分のみ階重量に算入
+    assert!(
+        (gen.stories[0].seismic_weight.unwrap() - expected).abs() < 1e-6,
+        "got={}, expected={}",
+        gen.stories[0].seismic_weight.unwrap(),
+        expected
+    );
+}
+
+#[test]
 fn test_generate_stories_multi_sums_multiple_gravity_cases_and_dedupes() {
     let mut model = asymmetric_weight_model();
     model.load_cases.push(LoadCase {

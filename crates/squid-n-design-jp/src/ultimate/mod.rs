@@ -91,6 +91,10 @@ pub struct MemberDemand {
     /// 分子を `(Qsu − QL)`・`(Qbu − QL)` とする（余裕率
     /// `(Qsu−QL)/Qmu ≥ 1.0` の定義。`None` は従来どおり QL=0 扱い）。
     pub q_long: Option<f64>,
+    /// 長期荷重による単純梁せん断力 Q0 [N]（絶対値で扱う）。せん断補強筋に
+    /// MK785/SPR785/SPR685 を使用した部材では、余裕率の QL 控除を `QL=Q0` と
+    /// 読み替える（各製品の技術評定の規定）。`None` のときは `q_long` を用いる。
+    pub q_simple: Option<f64>,
 }
 
 impl MemberDemand {
@@ -104,6 +108,7 @@ impl MemberDemand {
             shear_weak: None,
             rp: None,
             q_long: None,
+            q_simple: None,
         }
     }
 
@@ -127,6 +132,7 @@ impl MemberDemand {
             shear_weak: Some(shear_weak),
             rp: Some(rp),
             q_long: None,
+            q_simple: None,
         }
     }
 }
@@ -344,7 +350,9 @@ fn column_axis_shear(
     let jt = 7.0 * d_eff / 8.0;
     let at = bar_set_area(main) / 2.0;
     let pw = hoop_pw(rebar, b_dir);
-    let qsu = member_shear_strength(b_dir, d_dir, jt, pw, rebar, fc, n_axial, l_clear, opts);
+    let qsu = member_shear_strength(
+        b_dir, d_dir, jt, pw, rebar, fc, n_axial, l_clear, true, opts,
+    );
     let cap = RcCapacityInput {
         b: b_dir,
         d: d_dir,
@@ -432,6 +440,7 @@ fn member_vu_ductility(
     fc: f64,
     n_axial: f64,
     l_clear: f64,
+    sigma_wy: f64,
     opts: &UltimateShearOptions,
 ) -> f64 {
     let (be, n_s) = ductility_be_ns(b_dir, rebar);
@@ -445,7 +454,7 @@ fn member_vu_ductility(
         be,
         je,
         pwe,
-        sigma_wy: opts.sigma_wy,
+        sigma_wy,
         s,
         n_s,
         l_clear,
@@ -464,7 +473,40 @@ fn ductility_be_ns(b_dir: f64, rebar: &RcRebar) -> (f64, u32) {
     (be, n_s)
 }
 
+/// 部材のせん断補強筋の終局検定用 σwy・ν0 上書き・上限適用後 pw を解決する。
+///
+/// `ShearBar.grade` が高強度せん断補強筋の既知製品の場合、製品別の
+/// σwy（min(25·Fc, 上限) 等）・ν0（1275 級 0.7(1.0−Fc/140)、785/685 級
+/// 0.7(0.7−Fc/200)）・pw 上限（1.2%、1275 級の柱かつ Fc＜27 は 0.8%）を適用する
+/// （[`crate::material_strength::ultimate_hoop_sigma_wy`] ほか）。
+/// 普通強度・判別不能な製品名は (opts.sigma_wy, None, pw) のまま。
+fn resolve_hoop_ultimate(
+    rebar: &RcRebar,
+    fc: f64,
+    pw: f64,
+    is_column: bool,
+    opts: &UltimateShearOptions,
+) -> (f64, Option<f64>, f64) {
+    use crate::material_strength::{
+        ultimate_hoop_nu0, ultimate_hoop_pw_cap, ultimate_hoop_sigma_wy,
+    };
+    let grade = rebar.shear.grade.as_deref();
+    let sigma_wy = grade
+        .and_then(|g| ultimate_hoop_sigma_wy(g, fc))
+        .unwrap_or(opts.sigma_wy);
+    let nu0_override = grade.and_then(|g| ultimate_hoop_nu0(g, fc));
+    let pw_capped = match grade.and_then(|g| ultimate_hoop_pw_cap(g, fc, is_column)) {
+        Some(cap) => pw.min(cap),
+        None => pw,
+    };
+    (sigma_wy, nu0_override, pw_capped)
+}
+
 /// 選択された [`ShearMethod`] に応じた終局せん断強度 `Qsu`/`Vu` [N]。
+///
+/// 高強度せん断補強筋（`ShearBar.grade`）使用時は製品別の σwy・ν0・pw 上限を
+/// 適用する（[`resolve_hoop_ultimate`]）。靭性指針式（Vu）には製品別 σwy のみ
+/// 適用し、ν は指針の標準式のまま（製品別 ν は塑性理論式の表による規定のため）。
 #[allow(clippy::too_many_arguments)]
 fn member_shear_strength(
     b_dir: f64,
@@ -475,23 +517,26 @@ fn member_shear_strength(
     fc: f64,
     n_axial: f64,
     l_clear: f64,
+    is_column: bool,
     opts: &UltimateShearOptions,
 ) -> f64 {
+    let (sigma_wy, nu0_override, pw) = resolve_hoop_ultimate(rebar, fc, pw, is_column, opts);
     match opts.shear_method {
         ShearMethod::Plastic => rc_shear_qsu_plastic(&RcPlasticShearInput {
             b: b_dir,
             d_full: d_dir,
             jt,
             pw,
-            sigma_wy: opts.sigma_wy,
+            sigma_wy,
             l_clear,
             fc,
             rp: opts.rp,
             lightweight: opts.lightweight,
+            nu0_override,
         }),
-        ShearMethod::Ductility => {
-            member_vu_ductility(b_dir, d_dir, jt, rebar, fc, n_axial, l_clear, opts)
-        }
+        ShearMethod::Ductility => member_vu_ductility(
+            b_dir, d_dir, jt, rebar, fc, n_axial, l_clear, sigma_wy, opts,
+        ),
     }
 }
 
@@ -572,7 +617,18 @@ fn check_member(
     };
 
     // 終局せん断強度 Qsu（塑性理論式）または Vu（靭性指針式）。
-    let qsu = member_shear_strength(b, d, jt, pw, rebar, fc, n_axial, l_clear, opts);
+    let qsu = member_shear_strength(
+        b,
+        d,
+        jt,
+        pw,
+        rebar,
+        fc,
+        n_axial,
+        l_clear,
+        matches!(kind, MemberKind::Column),
+        opts,
+    );
 
     // 付着割裂耐力 Qbu。
     let (qbu, tau_bu) = if opts.include_bond {
@@ -637,7 +693,28 @@ fn check_member(
 
     // 梁の余裕率は分子から長期せん断力 QL を控除する
     // （(Qsu−QL)/Qmu・(Qbu−QL)/Qmu ≥ 1.0。QL 未指定は 0 扱い＝従来動作）。
-    let ql = demand.q_long.map(|q| q.abs()).unwrap_or(0.0);
+    // せん断補強筋が MK785/SPR785/SPR685 の場合は QL=Q0（長期荷重による
+    // 単純梁せん断力）と読み替える（各製品の技術評定の規定。Q0 未算定時は QL）。
+    let use_q_simple = rebar
+        .shear
+        .grade
+        .as_deref()
+        .map(|g| {
+            let g = g.trim().to_uppercase();
+            ["MK785", "SPR785", "SPR685"]
+                .iter()
+                .any(|p| g.starts_with(p))
+        })
+        .unwrap_or(false);
+    let ql = if use_q_simple {
+        demand
+            .q_simple
+            .or(demand.q_long)
+            .map(|q| q.abs())
+            .unwrap_or(0.0)
+    } else {
+        demand.q_long.map(|q| q.abs()).unwrap_or(0.0)
+    };
     let shear_margin = if qmu > 0.0 {
         ((qsu - ql).max(0.0)) / qmu
     } else {
@@ -932,49 +1009,7 @@ pub fn collect_cft_ultimate_checks(
             .unwrap_or(0.0);
 
         // N-M 相互作用の終局曲げ耐力 Mu(N)。曲げは強軸（せい方向）で評価する。
-        let (bd, bb, bcd, bcb) = match *shape {
-            SectionShape::CftBox {
-                height,
-                width,
-                thick,
-            } => (height, width, height - 2.0 * thick, width - 2.0 * thick),
-            SectionShape::CftPipe { outer_dia, thick } => (
-                outer_dia,
-                outer_dia,
-                outer_dia - 2.0 * thick,
-                outer_dia - 2.0 * thick,
-            ),
-            _ => (d_section, d_section, d_section, d_section),
-        };
-        let bending = CftBendingInput {
-            circular,
-            d_steel: bd,
-            b_steel: bb,
-            c_d: bcd,
-            c_b: bcb,
-            t: thick,
-            fc,
-            fy,
-        };
-        // 短柱は短柱 N-M、中柱・長柱は座屈低減を考慮した中柱・長柱 N-M を用いる。
-        let mu_nm = match r.class {
-            CftColumnClass::Short => {
-                let ncu1 = cft_ncu1(&inp);
-                cft_short_column_mu(&bending, n_design, ncu1, r.ntu)
-            }
-            CftColumnClass::Medium | CftColumnClass::Long => cft_long_medium_column_mu(
-                &CftLongMediumInput {
-                    bending,
-                    is_long: r.class == CftColumnClass::Long,
-                    c_ncr: cft_concrete_buckling_axial(c_inertia, c_area, fc, lk),
-                    c_lambda1: cft_concrete_slenderness(c_inertia, c_area, fc, lk),
-                    nk: cft_nk(c_inertia, s_inertia, 205000.0, fc, lk),
-                    ncu_axial: r.ncu,
-                    ntu: r.ntu,
-                },
-                n_design,
-            ),
-        };
+        let mu_nm = cft_mu_nm(shape, fc, fy, n_design, lk, false).unwrap_or(0.0);
 
         let axial_margin = if n_design > 0.0 {
             if r.ncu > 0.0 {
@@ -1014,6 +1049,84 @@ pub fn collect_cft_ultimate_checks(
         });
     }
     out
+}
+
+/// CFT 柱の N-M 相互作用による終局曲げ耐力 `Mu(N)` [N·mm]（RESP-D「06 終局検定」
+/// CFT (3)。柱分類（短柱／中柱・長柱）に応じた式を選択する）。
+///
+/// - `n_design`: 設計軸力 [N]（**圧縮正**）。
+/// - `fy`: 鋼管の降伏強さ（F 値）[N/mm²]、`lk`: 座屈長さ [mm]。
+/// - `weak_axis`: 角形で幅方向（弱軸）まわりの曲げを評価する場合 true
+///   （円形は同値。柱分類・軸終局は断面代表せい `d_section` のまま評価する近似）。
+///
+/// 許容応力度検定の設計用せん断力 `QD1 = ΣcMy/h′` の cMy（=Mu(N)）にも用いる
+/// （[`crate::cft`]）。CFT 断面（CftBox/CftPipe）以外・Fc/Fy が 0 以下は `None`。
+pub fn cft_mu_nm(
+    shape: &SectionShape,
+    fc: f64,
+    fy: f64,
+    n_design: f64,
+    lk: f64,
+    weak_axis: bool,
+) -> Option<f64> {
+    if fc <= 0.0 || fy <= 0.0 {
+        return None;
+    }
+    let (circular, d_section, c_area, s_area, c_inertia, s_inertia) = cft_section_props(shape)?;
+    let (bd, bb, thick) = match *shape {
+        SectionShape::CftBox {
+            height,
+            width,
+            thick,
+        } => {
+            if weak_axis {
+                (width, height, thick)
+            } else {
+                (height, width, thick)
+            }
+        }
+        SectionShape::CftPipe { outer_dia, thick } => (outer_dia, outer_dia, thick),
+        _ => return None,
+    };
+    let inp = cft::CftAxialInput {
+        circular,
+        d_section,
+        c_area,
+        s_area,
+        c_inertia,
+        s_inertia,
+        fc,
+        fy,
+        s_young: 205000.0,
+        lk,
+    };
+    let r = cft_axial_ultimate(&inp);
+    let bending = CftBendingInput {
+        circular,
+        d_steel: bd,
+        b_steel: bb,
+        c_d: (bd - 2.0 * thick).max(0.0),
+        c_b: (bb - 2.0 * thick).max(0.0),
+        t: thick,
+        fc,
+        fy,
+    };
+    let mu = match r.class {
+        CftColumnClass::Short => cft_short_column_mu(&bending, n_design, cft_ncu1(&inp), r.ntu),
+        CftColumnClass::Medium | CftColumnClass::Long => cft_long_medium_column_mu(
+            &CftLongMediumInput {
+                bending,
+                is_long: r.class == CftColumnClass::Long,
+                c_ncr: cft_concrete_buckling_axial(c_inertia, c_area, fc, lk),
+                c_lambda1: cft_concrete_slenderness(c_inertia, c_area, fc, lk),
+                nk: cft_nk(c_inertia, s_inertia, 205000.0, fc, lk),
+                ncu_axial: r.ncu,
+                ntu: r.ntu,
+            },
+            n_design,
+        ),
+    };
+    Some(mu)
 }
 
 #[cfg(test)]
