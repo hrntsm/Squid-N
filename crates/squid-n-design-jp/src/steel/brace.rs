@@ -1,5 +1,5 @@
-//! 鉄骨ブレースの断面検定（RESP-D マニュアル「04 断面検定」鋼構造部分
-//! 「鉄骨ブレースの断面検定」）。
+//! 鉄骨ブレースの断面検定（鋼構造設計規準の
+//! 鉄骨ブレースの許容応力度検定）。
 
 use crate::material_strength::{steel_fc, steel_ft};
 use crate::{CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
@@ -7,7 +7,7 @@ use squid_n_core::model::Section;
 
 use super::{nonzero, safe_denom};
 
-/// 鉄骨ブレースの断面検定（マニュアル「鉄骨ブレースの断面検定」）。
+/// 鉄骨ブレースの断面検定（鋼構造設計規準）。
 ///
 /// 軸力のみ（曲げ・せん断は考慮しない）: 引張 `σt/ft`、圧縮 `σc/fc`（座屈考慮）。
 pub(crate) fn check_brace(

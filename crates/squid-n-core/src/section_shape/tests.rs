@@ -216,7 +216,7 @@ fn test_rc_rect_area() {
 
 #[test]
 fn test_rc_rect_shear_area_is_gross_over_kappa() {
-    // RESP-D 計算編 02: RC の As = B·D/κ（κ=1.2）。鉄筋断面積ではない。
+    // 材料力学: RC の As = B·D/κ（κ=1.2）。鉄筋断面積ではない。
     let shape = SectionShape::RcRect {
         b: 500.0,
         d: 500.0,
@@ -248,7 +248,7 @@ fn test_rc_rect_shear_area_is_gross_over_kappa() {
 
 #[test]
 fn test_steel_h_shear_area_is_web_and_flange() {
-    // RESP-D 計算編 02: S の As = Aw/κ（κ=1.0）。強軸側(as_z)=ウェブ、弱軸側(as_y)=フランジ。
+    // 材料力学: S の As = Aw/κ（κ=1.0）。強軸側(as_z)=ウェブ、弱軸側(as_y)=フランジ。
     let shape = SectionShape::SteelH {
         height: 400.0,
         width: 200.0,

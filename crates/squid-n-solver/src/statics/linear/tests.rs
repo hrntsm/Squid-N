@@ -1250,7 +1250,7 @@ fn test_clamped_plate_convergence() {
     );
 }
 
-// ===== 長期応力解析: 長期軸力無効化（RESP-D 計算編03「応力解析」）=====
+// ===== 長期応力解析: 長期軸力無効化（一貫構造計算プログラムの実務慣行）=====
 //
 // 1 スパン・2 柱・頂部大梁・対角ブレース 1 本のモデル（ブレース付きラーメン）。
 // 柱・大梁は Fixed-Fixed（曲げ骨組）、ブレースは Pinned-Pinned のトラス要素。
@@ -1518,7 +1518,7 @@ fn axial_force(res: &StaticOnce, elem: ElemId) -> f64 {
 /// 検証1: `no_long_axial_brace=true` の長期ケースでは、ブレース軸力がほぼ0
 /// （元の1e-3倍以下）になり、周囲の柱（柱A。ブレースが基部で直接取り付く側の
 /// 柱で、荷重も直接負担する主経路）の軸力の絶対値が増えること
-/// （RESP-D マニュアル計算編03「応力解析」）。
+/// （一貫構造計算プログラムの実務慣行）。
 #[test]
 fn test_no_long_axial_brace_zeros_brace_force_and_increases_column() {
     let mut model = braced_frame(squid_n_core::model::LoadCaseKind::Dead);

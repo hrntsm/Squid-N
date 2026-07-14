@@ -16,7 +16,7 @@ const MULTI_OPENING_MODES: [MultiOpeningMode; 3] = [
     MultiOpeningMode::Auto,
 ];
 
-/// `MultiOpeningMode` の表示ラベル（RESP-D マニュアル計算編 02「剛性計算」の用語）。
+/// `MultiOpeningMode` の表示ラベル（RC規準「耐震壁の開口」の用語）。
 fn multi_opening_mode_label(mode: MultiOpeningMode) -> &'static str {
     match mode {
         MultiOpeningMode::Equivalent => "等価開口とする",
@@ -161,7 +161,7 @@ pub fn wall_attrs_table(ui: &mut egui::Ui, app: &mut App) {
             });
         combo
             .response
-            .on_hover_text("自動判定は開口間距離 l が l<1.5h または l<1m のとき包絡開口とみなします(h: 包絡開口とした場合の高さ。RESP-D計算編02)。");
+            .on_hover_text("自動判定は開口間距離 l が l<1.5h または l<1m のとき包絡開口とみなします(h: 包絡開口とした場合の高さ。RC規準「耐震壁の開口」)。");
     });
     ui.label(
         "このモードは剛性の開口低減・耐震壁判定・検定の開口評価に適用されます\

@@ -144,8 +144,7 @@ fn distribute_pi_over_slice(diaphragms: &[DiaphragmDef], pi: f64) -> Vec<(NodeId
 }
 
 /// 階の水平力 Pi を階内の剛床（ダイアフラム）ごとに分配する
-/// （RESP-D マニュアル「多剛床の設計用せん断力」：水平力を剛床ごとの重量比で
-/// 分配する）。
+/// （多剛床の設計用せん断力：水平力を剛床ごとの重量比で分配する）。
 ///
 /// - 剛床が 1 つの階: 従来どおり Pi を全量その剛床へ載せる。
 /// - 剛床が複数の階: `DiaphragmDef.weight` の比で按分する（`None` は 0 扱い）。
@@ -160,8 +159,8 @@ pub(crate) fn distribute_pi_over_diaphragms(story: &Story, pi: f64) -> Vec<(Node
     distribute_pi_over_slice(&story.diaphragms, pi)
 }
 
-/// 階の主系統（Ai 分布）に用いる地震用重量（RESP-D マニュアル「副剛床の Ci を
-/// 直接入力した場合」）。`ci_override` を持つ剛床の重量は主系統の Ai 分布から
+/// 階の主系統（Ai 分布：昭55建告1793号）に用いる地震用重量（副剛床の Ci を
+/// 直接入力した場合の扱い）。`ci_override` を持つ剛床の重量は主系統の Ai 分布から
 /// 除外する（主剛床は全剛床の Ci に従うが、副剛床は指定 Ci で別途計算するため）。
 /// `ci_override` を持つ剛床が無ければ `story.seismic_weight` をそのまま返す
 /// （既存挙動と厳密一致）。
@@ -183,7 +182,7 @@ pub(super) fn main_system_weight(story: &Story) -> f64 {
 /// - `ci_override` を持つ剛床（副剛床）: Pi の分配対象から除外し、代わりに
 ///   水平力 = `ci_override` × その剛床の `weight`（`weight=None` なら 0）を
 ///   別途作用させる（等価震度扱い。上階に同一系統の剛床が積み上がらない
-///   副剛床を想定。RESP-D マニュアル「副剛床の Ci を直接入力した場合」）。
+///   副剛床を想定。副剛床の Ci を直接入力した場合の扱い）。
 ///
 /// 全剛床が `ci_override` 無しなら [`distribute_pi_over_diaphragms`] と
 /// 厳密に一致する。
@@ -231,7 +230,7 @@ impl Analysis<'_> {
 
     /// 地震静的解析の水平力（Ai 分布）を荷重ケースとして構築して返す。
     /// `seismic_static_with` の載荷部分を切り出したもので、主軸の計算
-    /// （RESP-D 計算編03「応力解析 §主軸の計算」の P ベクトル）にも用いる。
+    /// （主軸の計算（構造力学）の P ベクトル）にも用いる。
     pub fn build_seismic_load_case(
         &self,
         cfg: SeismicCfg,

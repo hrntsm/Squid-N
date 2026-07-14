@@ -9,7 +9,7 @@ use squid_n_material::uniaxial::{Bilinear, UniaxialMaterial};
 use squid_n_section::fiber::{Fiber, FiberSection};
 use std::any::Any;
 
-/// ガウス点のファイバー断面と材料を構築する（RESP-D「05 非線形モデル」）。
+/// ガウス点のファイバー断面と材料を構築する（構造力学のファイバーモデル）。
 /// RC 断面（RcRect/RcCircle）はコンクリートファイバー格子に加え、主筋を点ファイバー
 /// （バイリニア鋼材）として**分離**して配置する（従来は均質コンクリート断面で
 /// 引張側鉄筋を無視していた）。それ以外（鋼材・複合断面）は均質格子とする。
@@ -234,7 +234,7 @@ impl FiberBeam {
         let shape = sec.and_then(|s| s.shape.as_ref());
         let fc = mat_ref.and_then(|m| m.fc);
         let fy = mat_ref.and_then(|m| m.fy);
-        // RC 断面はコンクリート格子＋主筋分離（RESP-D「05 非線形モデル」）。
+        // RC 断面はコンクリート格子＋主筋分離（構造力学のファイバーモデル）。
         let (sec_a, mats_a) = build_gauss_fibers(width, depth, nw, nd, shape, fc, e, fy);
         let (sec_b, mats_b) = build_gauss_fibers(width, depth, nw, nd, shape, fc, e, fy);
         let gauss_points = vec![
@@ -308,7 +308,7 @@ impl FiberBeam {
         let shape = sec.and_then(|s| s.shape.as_ref());
         let fc = mat_ref.and_then(|m| m.fc);
         let fy = mat_ref.and_then(|m| m.fy);
-        // RC 断面はコンクリート格子＋主筋分離（RESP-D「05 非線形モデル」）。
+        // RC 断面はコンクリート格子＋主筋分離（構造力学のファイバーモデル）。
         let (sec_a, mats_a) = build_gauss_fibers(width, depth, nw, nd, shape, fc, e, fy);
         let (sec_b, mats_b) = build_gauss_fibers(width, depth, nw, nd, shape, fc, e, fy);
         fb.gauss_points = vec![
@@ -738,7 +738,7 @@ impl ElementBehavior for FiberBeam {
         Ok(())
     }
 
-    /// 塑性率評価用の危険断面プローブ（RESP-D「05 非線形モデル」）。
+    /// 塑性率評価用の危険断面プローブ（構造力学のファイバーモデル）。
     /// 現在の `trial_disp`（ローカル系）から各ガウス点の曲率を復元し、曲率が
     /// 最大のガウス点（危険断面）についてファイバーひずみを集約する。
     fn ductility_probe(&self) -> Option<DuctilityProbe> {

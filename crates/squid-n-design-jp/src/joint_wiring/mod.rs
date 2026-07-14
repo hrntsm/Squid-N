@@ -1,5 +1,5 @@
 //! 節点単位の断面検定（柱梁接合部・パネルゾーン・冷間成形耐力比・耐震壁）の
-//! 入力組み立て（RESP-D マニュアル 04 断面検定）。
+//! 入力組み立て（令82条・各構造規準の断面検定）。
 //!
 //! [`crate::rc::joint`]・[`crate::rc::wall`]・[`crate::steel::panel_zone`]・
 //! [`crate::steel::cold_formed`]・[`crate::srrc::panel_zone`] の純関数群に対し、
@@ -15,7 +15,7 @@
 //!   （`NL + 1.5·NE` の割増は組合せ分離情報が無いため未対応）。
 //! - S 造パネルの梁段違い形式（せい差 150mm 以上）は判別せず標準形式で計算する。
 //! - S 造パネルの軸力比 n は最初に見つかった鋼柱 1 本の軸力から算定する
-//!   （マニュアルの「上下階の柱軸力の平均値＋ブレース軸力の鉛直方向成分」は
+//!   （本来の「上下階の柱軸力の平均値＋ブレース軸力の鉛直方向成分」は
 //!   未対応の簡略化）。パネルの Fy も同じ柱の鋼種から板厚 40mm 区分で解決する
 //!   （「下側柱の降伏強さ」の上下判別・実パネル厚の板厚区分は未対応。
 //!   tp > 40mm の極厚パネルでは F 値を過大評価しうる点に注意）。
@@ -25,7 +25,7 @@
 //!   の有無が登録されている場合は以下のとおり配線する。
 //!   - まず `Model::multi_opening_mode`（建物一律。既定は `Equivalent`）に
 //!     応じて `WallAttr::opening_dims_for(mode)` でモード適用後の個別開口
-//!     `(l0,h0)` 列を得る（RESP-D マニュアル計算編02「複数開口の取り扱い」）。
+//!     `(l0,h0)` 列を得る（RC規準（耐震壁の複数開口の等価化））。
 //!     - `Equivalent`: 個別開口をそのまま返す（従来どおり）。
 //!     - `Envelope`: 位置（`offset`）を持つ開口全体の包絡矩形 1 つに置換
 //!       する。位置不明の開口は包絡できないため個別のまま残る。
@@ -38,8 +38,8 @@
 //!     検定比が変わる。
 //!   - モード適用後のリストが複数残る場合（`Equivalent` で複数開口のまま、
 //!     `Auto` で包絡しきれない対が残る、`Envelope` で位置不明の開口が残る、
-//!     のいずれか）は、マニュアル「包絡できなくなった時点の開口状況で
-//!     『等価開口とする』と同様の判定を行います」に従い、
+//!     のいずれか）は、RC規準（耐震壁の複数開口の等価化）に従い、包絡できなく
+//!     なった時点の開口状況で「等価開口とする」と同様の判定を行い、
 //!     [`crate::wall_opening::equivalent_opening`] で面積総和を保つ単一の
 //!     等価開口 `(l0′,h0′)` に統合する。
 //!   - `opening_dims_for(mode)` が `None`（個別寸法未入力・合計面積のみ）の
@@ -55,7 +55,7 @@
 //!     このモード適用後の `(l0′,h0′)` から算定するため、判定・検定の双方が
 //!     選択したモードに整合する。
 //!   - 一方、耐震壁として扱ってよいか（スリットの有無・壁厚・開口周比 r0）は
-//!     [`crate::wall_opening::is_seismic_wall`]（RESP-D マニュアル 02 剛性計算）
+//!     [`crate::wall_opening::is_seismic_wall`]（RC規準（耐震壁判定））
 //!     で判定し、`false` の壁は本検定自体をスキップする（耐震壁ではない
 //!     壁に18条検定を適用しない）。
 //!
@@ -186,8 +186,8 @@ pub fn collect_joint_checks(
 ///
 /// `long_member_forces` に長期（G+P）組合せの部材内力を渡すと、冷間成形
 /// 角形鋼管の柱梁耐力比チェックの存在軸力を `N = NL + 1.5・NE`
-/// （NE = 当該ケースの軸力 − NL。RESP-D マニュアル 04「冷間成形角型鋼管の
-/// 断面検定」の Ds/Co = 1.5 割増）で算定する。None の場合は当該ケースの
+/// （NE = 当該ケースの軸力 − NL。冷間成形角形鋼管設計・施工マニュアルの
+/// Ds/Co = 1.5 割増）で算定する。None の場合は当該ケースの
 /// 軸力をそのまま用いる（従来動作）。地震時組合せの結果を渡すことを想定する。
 pub fn collect_joint_checks_with_long(
     model: &Model,
@@ -303,7 +303,7 @@ pub fn collect_joint_checks_with_long(
                 // モード適用後も複数開口が残る場合（Auto で包絡しきれない対
                 // が残る・Envelope で位置不明の開口が残る・Equivalent で
                 // 複数開口のまま）は、面積総和を保つ単一の等価開口に統合する
-                // （RESP-D マニュアル計算編02「複数開口の取り扱い」）。
+                // （RC規準（耐震壁の複数開口の等価化））。
                 Some(dims) => equivalent_opening(&dims, l, h),
                 // 個別寸法が未入力（合計面積のみ）の場合は従来どおり、壁と
                 // 同じ辺長比を持つ擬似ペアから等価開口を復元する（後方互換）。
@@ -326,7 +326,7 @@ pub fn collect_joint_checks_with_long(
         l0p = l0p.clamp(0.0, l);
         h0p = h0p.clamp(0.0, h);
 
-        // 耐震壁判定（RESP-D マニュアル 02 剛性計算）。スリットあり・壁厚
+        // 耐震壁判定（RC規準（耐震壁判定））。スリットあり・壁厚
         // <120mm・開口周比 r0>0.4 のいずれかに該当する壁は耐震壁として
         // 扱わないため、RC規準18条の耐震壁せん断検定自体を対象外とする。
         let r0 = opening_ratio_r0(h0p, l0p, h, l);
@@ -440,7 +440,7 @@ pub fn collect_joint_checks_with_long(
         let cr = rc_wall_shear_check(&inp);
         out.push((elem.nodes[0], "耐震壁(RC)".to_string(), cr));
 
-        // ── せん断非線形トリリニア骨格（Qc/βu/Qu、RESP-D「05 非線形モデル」）──
+        // ── せん断非線形トリリニア骨格（Qc/βu/Qu、技術基準解説書）──
         // 非線形解析のせん断ばね骨格。付帯柱の主筋量が得られる耐震壁のみ算定する。
         let aw = thickness * l + col_gross_area;
         let d_wall = l + sum_col_depth / 2.0;
@@ -504,7 +504,7 @@ pub fn collect_joint_checks_with_long(
                 CheckResult {
                     ratio,
                     ok: ratio <= 1.0,
-                    basis: "RESP-D 非線形モデル 耐震壁せん断トリリニア(Qc/βu/Qu)".to_string(),
+                    basis: "技術基準解説書 耐震壁せん断非線形(Qc/βu/Qu)".to_string(),
                     detail,
                 },
             ));
@@ -552,7 +552,7 @@ pub fn collect_joint_checks_with_long(
             } else {
                 0.8 * beam0.sec.depth
             };
-            // Qdj1 の ΣMy は「大梁の降伏モーメント」の和（マニュアル
+            // Qdj1 の ΣMy は「大梁の降伏モーメント」の和（技術基準解説書
             // Qdj1 = ΣMy/j・(1−ξ)）。弾性解析の梁端モーメントではなく、
             // 梁の QD1 と同じ略算降伏モーメント（rc_mu_simple、対称配筋・
             // スラブ筋非考慮）を用いる。RcRect でない梁（情報不足）は
@@ -618,7 +618,7 @@ pub fn collect_joint_checks_with_long(
             // 上端・下端鉄筋引張力 T・T′。梁の main_x（せい方向主筋）を上下対称配筋
             // と仮定し、片側（総断面積の半分）が降伏引張力を負担するとみなす。
             // スラブ筋の寄与は本配線では未加算（モデルに接合部位置のスラブ筋情報が
-            // 無いため。RESP-D は T にスラブ筋を含むため Qdu を安全側に過小評価しうる）。
+            // 無いため。T にスラブ筋を含める場合と比べ Qdu を安全側に過小評価しうる）。
             let (t_top, t_bottom) =
                 if let Some(SectionShape::RcRect { rebar, .. }) = &beam0.sec.shape {
                     let half_area = squid_n_core::section_shape::bar_set_area(&rebar.main_x) / 2.0;
@@ -664,7 +664,7 @@ pub fn collect_joint_checks_with_long(
                 CheckResult {
                     ratio,
                     ok: ratio <= 1.0,
-                    basis: "RESP-D 06 終局検定 接合部(Vju=κ·φ·Fj·bj·Dj)".to_string(),
+                    basis: "靭性保証型指針 柱梁接合部終局(Vju=κ·φ·Fj·bj·Dj)".to_string(),
                     detail: format!(
                         "κ={:.2}, φ={:.2}, Fj={:.3} N/mm², bj={:.1} mm, Dj={:.1} mm, \
                          Vju={:.1} N, T={:.1} N, T′={:.1} N, Qcu={:.1} N, Qdu={:.1} N, 余裕率={:.3}",
@@ -894,7 +894,7 @@ pub fn collect_joint_checks_with_long(
                 let n = c
                     .end_forces(nid)
                     .map(|fr| {
-                        // 圧縮正に変換して存在軸力を求める（RESP-D: N = NL+1.5・NE）。
+                        // 圧縮正に変換して存在軸力を求める（存在軸力 N = NL+1.5・NE）。
                         let n_cur = -fr[0];
                         let n_exist = match long_end_n(c, nid) {
                             Some(nl_signed) => {
@@ -951,7 +951,7 @@ pub fn collect_joint_checks_with_long(
                         })
                         .fold(0.0, f64::max);
                     // パネル軸力比 n は「上柱、下柱軸力の平均から計算する」
-                    // （マニュアル■パネル耐力。片側しか存在しない場合は
+                    // （冷間成形角形鋼管設計・施工マニュアル■パネル耐力。片側しか存在しない場合は
                     // 存在する柱の値がそのまま平均になる）。
                     let n_panel = (n_u + n_l) / 2.0;
                     let mpp = panel_mpp(dc, db, tp, f_l, n_panel);

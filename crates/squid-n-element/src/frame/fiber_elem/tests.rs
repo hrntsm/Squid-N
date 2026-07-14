@@ -1044,7 +1044,7 @@ fn test_plastic_zone_checkpoint_roundtrip() {
 }
 
 /// RC 断面（RcRect＋配筋）のファイバー柱は、コンクリート格子に加えて主筋が
-/// 点ファイバーとして分離配置される（RESP-D「05 非線形モデル」の鉄筋分離）。
+/// 点ファイバーとして分離配置される（構造力学のファイバーモデルにおける鉄筋分離）。
 /// 従来は均質コンクリート断面で引張鉄筋を無視していた。
 #[test]
 fn test_rc_fiber_section_includes_separated_rebar() {

@@ -1,5 +1,5 @@
-//! NewRC コンクリート構成則（RESP-D マニュアル「計算編 05 非線形モデル」
-//! 柱ファイバーモデルのコンクリート応力-ひずみ関係）。
+//! NewRC コンクリート構成則（建設省総合技術開発プロジェクト「New RC」の
+//! 柱ファイバーモデル用コンクリート応力-ひずみ関係。NewRC 式）。
 //!
 //! # 構成則
 //! 圧縮側は NewRC（有理式）モデル:
@@ -16,8 +16,8 @@
 //!
 //! 引張側は Ec の弾性 → ひび割れ（ε_cr=ft/Ec）後は応力を保持しない脆性型とする。
 //! 除荷・再載荷は最大経験ひずみへの原点指向割線（静的単調増加のプッシュオーバーでは
-//! 履歴の影響は小さい）。RESP-D の Fc60 超・ユーザー定義は Bilinear 骨格へ切替える
-//! 規定のため、本モデルは適用範囲（Fc≤60）でのみ用いること（呼び出し側で判定）。
+//! 履歴の影響は小さい）。Fc60 超・ユーザー定義強度は Bilinear 骨格へ切替える
+//! 扱いのため、本モデルは NewRC 式の適用範囲（Fc≤60）でのみ用いること（呼び出し側で判定）。
 
 use crate::state_serde::impl_material_serde;
 use crate::uniaxial::UniaxialMaterial;
@@ -25,7 +25,7 @@ use crate::uniaxial::UniaxialMaterial;
 /// N/mm² → kgf/cm²（1 kgf/cm² = 0.0980665 N/mm²）。
 const NMM2_TO_KGFCM2: f64 = 1.0 / 0.0980665;
 
-/// コンクリート履歴の除荷則（RESP-D「05 非線形モデル」）。
+/// コンクリート履歴の除荷則（本実装の既定）。
 /// 静的解析は逆行型（包絡線を可逆に辿る）、動的解析は原点指向型（最大経験ひずみ点
 /// から原点への割線で除荷・再載荷）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]

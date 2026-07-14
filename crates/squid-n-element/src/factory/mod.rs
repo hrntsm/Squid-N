@@ -78,7 +78,7 @@ fn is_on_rigid_diaphragm(data: &ElementData, model: &Model) -> bool {
 }
 
 /// 壁要素のせん断剛性に乗じる開口低減率 r = 1 − 1.25·√(開口面積/壁面積)
-/// （RESP-D 計算編 02「剛性計算」耐震壁の開口低減。式の原典実装は
+/// （RC規準（耐震壁）の開口低減。式の原典実装は
 /// `squid-n-design-jp::wall_opening::opening_reduction_r`。element は design-jp に
 /// 依存できないため、面積比による同値式をここで評価する）。
 ///
@@ -124,7 +124,7 @@ pub fn build_behavior(data: &ElementData, model: &Model) -> (Box<dyn ElementBeha
     match data.kind {
         ElementKind::Beam => {
             // RC 耐震壁の側柱: 面内方向は両端ピンのためモーメント・せん断を
-            // 負担しない（RESP-D 計算編 02「側柱の断面性能」）。該当する柱は
+            // 負担しない（RC規準の耐震壁規定・側柱の断面性能）。該当する柱は
             // 面内曲げ面のみ端部回転を静的縮約した要素へ差し替える。
             if let Some(axis) = crate::side_column::wall_side_column_release(data, model) {
                 let elem = crate::beam::BeamElement::new(data, model);
@@ -172,7 +172,7 @@ pub fn build_behavior(data: &ElementData, model: &Model) -> (Box<dyn ElementBeha
             Box::new(crate::beam::BeamElement::new(data, model)),
             ElemState::default(),
         ),
-        // Wall 要素：壁エレメントモデル（RESP-D 計算編 02。壁柱＋両端ピン剛梁の
+        // Wall 要素：壁エレメントモデル（壁エレメント置換モデル。壁柱＋両端ピン剛梁の
         // 4 節点 24 自由度要素）。開口低減率 r は要素内部で考慮される。
         // 耐震壁不成立（フレーム内雑壁）の壁は剛性を周辺の柱・梁の断面性能へ
         // 算入する（beam.rs）ため、壁要素自体は質量のみ保持し剛性は実質ゼロ。
@@ -203,7 +203,7 @@ pub fn build_behavior(data: &ElementData, model: &Model) -> (Box<dyn ElementBeha
                 }
             }
         }
-        // 一般ブレース：KB = factor·E·A/L（RESP-D マニュアル計算編02）。
+        // 一般ブレース：KB = factor·E·A/L（材料力学・トラス要素）。
         // 引張専用ブレースは弾性解析で剛性を1/2にモデル化する（factor=0.5）。
         ElementKind::Brace { tension_only } => {
             let factor = if tension_only { 0.5 } else { 1.0 };
@@ -212,19 +212,19 @@ pub fn build_behavior(data: &ElementData, model: &Model) -> (Box<dyn ElementBeha
                 ElemState::default(),
             )
         }
-        // 節点バネ：RESP-D マニュアル計算編03「応力解析」§部材の変形と自由度。
+        // 節点バネ：構造力学（部材の変形と自由度）。
         // 局所軸ごとに独立な弾性バネ（軸・せん断・曲げ回転。ねじりは既定 0）。
         ElementKind::NodalSpring => (
             Box::new(crate::spring::NodalSpringElement::new(data, model)),
             ElemState::default(),
         ),
-        // 免震支承材：RESP-D マニュアル計算編05「非線形モデル」免震支承材。
+        // 免震支承材：各免震部材指針・製品技術資料（Category B）。
         // 水平は非線形せん断（積層ゴム系バイリニア／摩擦ばね）、鉛直は弾性軸。
         ElementKind::Isolator => (
             Box::new(crate::isolator::IsolatorElement::new(data, model)),
             ElemState::default(),
         ),
-        // 制振ダンパー（RESP-D「07」制振要素）。種別で要素を切替える。
+        // 制振ダンパー（制振部材の力学モデル）。種別で要素を切替える。
         // - マクスウェル（速度依存型）: 静的・線形では Δt=0 で不活性、時刻歴で活性化。
         // - 履歴型バイリニア（鋼材系）: 変位依存の弾塑性軸ばね（静的・動的で作用）。
         ElementKind::Damper => {
@@ -262,8 +262,8 @@ pub fn build_nonlinear_behavior(
         ElementKind::Beam => match resolve_force_regime(data, model) {
             ResolvedRegime::ConcentratedSpring => {
                 let elem = crate::beam::BeamElement::new(data, model);
-                // 履歴則を解決（部材個別指定 → 構造種別ごとの既定表。RESP-D「07 非線形
-                // 解析（動的解析）」立体解析モデルの既定の非線形特性）。RC/SRC/CFT 梁は
+                // 履歴則を解決（部材個別指定 → 構造種別ごとの既定表。本実装の既定の
+                // 非線形特性は各履歴則の原典に基づく）。RC/SRC/CFT 梁は
                 // 武田型トリリニア、S 梁は標準型（kinematic バイリニア）を材端バネに用いる。
                 let rule = resolve_member_hysteresis(data, model);
                 let (spring_i, spring_j, use_mn) = build_flexural_springs(data, model, rule);
@@ -288,7 +288,7 @@ pub fn build_nonlinear_behavior(
             Box::new(crate::ms::MsElement::new(data, model)),
             ElemState::default(),
         ),
-        // 一般ブレース(弾塑性): 初期剛性1倍(RESP-D計算編02)。引張専用は
+        // 一般ブレース(弾塑性): 初期剛性1倍(材料力学・トラス要素)。引張専用は
         // 圧縮側の剛性・軸力を実質ゼロとするスラック挙動でモデル化する。
         ElementKind::Brace { tension_only } => {
             let truss = if tension_only {
@@ -318,7 +318,7 @@ fn build_fiber(data: &ElementData, model: &Model) -> crate::fiber_elem::FiberBea
     crate::fiber_elem::FiberBeam::with_plastic_zone(data, model, lp)
 }
 
-/// 部材の曲げ終局（降伏）モーメント My [N·mm]（RESP-D「05 非線形モデル」）。
+/// 部材の曲げ終局（降伏）モーメント My [N·mm]（技術基準解説書の曲げ終局強度）。
 /// RC=0.9·at·σy·j（[`squid_n_core::rc_capacity::rc_mu_simple`]）、鉄骨=Zp·σy（全塑性 Mp）、
 /// それ以外（複合断面・形状不明）は σy·Z弾性でフォールバックする。
 /// 従来の材端バネは σy·Z弾性を用いていたが、規準の曲げ終局強度へ改良する。
@@ -445,8 +445,8 @@ fn is_rc_like_section(data: &ElementData, model: &Model) -> bool {
     )
 }
 
-/// 部材の履歴則を解決する（属性 override → 構造種別ごとの既定表。RESP-D「07 非線形
-/// 解析（動的解析）」立体解析モデルの既定の非線形特性）。`HysteresisModel::Auto` は
+/// 部材の履歴則を解決する（属性 override → 構造種別ごとの既定表。本実装の既定の
+/// 非線形特性は各履歴則の原典に基づく）。`HysteresisModel::Auto` は
 /// 構造種別ごとの既定（RC/SRC/CFT=武田型、S=標準型）へ解決される。UI 表示にも用いる。
 pub fn resolve_member_hysteresis(data: &ElementData, model: &Model) -> HysteresisModel {
     match model.member_hysteresis(data.id) {
@@ -522,7 +522,7 @@ fn flexural_alpha_y(data: &ElementData, model: &Model) -> f64 {
     }
 }
 
-/// 材端曲げバネの復元力材料を履歴則に応じて構築する（RESP-D「07 履歴特性」）。
+/// 材端曲げバネの復元力材料を履歴則に応じて構築する（各履歴則の原典）。
 /// 戻り値の bool は N-M 相関（`set_yield`）を適用可能か（バイリニアのみ true）。
 /// 標準型・降伏モーメント不定は従来の kinematic バイリニアを用い、武田型/逆行型/
 /// 原点指向型/最大点指向型は [`HysteresisMaterial`] のトリリニア（原点指向はバイ

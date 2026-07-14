@@ -80,8 +80,7 @@ pub fn time_history_panel(ui: &mut egui::Ui, app: &mut App) {
     let peak = series.iter().cloned().fold(0.0f64, |m, v| m.max(v.abs()));
     ui.label(format!("最大絶対値: {:.4e}", peak));
 
-    // レインフロー計数（RESP-D「07 非線形解析（動的解析）」その他の解析機能の
-    // 累積損傷度計算で用いる ASTM E1049 3 点法）。表示中の代表応答に対する
+    // レインフロー計数（累積損傷度計算で用いる ASTM E1049 3 点法）。表示中の代表応答に対する
     // 等価繰返し数・最大振れ幅を参考表示する（累積損傷度 D の梁端 μ 収集は今後の拡張）。
     let cycles = squid_n_solver::damage::rainflow_cycles(series);
     let neq: f64 = cycles.iter().map(|c| c.count).sum();
@@ -92,7 +91,7 @@ pub fn time_history_panel(ui: &mut egui::Ui, app: &mut App) {
     ))
     .on_hover_text("累積損傷度計算(レインフロー法)の基礎計数（ASTM E1049 3 点法）。");
 
-    // 梁端累積損傷度 D（RESP-D「07」鉄骨梁端部の累積損傷度計算）。非線形時刻歴で
+    // 梁端累積損傷度 D（鉄骨梁端部の累積損傷度計算）。非線形時刻歴で
     // 各要素の危険断面塑性率 μ 時刻歴からレインフロー法で算定した値を表示する。
     if let Some(res) = app.results.as_ref().and_then(|r| r.time_history.as_ref()) {
         let dmax = res

@@ -59,7 +59,7 @@ impl HhtCfg {
 /// 地動加速度入力（基盤一様加振）。水平1〜2方向（R8）。
 /// `dt` はサンプリング間隔。`accel_x`/`accel_y` は同長さの時系列。
 /// `accel_theta` は位相差入力によるねじれ地動加速度 [rad/s²]（鉛直軸まわり。
-/// RESP-D「07」位相差入力解析。`None` はねじれ加振なし）。
+/// 多点位相差入力（構造力学）。`None` はねじれ加振なし）。
 pub struct GroundMotion {
     pub dt: f64,
     pub accel_x: Vec<f64>,
@@ -109,7 +109,7 @@ fn choose_record_dir_y(wave: &GroundMotion) -> bool {
 }
 
 /// 位相差入力（ねじれ加振）用の回転影響ベクトル × 質量 `M·r_θ` を構築する
-/// （RESP-D「07」位相差入力解析）。鉛直（Z）軸まわりの単位角加速度に対し、各節点は
+/// （多点位相差入力、構造力学）。鉛直（Z）軸まわりの単位角加速度に対し、各節点は
 /// 剛体回転 `ax=−(y−yc)`, `ay=(x−xc)` の並進と、回転自由度 rz=1 の影響を受ける
 /// （`(xc,yc)`＝節点幾何重心）。返り値は自由 DOF 空間の `M·r_θ`。
 fn theta_influence_m(
@@ -1203,14 +1203,14 @@ pub fn nonlinear_time_history_analysis(
     }
 
     let mut behaviors = build_behaviors(model);
-    // 制振（速度依存）要素へ時間刻みを通知する（RESP-D「07」制振要素）。マクスウェル
+    // 制振（速度依存）要素へ時間刻みを通知する（制振要素、Maxwell モデル等）。マクスウェル
     // 要素はこれで後退 Euler のダッシュポット積分が有効になる。dt<=0 の静的・線形解析
     // では通知されず不活性のまま。
     for b in behaviors.iter_mut() {
         b.set_time_step(dt);
     }
     // 累積損傷度用の塑性率 μ 時刻歴（要素ごと。塑性率プローブを持つ要素のみ収集）。
-    // RESP-D「07」その他の解析機能「鉄骨梁端部の累積損傷度計算」。
+    // レインフロー法（ASTM E1049-85）・Miner 則による鉄骨梁端部の累積損傷度計算。
     let mut mu_hist: Vec<Vec<f64>> = vec![Vec::new(); model.elements.len()];
 
     // 行列組立（縮約空間）
@@ -1415,7 +1415,7 @@ pub fn nonlinear_time_history_analysis(
             let k_t_red = reducer.reduce_k(&k_t_free);
 
             // 接線比例減衰（α1 一定 / h1 一定）は瞬間剛性から C を毎ステップ再構成する
-            // （RESP-D「07」減衰マトリクス「剛性変更に伴う減衰項の変更」）。それ以外は
+            // （剛性変更に伴う減衰項の変更、構造動力学）。それ以外は
             // 初期減衰 c_red を用いる。
             let c_tan = if damping.is_tangent_based() {
                 // h1 一定の {u} は初期剛性の1次固有ベクトル（u_mode1、固定）。
@@ -1563,7 +1563,7 @@ pub fn nonlinear_time_history_analysis(
     }
 
     // 各要素の μ 時刻歴からレインフロー法で累積損傷度 D を算定する
-    // （RESP-D「07」鉄骨梁端部の累積損傷度計算）。μ 時刻歴が空（塑性率プローブ
+    // （レインフロー法（ASTM E1049-85）・Miner 則。鉄骨梁端部の累積損傷度計算）。μ 時刻歴が空（塑性率プローブ
     // 非対応要素）の場合は 0。疲労特性 C・β は既定（要原典照合）。
     let fatigue = crate::damage::FatigueParams::default();
     let cumulative_ductility: Vec<f64> = mu_hist
@@ -1584,7 +1584,7 @@ fn build_behaviors(model: &Model) -> Vec<Box<dyn squid_n_element::behavior::Elem
     let mut behaviors = Vec::new();
     for elem in &model.elements {
         let (mut b, _) = build_nonlinear_behavior(elem, model);
-        // 動的解析: コンクリート履歴は原点指向型（RESP-D「05 非線形モデル」）。
+        // 動的解析: コンクリート履歴は原点指向型（各履歴則の原典）。
         b.set_concrete_hysteresis(true);
         behaviors.push(b);
     }

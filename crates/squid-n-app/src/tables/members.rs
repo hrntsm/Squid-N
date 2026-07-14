@@ -264,7 +264,7 @@ pub fn members_table(ui: &mut egui::Ui, app: &mut App) {
                     });
                 });
                 row.col(|ui| {
-                    // 履歴則（復元力特性）。RESP-D「07 非線形解析（動的解析）」履歴特性。
+                    // 履歴則（復元力特性）。非線形解析の材端履歴則。
                     // 梁のみ材端曲げバネへ反映（柱=ファイバー、ブレース=軸バイリニア）。
                     let current = app.model.member_hysteresis(elem.id);
                     let selected_text = match current {
@@ -383,7 +383,7 @@ pub fn members_table(ui: &mut egui::Ui, app: &mut App) {
 }
 
 /// 制振ダンパー要素（`ElementKind::Damper`）の諸元編集・削除の一覧
-/// （RESP-D「07 非線形解析（動的解析）」制振要素）。種別（マクスウェル＝速度依存型／
+/// （非線形動的解析の制振要素）。種別（マクスウェル＝速度依存型／
 /// 履歴型バイリニア＝鋼材系）を選択し、種別に応じた諸元を編集する。
 fn dampers_table(ui: &mut egui::Ui, app: &mut App) {
     use egui_extras::{Column, TableBuilder};

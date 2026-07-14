@@ -1,8 +1,8 @@
-//! 鉄骨鉄筋コンクリート造梁の**せん断終局強度**（RESP-D マニュアル「計算編 05
-//! 非線形モデル」SRC 梁のせん断復元力特性）。
+//! 鉄骨鉄筋コンクリート造梁の**せん断終局強度**（SRC 梁の
+//! せん断復元力特性）。
 //!
 //! # 位置付け
-//! 非線形解析のせん断ばね終局耐力を算定する純関数群。RESP-D は 3 式
+//! 非線形解析のせん断ばね終局耐力を算定する純関数群。せん断終局強度は 3 式
 //! （SRC規準／SRC診断式／構造関係技術基準解説書）から選択できる。本モジュールは
 //! 数式が一意な**構造関係技術基準解説書**式と**SRC規準**式を実装する。
 //! いずれも RC 部分 rQu と鉄骨部分 sQu の累加 `Qu = rQu + sQu`。
@@ -100,7 +100,7 @@ pub fn src_beam_shear_ultimate_src_standard(inp: &SrcBeamShearInput) -> f64 {
 }
 
 /// 非充腹 SRC 梁（格子材・ラチス材）のせん断終局強度の算定入力
-/// （荒川mean式系、RESP-D「05 非線形モデル」）。
+/// （荒川mean式系）。
 #[derive(Clone, Copy, Debug)]
 pub struct SrcNonSolidWebShearInput {
     /// コンクリート設計基準強度 Fc [N/mm²]。
@@ -152,7 +152,7 @@ fn nonweb_kappa(high: bool) -> f64 {
     }
 }
 
-/// 非充腹 SRC 梁（**格子材**）のせん断終局強度 Qsu [N]（RESP-D 非線形モデル）。
+/// 非充腹 SRC 梁（**格子材**）のせん断終局強度 Qsu [N]（荒川mean式系）。
 ///
 /// ```text
 /// Qsu = { κ·pt^0.23·kcs·(18+Fc)/(M/(Q·d)+0.12) + 0.85·√(rpw·rσwy)
@@ -181,7 +181,7 @@ pub fn src_beam_shear_grid(inp: &SrcNonSolidWebShearInput) -> f64 {
     (concrete + hoop) * inp.be * j
 }
 
-/// 非充腹 SRC 梁（**ラチス材**）のせん断終局強度 Qsu [N]（RESP-D 非線形モデル）。
+/// 非充腹 SRC 梁（**ラチス材**）のせん断終局強度 Qsu [N]（荒川mean式系）。
 ///
 /// ```text
 /// Qsu = { κ·rpt^0.23·kcs·(18+Fc)/(M/(Q·d)+0.12) + 0.85·√(rpw·rσwy) }·be·rj + sQu

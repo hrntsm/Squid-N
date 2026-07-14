@@ -7,9 +7,8 @@
 //! （[`floors_supported_by_column`]）の API を提供する。低減率を実際の
 //! 柱軸力算定へ適用する処理は別タスク（本モジュールは API 提供までがスコープ）。
 //!
-//! `Model.load_cfg.live_load_reduction`（既定 false = 低減を考慮しない、
-//! RESP-D と同じ既定）が有効な場合にのみ、呼び出し側でこの低減率を適用する
-//! ことを想定する。
+//! `Model.load_cfg.live_load_reduction`（既定 false = 低減を考慮しない）が
+//! 有効な場合にのみ、呼び出し側でこの低減率を適用することを想定する。
 
 use squid_n_core::ids::StoryId;
 use squid_n_core::model::{ElementData, Model};

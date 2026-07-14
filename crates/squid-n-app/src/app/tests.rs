@@ -146,7 +146,7 @@ fn aligned_portal_frame() -> squid_n_core::model::Model {
         });
     }
 
-    // RC 造ラーメン（S 造は RESP-D 計算編 02 に従い剛域長 0 となるため、
+    // RC 造ラーメン（S 造は剛域長 0 となるため、
     // 剛域自動算定の配管検証には RC 断面を用いる）。
     let rebar = squid_n_core::section_shape::RcRebar {
         main_x: squid_n_core::section_shape::BarSet {
@@ -1041,7 +1041,7 @@ fn test_holding_capacity_flow() {
 
 /// UI-13: `design_rank_auto = true` で鋼部材の幅厚比から部材ランクを自動判定する。
 /// portal_frame の柱(H-300x300x10x15)・梁(H-400x200x8x13)を、構造規定の
-/// 幅厚比表（RESP-D マニュアル 04 断面検定、`s_member_rank_by_kihon`）で
+/// 幅厚比表（鋼構造設計規準、`s_member_rank_by_kihon`）で
 /// 手計算した結果と一致することを確認する。
 /// - 柱(SN400B=400級): フランジ 150/15=10.0（>9.5 → FB）、ウェブ 27.0（≦43 → FA）→ FB
 /// - 梁(400級): フランジ 100/13≈7.69（≦9 → FA）、ウェブ 46.75（≦60 → FA）→ FA
@@ -2325,7 +2325,7 @@ fn test_run_wind_static() {
     );
 }
 
-/// 終局検定（RESP-D「06 終局検定」）の App 経由の一括算定を検証する。
+/// 終局検定（靭性保証型耐震設計指針）の App 経由の一括算定を検証する。
 /// RC 矩形の柱・梁について `compute_ultimate_checks` が部材別の終局せん断・付着
 /// 余裕度を返し、柱には軸終局耐力（Nuc/Nut）が付くことを確認する。
 #[test]

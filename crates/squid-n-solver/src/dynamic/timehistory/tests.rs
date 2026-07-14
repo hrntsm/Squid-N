@@ -1343,7 +1343,7 @@ fn test_nonlinear_time_history_sdof_plastic() {
         "peak should be reasonable, got {}",
         result.peak_disp[1][0]
     );
-    // 累積損傷度（RESP-D「07」鉄骨梁端部の累積損傷度）: 塑性化した要素で非ゼロになる。
+    // 累積損傷度（レインフロー法（ASTM E1049-85）・Miner 則）: 塑性化した要素で非ゼロになる。
     assert_eq!(result.cumulative_ductility.len(), model.elements.len());
     assert!(
         result.cumulative_ductility.iter().any(|&d| d > 0.0),
@@ -1353,7 +1353,7 @@ fn test_nonlinear_time_history_sdof_plastic() {
 }
 
 /// 接線剛性比例(α1一定・h1一定)・モード別の減衰が非線形時刻歴で収束し有限応答を返す
-/// ことを確認する（RESP-D「07」減衰マトリクス「剛性変更に伴う減衰項の変更」）。
+/// ことを確認する（剛性変更に伴う減衰項の変更、構造動力学）。
 #[test]
 fn test_nonlinear_time_history_extended_damping_models_run() {
     let base = fiber_column_model(100.0);
@@ -1413,7 +1413,7 @@ fn test_nonlinear_time_history_extended_damping_models_run() {
     }
 }
 
-/// 累積型/非累積型（RESP-D「07」）: C 一定なら両者は一致し、接線比例（C 変化）でも
+/// 累積型/非累積型（減衰力の評価方式、構造動力学）: C 一定なら両者は一致し、接線比例（C 変化）でも
 /// 累積型が収束して有限応答を返す。
 #[test]
 fn test_nonlinear_time_history_cumulative_vs_noncumulative() {
@@ -1555,7 +1555,7 @@ fn test_nonlinear_time_history_convergence() {
     );
 }
 
-/// 制振（マクスウェル）ダンパーが自由振動の応答を低減する（RESP-D「07」制振要素）。
+/// 制振（マクスウェル）ダンパーが自由振動の応答を低減する（制振要素、Maxwell モデル）。
 #[test]
 fn test_maxwell_damper_reduces_free_vibration() {
     use squid_n_core::model::{DamperAttr, DamperKind, DamperProps};

@@ -1,5 +1,4 @@
-//! 鉄骨梁端部の累積損傷度（RESP-D「07 非線形解析（動的解析）」その他の解析機能
-//! 「鉄骨梁端部の累積損傷度計算」）。
+//! 鉄骨梁端部の累積損傷度（レインフロー法（ASTM E1049-85）・Miner 則）。
 //!
 //! 梁端曲げ塑性率 μ の時刻歴から、以下の方法で累積損傷度 D を算定する純関数群。
 //!
@@ -132,7 +131,7 @@ pub fn cumulative_damage_max_amplitude(mu_max: f64, eta: f64, p: FatigueParams) 
     eta / (4.0 * (mu_max - 1.0)) * (mu_max / p.c).powf(1.0 / p.beta)
 }
 
-/// 累積損傷度の算定方式（RESP-D「07」）。
+/// 累積損傷度の算定方式（レインフロー法（ASTM E1049-85）・Miner 則）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DamageMethod {
     /// レインフロー法。

@@ -447,7 +447,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// RESP-D マニュアル計算編02「一般ブレースの剛性」対応: `ElementKind::Brace`
+    /// 一般ブレース要素（軸剛性 KB=E·A/L は材料力学）対応: `ElementKind::Brace`
     /// （構造体バリアント `tension_only`）を持つ要素が保存→読込で完全一致すること。
     #[test]
     fn test_roundtrip_preserves_brace_element() {

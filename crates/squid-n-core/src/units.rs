@@ -1,7 +1,7 @@
 pub const GRAVITY_MM_S2: f64 = 9_806.65;
 
-/// コンクリートの種類（単位体積重量表の行。RESP-D マニュアル「柱梁自重」）。
-/// 「04 断面検定」の許容応力度低減（軽量1種・2種は普通コンクリートの 0.9 倍）にも用いる。
+/// コンクリートの種類（単位体積重量表の行。固定荷重の自重算定に用いる）。
+/// 許容応力度低減（軽量1種・2種は普通コンクリートの 0.9 倍。技術基準解説書）にも用いる。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConcreteClass {
     #[default]
@@ -23,7 +23,7 @@ pub enum ConcreteComposition {
 }
 
 /// コンクリートの単位体積重量 [kN/m³]。
-/// RESP-D マニュアル「柱梁自重」の表（設計基準強度 Fc・種類・構造区分ごと）による。
+/// 固定荷重の単位体積重量表（設計基準強度 Fc・種類・構造区分ごと）による。
 /// 軽量コンクリートで表の範囲を超える Fc は最上段の値で頭打ちとする。
 pub fn concrete_unit_weight_kn_m3(fc: f64, class: ConcreteClass, comp: ConcreteComposition) -> f64 {
     let gamma_c = match class {
@@ -57,7 +57,7 @@ pub fn concrete_unit_weight_kn_m3(fc: f64, class: ConcreteClass, comp: ConcreteC
     }
 }
 
-/// 鋼材の単位体積重量 [kN/m³]（RESP-D マニュアル: γs = 77 kN/m³）。
+/// 鋼材の単位体積重量 [kN/m³]（固定荷重: γs = 77 kN/m³）。
 pub const STEEL_UNIT_WEIGHT_KN_M3: f64 = 77.0;
 
 pub mod to_internal {
@@ -132,7 +132,7 @@ mod tests {
     fn test_concrete_unit_weight_table() {
         use ConcreteClass::*;
         use ConcreteComposition::*;
-        // 普通コンクリート（マニュアル表の代表値）
+        // 普通コンクリート（単位体積重量表の代表値）
         assert_eq!(concrete_unit_weight_kn_m3(24.0, Normal, Plain), 23.0);
         assert_eq!(concrete_unit_weight_kn_m3(24.0, Normal, Rc), 24.0);
         assert_eq!(concrete_unit_weight_kn_m3(24.0, Normal, Src), 25.0);

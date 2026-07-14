@@ -1,5 +1,5 @@
-//! 鉄筋コンクリート造梁の**非線形復元力特性**（RESP-D マニュアル「計算編 05
-//! 非線形モデル」梁の曲げ・せん断・軸復元力特性）。
+//! 鉄筋コンクリート造梁の**非線形復元力特性**（技術基準解説書による
+//! 梁の曲げ・せん断・軸復元力特性）。
 //!
 //! # 位置付け
 //! [`super::beam`] が許容応力度検定を扱うのに対し、本モジュールは非線形解析の
@@ -105,7 +105,7 @@ pub struct RcBeamBending {
     pub alpha_y: f64,
 }
 
-/// RC 梁の曲げトリリニア骨格（Mc・My・αy）を算定する（RESP-D 非線形モデル）。
+/// RC 梁の曲げトリリニア骨格（Mc・My・αy）を算定する（技術基準解説書・菅野式）。
 pub fn rc_beam_bending(inp: &RcBeamBendingInput) -> RcBeamBending {
     let mc = rc_beam_crack_moment(inp.fc, inp.ze);
     let cap = RcCapacityInput {

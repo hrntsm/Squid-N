@@ -84,7 +84,7 @@ pub fn compute_story_metrics(
     compute_story_metrics_with(model, disp, dir, &StoryMetricsCtx::default())
 }
 
-/// 静的解析の変位から層指標を計算する（RESP-D 計算編 03「応力解析」準拠）。
+/// 静的解析の変位から層指標を計算する（構造力学・弾性応力解析）。
 ///
 /// - **層間変形角**: その階の柱の層間変形角の**最大値**（斜め柱除外。
 ///   `story_metrics::max_column_drift`）。柱が拾えない層は従来の
@@ -141,7 +141,7 @@ pub fn compute_story_metrics_with(
             model.stories[i - 1].elevation
         };
         heights.push((s.elevation - below_elev).max(1e-9));
-        // 層間変形角の確認用変位: 柱ごとの最大値（マニュアル 1/irs = max(δ)/iH）
+        // 層間変形角の確認用変位: 柱ごとの最大値（1/irs = max(δ)/iH）
         let drift = match max_column_drift(model, disp, d, s.id) {
             Some(cd) => cd.drift,
             None => {
@@ -152,7 +152,7 @@ pub fn compute_story_metrics_with(
         drifts.push(drift);
     }
 
-    // 剛性率は重心位置の層間変位 δg で算定（マニュアル 1/irs = iδg/iH）
+    // 剛性率は重心位置の層間変位 δg で算定（1/irs = iδg/iH）
     let cog_drifts = cog_story_drifts(model, disp, d);
     let rs_all = stiffness_ratios(&heights, &cog_drifts);
 
@@ -304,7 +304,7 @@ pub fn build_report_csv(app: &App) -> String {
         }
     }
 
-    // 主軸の計算（RESP-D 計算編03「応力解析 §主軸の計算」）。
+    // 主軸の計算（構造力学）。
     // X・Y 加力の弾性解析結果が揃っている場合のみ、水平力のなす仕事が極値をとる
     // 角度 Θ（tan2Θ = −Pᵗ(uy+vx)/Pᵗ(vy−ux)）を出力する。
     {

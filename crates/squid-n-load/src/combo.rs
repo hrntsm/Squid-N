@@ -1,13 +1,13 @@
 use squid_n_core::ids::LoadCaseId;
 use squid_n_core::model::LoadCombination;
 
-/// 多雪区域の積雪荷重低減係数（RESP-D マニュアル 04 断面検定「荷重の組合せ」）。
+/// 多雪区域の積雪荷重低減係数（令86条 多雪区域の荷重組合せ）。
 ///
 /// - `delta1`: 長期積雪 `G+P+δ1・S` の低減係数（既定 0.7）
 /// - `delta2`: 暴風時 `G+P+δ2・S±W` の低減係数（既定 0.35）
 /// - `delta3`: 地震時 `G+P+δ3・S±K` の低減係数（既定 0.35）
 ///
-/// マニュアルでは直接入力が可能（デフォルト δ1=0.7、δ2=δ3=0.35）。
+/// 本実装では直接入力が可能（デフォルト δ1=0.7、δ2=δ3=0.35）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SnowFactors {
     pub delta1: f64,
@@ -206,7 +206,7 @@ pub fn auto_combinations(
 
 /// 荷重組合せ名から断面検定の荷重継続性区分（長期/短期）を判定する。
 ///
-/// RESP-D マニュアル「04 断面検定 / 荷重の組合せ」: G+P（多雪区域では
+/// 令82条（標準組合せ）・令86条（多雪区域）: G+P（多雪区域では
 /// G+P+0.7S も）が長期（常時・積雪時の長期）、地震（K/E）・風（W）を含む
 /// 組合せおよび短期積雪（G+P+S）は短期（令82条）。
 /// [`standard_combinations`] の命名規約（"G + P ± Kx"・"G + P + 0.7S" 等）に
@@ -409,8 +409,8 @@ mod tests {
 
     #[test]
     fn test_snow_factors_direct_input() {
-        // δ1/δ2/δ3 の直接入力（RESP-D マニュアル: デフォルト 0.7/0.35/0.35、
-        // 直接入力可能）。名前・係数の両方に反映される。
+        // δ1/δ2/δ3 の直接入力（デフォルト 0.7/0.35/0.35、直接入力可能）。
+        // 名前・係数の両方に反映される。
         let input = ComboInput {
             dl: LoadCaseId(1),
             ll: LoadCaseId(2),

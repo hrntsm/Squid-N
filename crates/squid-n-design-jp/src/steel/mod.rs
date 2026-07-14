@@ -1,5 +1,5 @@
-//! 鋼構造の許容応力度と断面検定（RESP-D マニュアル「計算編 04 断面検定
-//! （許容応力度検定）」鋼構造部分、根拠規準は鋼構造設計規準 1973・構造規定）。
+//! 鋼構造の許容応力度と断面検定（許容応力度検定。
+//! 根拠規準は鋼構造設計規準 1973・構造規定）。
 //!
 //! ## 形状情報の取得について
 //!
@@ -17,7 +17,7 @@
 //! 命名規則にも合わない場合は `Other`（一般断面フォールバック）として扱い、
 //! 横座屈低減なし（fb=ft）・単純 τ/fs 検定になる。
 //!
-//! ## モジュール構成（RESP-D「04 断面検定」の章立てに対応）
+//! ## モジュール構成（断面検定の項目に対応）
 //!
 //! - [`section`][]: 鉄骨の断面検定における断面性能（許容曲げ応力度 fb・断面
 //!   二次半径・断面欠損・横座屈長さ）。
@@ -33,7 +33,7 @@ use squid_n_core::model::{Material, Section};
 use squid_n_core::section_shape::SectionShape;
 
 // 鋼材の F 値・許容応力度（ft/fs/fc・限界細長比 Λ・板厚区分）は
-// `crate::material_strength`（RESP-D「材料強度・許容応力度」節）へ集約した。鋼構造の
+// `crate::material_strength`（材料強度・許容応力度）へ集約した。鋼構造の
 // 検定で用いるものを再エクスポートし、従来のパスも維持する。
 pub use crate::material_strength::{
     big_lambda, plate_thickness, steel_f_value, steel_f_value_prefix, steel_fc, steel_fs, steel_ft,
@@ -41,7 +41,7 @@ pub use crate::material_strength::{
 
 mod beam;
 /// 鉄骨造梁の非線形復元力特性（全塑性 Mp・横座屈 Mcr・軸 Nu）。
-/// 非線形解析の材端バネ骨格に用いる（RESP-D「05 非線形モデル」）。
+/// 非線形解析の材端バネ骨格に用いる（鋼構造塑性設計指針）。
 pub mod beam_nonlinear;
 mod brace;
 /// 鉄骨造柱の座屈長さ係数 K（鋼構造塑性設計指針、水平移動非拘束）。

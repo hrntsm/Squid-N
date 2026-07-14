@@ -434,8 +434,8 @@ fn wall_envelope_mode_excludes_wall_when_envelope_ratio_too_large() {
     );
 }
 
-/// 側柱付き耐震壁は、せん断非線形トリリニア骨格（Qc/βu/Qu、RESP-D「05 非線形
-/// モデル」）が算定・出力される（付帯柱の主筋量が得られる壁のみ）。
+/// 側柱付き耐震壁は、せん断非線形トリリニア骨格（Qc/βu/Qu、技術基準解説書）が
+/// 算定・出力される（付帯柱の主筋量が得られる壁のみ）。
 #[test]
 fn wall_with_side_columns_emits_nonlinear_shear_trilinear() {
     use squid_n_core::section_shape::{BarSet, RcRebar, ShearBar};

@@ -1,4 +1,4 @@
-//! 終局検定（RESP-D「計算編 06 終局検定」）の結果表示ビュー。
+//! 終局検定（靭性保証型耐震設計指針）の結果表示ビュー。
 //!
 //! RC 矩形部材について、塑性理論式による終局せん断強度 Qsu・付着割裂耐力 Qbu と、
 //! 両端ヒンジ時せん断力 Qmu との余裕度（Qsu/Qmu, Qbu/Qmu）を一覧表示する。
@@ -30,7 +30,7 @@ fn margin_color(margin: f64) -> egui::Color32 {
 
 /// 終局検定表を描画する（設計タブ「終局検定」サブビュー）。
 pub fn ultimate_table(ui: &mut egui::Ui, app: &mut App) {
-    ui.strong("終局検定（RESP-D 06：塑性理論式による終局せん断・付着余裕度）");
+    ui.strong("終局検定（塑性理論式による終局せん断・付着余裕度）");
     ui.add_space(4.0);
 
     // ── 算定条件 ─────────────────────────────────────────
@@ -261,9 +261,9 @@ pub fn ultimate_table(ui: &mut egui::Ui, app: &mut App) {
         }
     }
 
-    // ── CFT 柱の軸終局耐力（RESP-D「06 終局検定」CFT）─────────────
+    // ── CFT 柱の軸終局耐力（CFT指針）─────────────
     ui.add_space(12.0);
-    ui.strong("CFT柱の軸終局耐力（RESP-D 06：CFT指針）");
+    ui.strong("CFT柱の軸終局耐力（CFT指針）");
     ui.add_space(4.0);
     match app.compute_cft_ultimate_checks() {
         Err(msg) => {

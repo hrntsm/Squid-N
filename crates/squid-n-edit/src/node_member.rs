@@ -251,7 +251,7 @@ impl EditCommand for AddMember {
     }
 }
 
-/// 制振ダンパー要素の追加（RESP-D「07 非線形解析（動的解析）」制振要素）。
+/// 制振ダンパー要素の追加（制振部材の力学モデル: Maxwell モデル等）。
 /// 要素（`ElementKind::Damper`）と特性（`Model::damper_attrs`）を原子的に追加する。
 /// 逆操作は部材削除（`DeleteMember` が側テーブル属性も退避・復元する）。
 pub struct AddDamper {

@@ -16,13 +16,13 @@ impl Default for RigidZoneRule {
     }
 }
 
-/// 部材の構造種別（RESP-D マニュアル「剛域の計算」の RC/SRC 系・S 系区分）。
+/// 部材の構造種別（技術基準解説書「剛域の計算」の RC/SRC 系・S 系区分）。
 /// 剛域長の算定式（後述 `auto_rigid_zones`）を部材種別で切り替えるための分類。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MemberKind {
     /// RC・SRC 系（RC 造柱・梁・耐震壁、SRC 造柱・梁）。
     RcSrc,
-    /// S・CFT 系（マニュアル「柱がＣＦＴの場合についても同様」よりＣＦＴはＳ扱い）。
+    /// S・CFT 系（ＣＦＴはＳ造と同様に扱う）。
     Steel,
 }
 
@@ -93,7 +93,7 @@ pub fn auto_rigid_zones(
 
     // 節点 → 接続要素のマップ（直交せい探索の対象は柱・梁＝Beam 要素のみ。
     // 耐震壁・シェル等が混入すると「耐震壁周辺の柱・梁の剛域は考慮しません」
-    // というマニュアル規定に反し、壁の名目せい等が誤って直交材に紛れ込む）。
+    // という方針に反し、壁の名目せい等が誤って直交材に紛れ込む）。
     let mut node_to_elems: std::collections::HashMap<usize, Vec<usize>> =
         std::collections::HashMap::new();
     for (ei, e) in model.elements.iter().enumerate() {
@@ -122,7 +122,7 @@ pub fn auto_rigid_zones(
     }
 
     // `only_rc_src` を true にすると、RC/SRC 系の直交 Beam 要素だけを対象に最大せいを探す
-    // （剛域長 λ 用。マニュアル「仕口部に接続する柱(梁)がすべてＳの場合、剛域長さは0」
+    // （剛域長 λ 用。仕口部に接続する柱(梁)がすべてＳの場合、剛域長さは0
     // ＝ S 系直交材は無視することで自然に d_max=0 となる）。false なら種別を問わず全直交
     // Beam 要素が対象（危険断面位置 face 用。§6.2.3 は幾何量であり種別を区別しない）。
     fn max_orth_depth(
@@ -206,12 +206,12 @@ pub fn auto_rigid_zones(
         true,
     );
 
-    // 剛域長 λ は自部材の構造種別で式を切り替える（マニュアル「剛域の計算」）。
+    // 剛域長 λ は自部材の構造種別で式を切り替える（技術基準解説書「剛域の計算」）。
     // - RC/SRC 造: λ = reduction·(D_orth_rc/2 − D_self/4)（従来式。負は 0 クランプ）。
     // - Ｓ・ＣＦＴ造: λ = D_orth_rc/2（D_self/4 の控除なし・reduction も掛けない。
     //   RC/SRC 大梁のうち最大せいの梁フェイスまでの長さ＝仕口部を除いた長さ）。
     //   直交する RC/SRC 系の梁（柱）が無ければ D_orth_rc=0 なので λ=0
-    //   （マニュアル「Ｓ造の剛域…剛域長さは0とします」）。
+    //   （Ｓ造の剛域長さは0となる）。
     let self_kind = member_kind(model, elem);
     let lambda = |d_orth_rc: f64| -> f64 {
         match self_kind {

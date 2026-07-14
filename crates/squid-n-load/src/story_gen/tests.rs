@@ -452,7 +452,7 @@ fn test_member_load_reaction_distribution_end_to_end() {
 fn test_face_reduction_applies_only_to_concrete() {
     // §1.8: RC/SRC の柱（鉛直材）は床上面から床上面（＝節点間距離。フェイス控除
     // しない）、S 柱も節点間距離。single_beam_model は鉛直材（柱）なので、
-    // fc の有無によらず全長で算定される（マニュアル「柱の長さ」）。
+    // fc の有無によらず全長で算定される。
     let len = 4000.0;
     let area = 90000.0;
     let density = 2.4e-9;

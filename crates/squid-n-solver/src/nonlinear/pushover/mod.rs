@@ -40,7 +40,7 @@ pub enum HingeLevel {
     Ultimate,
 }
 
-/// 塑性率（ductility）の算定方式（RESP-D「05 非線形モデル」ファイバーモデルの
+/// 塑性率（ductility）の算定方式（ファイバーモデル（構造力学）の
 /// 塑性率）。ユーザーが 3 方式から選択する。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DuctilityMethod {
@@ -58,8 +58,8 @@ pub enum DuctilityMethod {
 }
 
 /// 部材塑性率の終局ヒンジ判定値。降伏後、部材塑性率がこの値以上のヒンジを
-/// Ultimate（終局）と分類する（μ<この値は Yield）。RESP-D では塑性率の
-/// クライテリアはユーザー設定だが、既定の終局判定値として 4.0 を用いる
+/// Ultimate（終局）と分類する（μ<この値は Yield）。塑性率の
+/// クライテリアはユーザー設定だが、本実装では既定の終局判定値として 4.0 を用いる
 /// （要・原典照合／ユーザー調整余地）。
 const ULTIMATE_DUCTILITY: f64 = 4.0;
 
@@ -70,7 +70,7 @@ pub enum MechanismType {
     Partial,
 }
 
-/// せん断降伏イベント（RESP-D マニュアル計算編03「応力解析」§段階的耐力喪失解析）。
+/// せん断降伏イベント（段階的耐力喪失解析のせん断降伏判定）。
 ///
 /// 部材端のせん断力（局所 Vy・Vz の材端最大値）がせん断降伏耐力 Qy
 /// （[`compute_shear_yield_qy`] 参照）を超えたステップを記録する。曲げヒンジ
@@ -80,7 +80,7 @@ pub struct ShearYieldEvent {
     pub elem: ElemId,
 }
 
-/// 終局（最終確定ステップ）時の部材別応答（RESP-D「06 終局検定」の設計用応力・
+/// 終局（最終確定ステップ）時の部材別応答（終局検定の設計用応力・
 /// 部材別 Rp の直接反映に用いる）。プッシュオーバー最終ステップの部材端内力を
 /// 局所座標へ射影し、強軸（局所 z まわり）・弱軸（局所 y まわり）の設計用曲げ・
 /// せん断と軸力（圧縮正）、および部材変形角 Rp を保持する。
@@ -348,7 +348,7 @@ pub fn pushover_analysis_recording(
         let (b, _) = build_nonlinear_behavior(elem, model);
         behaviors.push(b);
     }
-    // 静的解析: コンクリート履歴は逆行型（RESP-D「05 非線形モデル」）。
+    // 静的解析: コンクリート履歴は逆行型（本実装の既定）。
     for b in behaviors.iter_mut() {
         b.set_concrete_hysteresis(false);
     }
@@ -866,7 +866,7 @@ fn compute_hinge_thresholds(model: &Model) -> Vec<HingeThreshold> {
         .collect()
 }
 
-/// 塑性率基点ひずみ（RESP-D「05 非線形モデル」ファイバーモデルの塑性率、方式(1)）。
+/// 塑性率基点ひずみ（ファイバーモデル（構造力学）の塑性率、方式(1)）。
 /// RC 部材は引張 0.01・圧縮 0.005、鉄骨部材は引張・圧縮ともに 0.01。
 #[derive(Clone, Copy)]
 struct DuctilityRef {
@@ -900,7 +900,7 @@ fn compute_ductility_refs(model: &Model) -> Vec<DuctilityRef> {
 }
 
 /// 部材ごとの塑性率トラッカー。塑性率基点曲率（初到達時）と最大応答曲率を追跡し
-/// μ=最大応答曲率/基点曲率を算定する（RESP-D「05 非線形モデル」）。
+/// μ=最大応答曲率/基点曲率を算定する（ファイバーモデルの塑性率、構造力学）。
 #[derive(Clone, Copy, Default)]
 struct DuctilityTracker {
     kappa_max: f64,
@@ -914,7 +914,7 @@ impl DuctilityTracker {
             self.kappa_ref = Some(probe.curvature);
         }
     }
-    /// 部材塑性率 μ。基点未到達（塑性率 1 未満）は 0（未評価、RESP-D 準拠）。
+    /// 部材塑性率 μ。基点未到達（塑性率 1 未満）は 0（未評価、本実装の既定）。
     fn mu(&self) -> f64 {
         match self.kappa_ref {
             Some(kr) if kr > 0.0 => (self.kappa_max / kr).max(1.0),
@@ -1164,8 +1164,8 @@ fn build_dir_threshold(
     DirThreshold::Static(as_area * 0.7 * fc.sqrt())
 }
 
-/// せん断降伏耐力 Qy [N] を算定する（RESP-D マニュアル計算編03「応力解析」
-/// §段階的耐力喪失解析のせん断降伏判定に使用）。
+/// せん断降伏耐力 Qy [N] を算定する（段階的耐力喪失解析の
+/// せん断降伏判定に使用）。
 ///
 /// 軸力なし（σ0=0）の静的評価。単体テスト・後方互換用の薄いラッパーで、
 /// [`build_dir_threshold`] が返す [`DirThreshold`] を `n_compress=0` で評価する

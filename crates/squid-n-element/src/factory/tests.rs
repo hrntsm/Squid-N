@@ -332,7 +332,7 @@ fn make_brace_model(tension_only: bool) -> (Model, ElementData) {
 }
 
 /// 一般ブレース（引張専用でない）: build_behavior は factor=1.0 の TrussElement
-/// を生成し、軸剛性 K = E·A/L に一致する（RESP-D マニュアル計算編02）。
+/// を生成し、軸剛性 K = E·A/L に一致する（材料力学・トラス要素）。
 #[test]
 fn test_build_behavior_brace_normal_full_stiffness() {
     let (model, elem) = make_brace_model(false);
@@ -344,7 +344,7 @@ fn test_build_behavior_brace_normal_full_stiffness() {
 }
 
 /// 引張専用ブレース: 弾性解析（build_behavior）では剛性を1/2にモデル化する
-/// （マニュアル「引張と圧縮が対で存在するとみなし、弾性解析では剛性を1/2」）。
+/// （引張と圧縮が対で存在するとみなし、弾性解析では剛性を1/2）。
 #[test]
 fn test_build_behavior_brace_tension_only_half_stiffness() {
     let (model, elem) = make_brace_model(true);
@@ -360,7 +360,7 @@ fn test_build_behavior_brace_tension_only_half_stiffness() {
 }
 
 /// 引張専用ブレース: 弾塑性解析（build_nonlinear_behavior）では初期剛性を
-/// 1倍とする（マニュアル「弾塑性解析の場合は初期剛性は1倍とする」）。
+/// 1倍とする（弾塑性解析の場合は初期剛性は1倍とする）。
 #[test]
 fn test_build_nonlinear_behavior_brace_tension_only_full_stiffness() {
     let (model, elem) = make_brace_model(true);
@@ -372,7 +372,7 @@ fn test_build_nonlinear_behavior_brace_tension_only_full_stiffness() {
 }
 
 /// 壁要素の開口低減: wall_attrs の開口面積からせん断剛性が低減されること
-/// （RESP-D 計算編 02「剛性計算」耐震壁の開口低減 r=1−1.25·√(開口面積/壁面積)）。
+/// （RC規準（耐震壁）の開口低減 r=1−1.25·√(開口面積/壁面積)）。
 #[test]
 fn test_build_behavior_wall_opening_reduces_shear_stiffness() {
     use squid_n_core::model::WallAttr;

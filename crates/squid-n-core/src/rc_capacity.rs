@@ -93,7 +93,7 @@ pub fn rc_qmu_simple(inp: &RcCapacityInput) -> f64 {
 /// - `inp.b`, `inp.d`(=D), `inp.at`, `inp.sigma_y`, `inp.fc` を用いる。
 ///   不正入力（b, d, at, σy, Fc のいずれかが 0 以下）は 0.0 を返す。
 ///
-/// RESP-D マニュアル計算編 04「断面検定」の柱設計用せん断力 QD1 = ΣcMy/h′
+/// RC 規準の柱設計用せん断力 QD1 = ΣcMy/h′
 /// における柱の終局曲げ（cMy）の算定に用いる。
 pub fn rc_column_mu_simple(inp: &RcCapacityInput, ag: f64, n_axial: f64) -> f64 {
     if inp.b <= 0.0 || inp.d <= 0.0 || inp.at <= 0.0 || inp.sigma_y <= 0.0 || inp.fc <= 0.0 {
@@ -149,7 +149,7 @@ pub fn rc_qsu_simple(inp: &RcCapacityInput) -> f64 {
     (concrete_term + hoop_term + axial_term) * inp.b * j
 }
 
-/// RC 梁の曲げ降伏時剛性低下率 αy（菅野式、RESP-D「05 非線形モデル」）。
+/// RC 梁の曲げ降伏時剛性低下率 αy（菅野式）。
 ///
 /// ```text
 /// αy = (0.043 + 1.635·n·pt + 0.043·(a/D))·(d/D)²   (2.0 ≤ a/D ≤ 5.0)

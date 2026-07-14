@@ -1,7 +1,6 @@
-//! 鉄筋コンクリート造梁の断面検定（RESP-D マニュアル「04 断面検定」、
-//! RC 規準13条: 曲げ・せん断・付着）。
+//! 鉄筋コンクリート造梁の断面検定（RC 規準13条: 曲げ・せん断・付着）。
 //!
-//! 強軸曲げ（`mz`）とそれに対のせん断（`qy`）のみを検定する（マニュアルの
+//! 強軸曲げ（`mz`）とそれに対のせん断（`qy`）のみを検定する（RC 規準の
 //! 梁断面検定の対象と一致）。付着の検定は [`super::bond`] へ委譲する。
 
 use super::{
@@ -36,7 +35,7 @@ pub(crate) struct BeamMoment {
 /// `Icr = b・xn³/3 + (n-1)・ac・(xn-dc)² + n・at・(d-xn)²`、
 /// `MA_c = fc・Icr/xn` とする。
 ///
-/// `MA = min(MA_t, MA_c)` をとることで、マニュアルの
+/// `MA = min(MA_t, MA_c)` をとることで、RC 規準の
 /// 「pt <= pt_balance なら C1（引張支配）、それを超えれば C2（圧縮支配）」
 /// という分岐と等価な結果が得られる（過小配筋では MA_c が大きく MA_t が支配、
 /// 過大配筋では逆になる）。
@@ -142,7 +141,7 @@ pub(crate) fn beam_check(
     // 地震時短期は設計用せん断力 QD = min(QL+ΣBMy/l′, QL+n・QE) を用いる
     // （ctx.seismic_qd が None のときは解析せん断力のまま）。
     // ΣBMy は両端とも同一断面・対称配筋（at=ac）の仮定で 2・Mu とする。
-    // Mu にスラブ筋は考慮しない（マニュアルの規定どおり）。
+    // Mu にスラブ筋は考慮しない。
     let q_design = if ctx.seismic_qd.is_some() {
         let mu_inp = squid_n_core::rc_capacity::RcCapacityInput {
             b: props.b,

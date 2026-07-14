@@ -373,8 +373,8 @@ mod tests {
     }
 
     /// 代表節点（要素非接続・Uz/Rx/Ry 固定の浮遊節点）をマスターとした剛床で、
-    /// スレーブの面内変位が ix = Gx − iry·Gθz, iy = Gy + irx·Gθz（RESP技術ブログ
-    /// 「剛床に関連する操作や考え方のまとめ」）どおりに復元されることを確認する。
+    /// スレーブの面内変位が ix = Gx − iry·Gθz, iy = Gy + irx·Gθz（剛床仮定に
+    /// よる面内剛体変位の運動学）どおりに復元されることを確認する。
     #[test]
     fn test_rigid_diaphragm_master_recovers_translation_and_torsion() {
         let mut model = make_3node_model();

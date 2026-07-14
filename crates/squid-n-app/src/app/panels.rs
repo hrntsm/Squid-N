@@ -815,7 +815,7 @@ impl App {
             ui.horizontal(|ui| {
                 use squid_n_solver::pushover::DuctilityMethod;
                 ui.label("塑性率方式:")
-                    .on_hover_text("RESP-D「05 非線形モデル」ファイバーモデルの塑性率");
+                    .on_hover_text("ファイバーモデルの塑性率（構造力学）");
                 egui::ComboBox::from_id_salt("ductility_method")
                     .selected_text(match self.analysis_cfg.ductility_method {
                         DuctilityMethod::ReferenceStrain => "基点歪み",
@@ -958,7 +958,7 @@ impl App {
                         .range(10.0..=10000.0),
                 );
             });
-            // 位相差入力（ねじれ加振）。RESP-D「07」位相差入力解析 t=(L·sinθ)/Vs。
+            // 位相差入力（ねじれ加振）。構造動力学の位相差入力解析 t=(L·sinθ)/Vs。
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.analysis_cfg.phase_diff_enabled, "位相差入力")
                     .on_hover_text(
@@ -1152,7 +1152,7 @@ impl App {
             ui.separator();
             ui.label(format!("ヒンジ発生 {} 件", po.hinges.len()));
         });
-        // 塑性率（RESP-D「05 非線形モデル」）の方式と最大値。
+        // 塑性率（構造力学）の方式と最大値。
         ui.horizontal(|ui| {
             use squid_n_solver::pushover::DuctilityMethod;
             let method = match self.analysis_cfg.ductility_method {
@@ -1211,7 +1211,7 @@ impl App {
 
     /// 質点系（串団子）モデルの表示。プッシュオーバー結果から層 Q-δ を
     /// トリリニア縮約し、層ごとの質量・階高・復元力特性を一覧する
-    /// （RESP-D「07 非線形解析（動的解析）」質点系解析モデル）。
+    /// （構造動力学の質点系解析モデル）。
     pub(crate) fn lumped_mass_panel(&mut self, ui: &mut egui::Ui) {
         use squid_n_solver::lumped_mass::{build_lumped_mass_model, LumpedMassType};
 

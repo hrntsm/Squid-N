@@ -42,20 +42,20 @@ pub trait UniaxialMaterial: Send + Sync + Debug {
     /// 用いる。対応しない材料は何もしない（既定実装）。
     fn set_yield(&mut self, _fy: f64) {}
 
-    /// 塑性率（ductility）評価用の参照応力 σref（RESP-D「05 非線形モデル」）。
+    /// 塑性率（ductility）評価用の参照応力 σref。
     /// 鋼材・鉄筋は降伏強度 fy、コンクリートはシリンダー強度 fc。重み付け平均
     /// 塑性率 Jm（Σσref·A·|ε|·μi）や降伏判定の分子重みに用いる。弾性材は 0。
     fn reference_stress(&self) -> f64 {
         0.0
     }
-    /// 塑性率評価用の参照ひずみ εref（RESP-D「05 非線形モデル」）。
+    /// 塑性率評価用の参照ひずみ εref。
     /// 鋼材・鉄筋は降伏ひずみ fy/E、コンクリートは圧縮強度時ひずみ |εc0|。
     /// 各ファイバの塑性率 μi = |ε|/εref、降伏判定 |ε| ≥ εref に用いる。弾性材は 0。
     fn reference_strain(&self) -> f64 {
         0.0
     }
 
-    /// コンクリート履歴の除荷則を解析種別で切替える（RESP-D「05 非線形モデル」:
+    /// コンクリート履歴の除荷則を解析種別で切替える（本実装の既定:
     /// 静的解析は逆行型、動的解析は原点指向型）。`dynamic=true` で原点指向型、
     /// `false` で逆行型。対応しない材料（鋼材等）は何もしない（既定実装）。
     fn set_concrete_hysteresis(&mut self, _dynamic: bool) {}

@@ -43,7 +43,7 @@ pub fn design_table(ui: &mut egui::Ui, app: &mut App) {
 
     // ── 一次設計: 部材検定表 ─────────────────────────────────────
     ui.strong("部材検定（許容応力度）");
-    // 断面算定条件（RESP-D マニュアル 04「断面算定条件」相当）。
+    // 断面算定条件（許容応力度設計・令82条）。
     ui.horizontal(|ui| {
         let mut changed = false;
         changed |= ui
@@ -53,7 +53,7 @@ pub fn design_table(ui: &mut egui::Ui, app: &mut App) {
             )
             .on_hover_text(
                 "ON: 損傷制御のための検討（2/3・α・fs）、OFF: 安全確保のための検討。\
-                 軽量コンクリート×高強度せん断補強筋は常に安全確保式（マニュアル準拠）",
+                 軽量コンクリート×高強度せん断補強筋は常に安全確保式（RC規準）",
             )
             .changed();
         ui.label("QD:");
@@ -261,7 +261,7 @@ pub fn design_table(ui: &mut egui::Ui, app: &mut App) {
             });
     }
 
-    // ── 免震支承材の非線形特性（RESP-D「05 非線形モデル」） ────────────
+    // ── 免震支承材の非線形特性 ────────────
     if !app.model.isolator_attrs.is_empty() {
         ui.add_space(12.0);
         ui.strong("免震支承材の非線形特性");
@@ -275,7 +275,7 @@ pub fn design_table(ui: &mut egui::Ui, app: &mut App) {
                 | IsolatorKind::LeadRubber
                 | IsolatorKind::HighDampingRubber => {
                     // 等価水平剛性 keq・等価粘性減衰定数 Heq を設計変位 200mm（参考）で算定
-                    // （RESP-D「07」LRB 統一型 keq=Qd/δ+Kd、Heq=(2/π)Qd(δ−Qd/((β−1)Kd))/(keq·δ²)）。
+                    // （LRB 統一型 keq=Qd/δ+Kd、Heq=(2/π)Qd(δ−Qd/((β−1)Kd))/(keq·δ²)）。
                     let disp = 200.0;
                     let keq = squid_n_design_jp::isolator::equivalent_stiffness(p.k2, p.qd, disp);
                     let heq =
@@ -319,7 +319,7 @@ pub fn design_table(ui: &mut egui::Ui, app: &mut App) {
         }
     }
 
-    // ── 制振ダンパーの非線形特性（RESP-D「07 非線形解析（動的解析）」制振要素） ──
+    // ── 制振ダンパーの非線形特性 ──
     if !app.model.damper_attrs.is_empty() {
         ui.add_space(12.0);
         ui.strong("制振ダンパーの非線形特性");
@@ -346,9 +346,9 @@ pub fn design_table(ui: &mut egui::Ui, app: &mut App) {
         }
     }
 
-    // ── 非線形解析の材端履歴則（RESP-D 07 非線形解析（動的解析）履歴特性） ──
+    // ── 非線形解析の材端履歴則 ──
     ui.add_space(12.0);
-    egui::CollapsingHeader::new("非線形解析の材端履歴則（RESP-D 07）")
+    egui::CollapsingHeader::new("非線形解析の材端履歴則")
         .default_open(false)
         .show(ui, |ui| {
             ui.label(

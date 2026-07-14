@@ -1,5 +1,5 @@
-//! コンクリート充填鋼管（CFT）柱の**軸終局耐力**（RESP-D マニュアル「計算編 06
-//! 終局検定」コンクリート充填鋼管（CFT）柱の終局耐力 (1)(2)）。
+//! コンクリート充填鋼管（CFT）柱の**軸終局耐力**
+//! （コンクリート充填鋼管構造設計指針（CFT 指針）に基づく軸終局耐力）。
 //!
 //! # 位置付け
 //! [`crate::cft`] が許容応力度検定（SRC 規準準用）を扱うのに対し、本モジュールは
@@ -9,7 +9,7 @@
 //!
 //! # 準拠する規準・出典（要・原典照合、`specs/原典照合リスト.md`）
 //! - 日本建築学会「コンクリート充填鋼管構造設計指針」。角型 CFT は正方形のみを
-//!   対象とするが、本実装は計算式を準用して長方形断面にも適用する（マニュアル記載）。
+//!   対象とするが、本実装は計算式を準用して長方形断面にも適用する。
 //!
 //! # 柱の分類（座屈長さ lk と断面せい D）
 //! - `lk ≤ 4·D`: 短柱、`lk > 12·D`: 長柱、`4·D < lk ≤ 12·D`: 中柱。
@@ -25,7 +25,7 @@ pub enum CftColumnClass {
     Long,
 }
 
-/// 座屈長さ `lk` と断面せい `d` から柱を分類する（RESP-D「06 終局検定」CFT）。
+/// 座屈長さ `lk` と断面せい `d` から柱を分類する（CFT 指針）。
 /// `d ≤ 0` の不正入力は短柱扱いとする。
 pub fn cft_column_class(lk: f64, d: f64) -> CftColumnClass {
     if d <= 0.0 {
@@ -41,7 +41,7 @@ pub fn cft_column_class(lk: f64, d: f64) -> CftColumnClass {
     }
 }
 
-/// 充填コンクリートの座屈応力度 `cσcr` [N/mm²]（CFT 指針、RESP-D「06 終局検定」）。
+/// 充填コンクリートの座屈応力度 `cσcr` [N/mm²]（CFT 指針）。
 ///
 /// ```text
 /// cσcr/Fc = { 2/(1 + √(cλ1⁴ + 1))          (cλ1 ≤ 1.0)
@@ -62,12 +62,12 @@ pub fn cft_concrete_buckling_stress(fc: f64, c_lambda1: f64, cc: f64) -> f64 {
     (factor * fc).max(0.0)
 }
 
-/// 係数 `Cc = 0.568 + 0.00612·Fc`（RESP-D「06 終局検定」CFT）。
+/// 係数 `Cc = 0.568 + 0.00612·Fc`（CFT 指針）。
 pub fn cft_cc(fc: f64) -> f64 {
     0.568 + 0.00612 * fc
 }
 
-/// 圧縮強度時ひずみ `εu = 0.93·Fc^(1/4)·10⁻³`（RESP-D「06 終局検定」CFT）。
+/// 圧縮強度時ひずみ `εu = 0.93·Fc^(1/4)·10⁻³`（CFT 指針）。
 /// `Fc ≤ 0` は 0。
 pub fn cft_epsilon_u(fc: f64) -> f64 {
     if fc <= 0.0 {
@@ -90,7 +90,7 @@ pub fn cft_concrete_slenderness(c_inertia: f64, c_area: f64, fc: f64, lk: f64) -
     c_lambda / std::f64::consts::PI * cft_epsilon_u(fc).sqrt()
 }
 
-/// 充填コンクリートの座屈軸耐力 `cNcr = cσcr·cA`（RESP-D「06 終局検定」CFT）。
+/// 充填コンクリートの座屈軸耐力 `cNcr = cσcr·cA`（CFT 指針）。
 /// 不正入力（cA・cI のいずれか 0 以下）は 0。`lk ≤ 0` は無座屈として `cA·Fc`。
 pub fn cft_concrete_buckling_axial(c_inertia: f64, c_area: f64, fc: f64, lk: f64) -> f64 {
     if c_area <= 0.0 || c_inertia <= 0.0 || fc <= 0.0 {
@@ -103,7 +103,7 @@ pub fn cft_concrete_buckling_axial(c_inertia: f64, c_area: f64, fc: f64, lk: f64
     cft_concrete_buckling_stress(fc, c_lambda1, cft_cc(fc)) * c_area
 }
 
-/// CFT 柱の軸終局耐力算定の入力（RESP-D「06 終局検定」CFT）。
+/// CFT 柱の軸終局耐力算定の入力（CFT 指針）。
 #[derive(Clone, Copy, Debug)]
 pub struct CftAxialInput {
     /// 円形断面なら true（角型なら false）。ξ の判定に用いる。
@@ -139,7 +139,7 @@ pub struct CftAxialUltimate {
     pub ntu: f64,
 }
 
-/// 短柱の軸圧縮終局耐力 `Ncu1 = cNc + (1+ξ)·sNc`（RESP-D「06 終局検定」CFT）。
+/// 短柱の軸圧縮終局耐力 `Ncu1 = cNc + (1+ξ)·sNc`（CFT 指針）。
 /// `ξ = 0.27`（円形）/ `0`（角型）、`cNc = cA·Fc`、`sNc = sA·Fy`。
 pub fn cft_ncu1(inp: &CftAxialInput) -> f64 {
     let xi = if inp.circular { 0.27 } else { 0.0 };
@@ -149,7 +149,7 @@ pub fn cft_ncu1(inp: &CftAxialInput) -> f64 {
 }
 
 /// 長柱（または `lk` を明示指定した中柱補間用）の軸圧縮終局耐力
-/// `Ncu3 = cNcr + sNcr`（RESP-D「06 終局検定」CFT）を、座屈長さ `lk` で算定する。
+/// `Ncu3 = cNcr + sNcr`（CFT 指針）を、座屈長さ `lk` で算定する。
 ///
 /// - `cNcr = cσcr·cA`、`cλ1 = cλ/π·√εu`、`cλ = lk/ci`、`ci = √(cI/cA)`。
 /// - `sNcr = { sNy (sλ1<0.3); (1−0.545(sλ1−0.3))·sNy (0.3≤sλ1<1.3); sNE/1.3 (sλ1≥1.3) }`、
@@ -157,7 +157,7 @@ pub fn cft_ncu1(inp: &CftAxialInput) -> f64 {
 ///   `sNE = π²·sE·sI/lk²`。
 ///
 /// # 簡略化（doc 兼申し送り）
-/// マニュアルの抽出では `sNcr` の分岐条件が `cλ1` と記載されるが、式本体が
+/// 抽出した原文では `sNcr` の分岐条件が `cλ1` と記載されるが、式本体が
 /// `sλ1`・`sNy`・`sNE`（鋼管の座屈）で構成されるため、分岐条件も鋼管細長比
 /// `sλ1` で評価する（「鋼構造塑性設計指針」の柱耐力式に整合。要・原典照合）。
 fn cft_ncu3_at_lk(inp: &CftAxialInput, lk: f64) -> f64 {
@@ -187,7 +187,7 @@ fn cft_ncu3_at_lk(inp: &CftAxialInput, lk: f64) -> f64 {
     (c_ncr + s_ncr).max(0.0)
 }
 
-/// CFT 柱の軸終局耐力（圧縮 Ncu・引張 Ntu）を算定する（RESP-D「06 終局検定」CFT）。
+/// CFT 柱の軸終局耐力（圧縮 Ncu・引張 Ntu）を算定する（CFT 指針）。
 ///
 /// ```text
 /// 短柱: Ncu = Ncu1 = cNc + (1+ξ)·sNc
@@ -195,10 +195,10 @@ fn cft_ncu3_at_lk(inp: &CftAxialInput, lk: f64) -> f64 {
 /// 中柱: Ncu = Ncu2 = Ncu1 − 0.125·(Ncu1 − Ncu3|lk/D=12)·(lk/D − 4)
 /// 引張: Ntu = sNt = sA·Fy
 /// ```
-/// 中柱の `Ncu3` は `lk/D = 12` として算定した値を用いる（マニュアル）。
+/// 中柱の `Ncu3` は `lk/D = 12` として算定した値を用いる（CFT 指針）。
 ///
 /// # 簡略化（doc 兼申し送り）
-/// 軸引張終局耐力 `Ntu = sA·β2·Fy` の `β2`（引張時の低減係数）はマニュアル抽出で
+/// 軸引張終局耐力 `Ntu = sA·β2·Fy` の `β2`（引張時の低減係数）は抽出した原文で
 /// 定義が不明瞭なため、`β2 = 1.0`（鋼管全断面降伏）として扱う（要・原典照合）。
 pub fn cft_axial_ultimate(inp: &CftAxialInput) -> CftAxialUltimate {
     let class = cft_column_class(inp.lk, inp.d_section);

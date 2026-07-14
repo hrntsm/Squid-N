@@ -7,13 +7,13 @@
 //! 重量は「自重(線材: ρ·A·L·g、壁・シェル: ρ·t·A·g) + 指定荷重ケースの
 //! 鉛直下向き荷重」を節点に配分し、階ごとに合計する簡易法(節点支配)による。
 //! 自重は左右対称な等分布荷重なので両端 1/2 ずつ、指定荷重ケースの部材荷重は
-//! 単純支持梁の静定反力（`static_reactions`）で両端に配分する（RESP-D マニュアル
-//! 「地震荷重の計算」の CMoQo による梁せん断力 Q0 に相当。対称荷重では結果的に
+//! 単純支持梁の静定反力（`static_reactions`）で両端に配分する（令88条の地震用重量
+//! 算定における CMoQo による梁せん断力 Q0 の実務的取扱いに相当。対称荷重では結果的に
 //! 自重と同じ 1/2-1/2 になる）。
 //!
 //! 剛床代表節点は、剛床に含まれる節点の慣性力重心（重量重み付き重心）に
 //! 専用の仮想節点として自動生成する（既存節点の流用ではない）。
-//! 参考: RESP技術ブログ「剛床に関連する操作や考え方のまとめ」(2026-05-29)。
+//! 剛床（剛体ダイアフラム）の取扱いは構造力学（剛体運動の縮約）による。
 //! 並進慣性重量は ΣiW、回転慣性重量は ΣiW·ir² となり、スレーブ節点の面内応答は
 //! `crates/squid-n-solver/src/constraint.rs` の RigidDiaphragm 縮約で
 //! ix = Gx − iry·Gθz, iy = Gy + irx·Gθz として復元される。
@@ -86,7 +86,7 @@ fn is_vertical_pair(a: [f64; 3], b: [f64; 3]) -> bool {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt() < 1.0
 }
 
-/// 鋼材単位体積重量（RESP-D マニュアル γs=77kN/m³）を内部単位系の質量密度
+/// 鋼材単位体積重量（γs=77kN/m³、実務慣用値）を内部単位系の質量密度
 /// [ton/mm³] に換算した値（≈7.85e-9）。ダンパー支持部重量（§ダンパー自重）に用いる。
 /// `squid-n-core::units` の単一ソースオブトゥルースから導出する（レビュー §1.11 と同じ方針）。
 fn steel_density_ton_mm3() -> f64 {
@@ -95,7 +95,7 @@ fn steel_density_ton_mm3() -> f64 {
     )
 }
 
-/// 仕上げ周長 φ（マニュアル「柱梁自重」の仕上げ荷重）。
+/// 仕上げ周長 φ（柱梁自重の仕上げ荷重）。
 /// 鉛直材（柱）は四周仕上げ `2(b+D)`、それ以外（梁）は三面仕上げ `b+2D`。
 /// 断面の `width`/`depth` のいずれかが 0 以下の場合は 0（換算対象外）とする。
 fn finish_perimeter(width: f64, depth: f64, is_vertical: bool) -> f64 {
@@ -130,7 +130,7 @@ pub(crate) enum SelfWeightItem {
 ///   §1.8: 自重算定長 L は、コンクリート材（`mat.fc` あり = RC/SRC）の水平材（梁）は
 ///   柱面間距離（`len - face_i - face_j`、負にならない範囲）、鉛直材（柱）は
 ///   床上面から床上面まで（＝節点間距離。フェイス控除しない）、鋼材（S 梁・柱）は
-///   節点間距離（マニュアル「柱梁自重」：RC/SRC 大梁は柱面間距離、
+///   節点間距離（RC/SRC 大梁は柱面間距離、
 ///   RC/SRC 柱は床上面から床上面、S 梁・柱は節点間距離）。
 ///   §1.9: RC/SRC 梁の断面積は梁上部のスラブ厚分 b·t を控除する
 ///   （w_c = γ·b(D−t)+…。スラブ重量は構造芯間の面積で別途計上されるため、
@@ -138,16 +138,16 @@ pub(crate) enum SelfWeightItem {
 ///   いないモデル（純フレーム等）では控除しない。
 ///   §柱の長さ: コンクリート柱（鉛直材）で下端節点に別の柱（鉛直 Beam/Brace）が
 ///   下から接続していない場合、下端節点に取り付く梁（非鉛直 Beam）の最大せいを
-///   自重算定長へ加算する（マニュアル「下階に柱がない場合...柱脚に取付く梁の最大せいの
-///   長さを柱長さに付加」）。
+///   自重算定長へ加算する（下階に柱がない場合、柱脚に取付く梁の最大せいの
+///   長さを柱長さに付加する扱い）。
 ///   ギャップ対応: 鋼材のみ `load_cfg.effective_steel_factor()`（鉄骨重量割増率）を乗じ、
 ///   `load_cfg.extra_line_weight`（耐火被覆等の付加線重量 [N/mm]）・
 ///   `load_cfg.finish_area_weight`（仕上げ面重量 w_f、周長 φ から自動換算）が
 ///   あれば自重算定長を掛けて加算する。
 /// - 壁・シェル（`ElementKind::Wall`/`Shell`, 節点数3以上）: ρ·t·(A−開口面積)·g＋開口重量
 ///   （§壁自重）を全頂点に等分配。三方スリット壁は最上位標高の頂点へ全量集中
-///   （マニュアル「壁に三方スリットが指定されている場合、壁荷重は全て上部の大梁に伝達」）。
-///   §1.2: マニュアル「壁の重量を階高の中央で上下階の節点に分配」に対応
+///   （壁に三方スリットが指定されている場合、壁荷重は全て上部の大梁に伝達する扱い）。
+///   §1.2: 壁の重量を階高の中央で上下階の節点に分配する扱いに対応
 ///   （矩形壁なら上下2節点ずつに1/4ずつ配分される）。
 ///   §壁自重: 4 節点の耐震壁は「周辺の柱梁の内法寸法」で面積を評価する
 ///   （[`wall_clear_area_factor`]。芯々面積に内法係数を乗じる。控除相手の
@@ -155,7 +155,7 @@ pub(crate) enum SelfWeightItem {
 /// - ダンパー（`load_cfg.dampers` に登録された Beam/Brace 要素）: 断面自重
 ///   （ρ·A·L·g）は使わず、装置重量＋支持部重量に置き換える（§ダンパー自重。
 ///   `device_weight=0` かつ `support_area>0` の場合は支持部のみが算入され、
-///   マニュアル「自重を考慮しない部材」に対応する）。
+///   自重を考慮しない部材に相当する）。
 pub(crate) fn enumerate_self_weight(model: &Model, load_cfg: &LoadCfg) -> Vec<SelfWeightItem> {
     let mut items = Vec::new();
     for (elem_idx, elem) in model.elements.iter().enumerate() {
@@ -195,7 +195,7 @@ pub(crate) fn enumerate_self_weight(model: &Model, load_cfg: &LoadCfg) -> Vec<Se
                 let is_vertical = is_vertical_pair(ci, cj);
                 let is_concrete = mat.fc.is_some();
                 // §1.8: 柱面間距離の控除は水平材（梁）のみ。鉛直材（柱）は
-                // 床上面から床上面（＝節点間距離）で算定する（マニュアル「柱の長さ」）。
+                // 床上面から床上面（＝節点間距離）で算定する。
                 let mut eff_len = if is_concrete && !is_vertical {
                     (len - elem.rigid_zone.face_i - elem.rigid_zone.face_j).max(0.0)
                 } else {
@@ -337,7 +337,7 @@ pub(crate) fn enumerate_self_weight(model: &Model, load_cfg: &LoadCfg) -> Vec<Se
 
 /// 耐震壁の自重面積算定用の**内法係数**（芯々面積に乗じる係数、(0,1]）。
 ///
-/// マニュアル §壁自重「耐震壁の重量は周辺の柱梁の内法寸法で計算します」に対応。
+/// 耐震壁の重量は周辺の柱梁の内法寸法で計算する扱いに対応。
 /// 対象は 4 節点の `ElementKind::Wall` のみ（シェル床・多角形壁は 1.0）。
 /// 各辺を鉛直辺（側柱候補）・水平辺（上下梁候補）に分類し、辺の節点対に一致する
 /// 線材（`ElementKind::Beam`）の断面寸法の半分を芯々寸法から控除する:
@@ -450,7 +450,7 @@ fn nearest_column_element(model: &Model, pt: [f64; 3]) -> Option<&ElementData> {
 /// - `Beam`: モデル全節点中の最近接節点へ全量集中
 /// - `SelfStanding`: 自立壁の簡易扱い。解析用の専用節点を新設する代わりに
 ///   モデル全節点中の最近接節点（配置階の代表的な節点）へ全量を伝達する
-///   （マニュアルの「配置階の剛床へ伝達」の簡易近似）。
+///   （配置階の剛床へ伝達する扱いの簡易近似）。
 fn accumulate_misc_wall_weight(model: &Model, node_weight: &mut [f64]) {
     for (i, w) in misc_wall_weight_shares(model) {
         node_weight[i] += w;
@@ -506,8 +506,8 @@ pub(crate) fn misc_wall_weight_shares(model: &Model) -> Vec<(usize, f64)> {
 
 /// 単純支持梁（節点間距離 `len` を支間とする静定梁）の等価節点重量（両端反力）。
 ///
-/// §1.4: マニュアル「地震荷重の計算」は地震用節点重量を「大梁の CMoQo の計算で
-/// 求めた梁せん断力（＝ Q0、単純梁反力）」と定義する。単純梁の反力は集中荷重・
+/// §1.4: 令88条の地震用重量算定では、地震用節点重量を「大梁の CMoQo の計算で
+/// 求めた梁せん断力（＝ Q0、単純梁反力）」とする実務的取扱いによる。単純梁の反力は集中荷重・
 /// 分布荷重いずれも静定なので、両端 1/2 の一律配分ではなく荷重位置に応じた
 /// 反力比で配分する（対称荷重では結果的に 1/2 ずつになる）。
 ///
@@ -668,7 +668,7 @@ pub fn generate_stories_multi(
 
     // 指定荷重ケース（複数可）の鉛直下向き成分。
     // §1.4: 部材荷重は単純梁の静定反力（`static_reactions`）で両端に配分する
-    // （マニュアル「地震用節点重量 = 大梁の CMoQo 計算による梁せん断力 Q0」）。
+    // （令88条の実務的取扱い: 地震用節点重量 = 大梁の CMoQo 計算による梁せん断力 Q0）。
     let mut seen_lcs: std::collections::HashSet<LoadCaseId> = std::collections::HashSet::new();
     for &lc_id in gravity_lcs {
         if !seen_lcs.insert(lc_id) {

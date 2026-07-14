@@ -221,7 +221,7 @@ fn test_story_eccentricity_empty_story() {
 fn test_misc_wall_stiffness() {
     // Kw' = n·Aw'·ΣKc/ΣAc = 2·1000·400/400 = 2000
     assert!((misc_wall_stiffness(2.0, 1000.0, 400.0, 400.0) - 2000.0).abs() < 1e-12);
-    // ΣAc = 0 → Kw' = 0（マニュアル但し書き）
+    // ΣAc = 0 → Kw' = 0（0 除算回避）
     assert_eq!(misc_wall_stiffness(2.0, 1000.0, 400.0, 0.0), 0.0);
 }
 

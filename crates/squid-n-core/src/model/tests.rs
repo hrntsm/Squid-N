@@ -259,7 +259,7 @@ fn test_openings_for_mode_auto_merges_close_pairs_only() {
     );
 }
 
-/// 自動判定の包絡可能条件(RESP-D 計算編02 判定図):
+/// 自動判定の包絡可能条件(耐震壁の複数開口の取り扱いの判定図。RC 規準):
 /// l < 1.5h または l < 1m(l: 開口間距離、h: 包絡開口とした場合の高さ)。
 #[test]
 fn test_can_envelope_boundary() {
@@ -335,7 +335,7 @@ fn test_element_data_plastic_zone_default_missing_field() {
 }
 
 /// 長期系（固定・積載・積雪・種別未指定）は長期、地震用積載・風・地震は短期
-/// （RESP-D マニュアル計算編03「応力解析」の長期軸力無効化条件の適用範囲）。
+/// （令82条の応力解析。長期軸力無効化条件の適用範囲）。
 #[test]
 fn test_load_case_kind_is_long_term() {
     assert!(LoadCaseKind::Dead.is_long_term());
@@ -393,7 +393,7 @@ fn test_validate_index_mismatch() {
 
 #[test]
 fn test_default_member_hysteresis_table() {
-    // RESP-D「07 非線形解析（動的解析）」既定の非線形特性: 梁曲げは
+    // 本実装の既定の非線形特性（各履歴則の原典）: 梁曲げは
     // RC/SRC/CFT=武田型、S=標準型。
     assert_eq!(default_member_hysteresis(true), HysteresisModel::Takeda);
     assert_eq!(default_member_hysteresis(false), HysteresisModel::Standard);

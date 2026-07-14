@@ -158,7 +158,7 @@ impl EditCommand for SetElementMaterial {
     }
 }
 
-/// 部材の履歴則（復元力特性）変更（RESP-D「07 非線形解析（動的解析）」履歴特性）。
+/// 部材の履歴則（復元力特性）変更（各履歴則の原典による）。
 /// `HysteresisModel::Auto` を指定すると個別指定を解除し既定へ戻す。
 pub struct SetMemberHysteresis {
     pub elem: ElemId,
@@ -183,7 +183,7 @@ impl EditCommand for SetMemberHysteresis {
     }
 }
 
-/// 制振ダンパーの特性（Kd・C0・α）変更（RESP-D「07 非線形解析（動的解析）」制振要素）。
+/// 制振ダンパーの特性（Kd・C0・α）変更（制振部材の力学モデル: Maxwell モデル等）。
 /// `props=None` で指定を解除する。
 pub struct SetDamperProps {
     pub elem: ElemId,

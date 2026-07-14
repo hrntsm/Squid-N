@@ -1,4 +1,4 @@
-//! 鉄骨鉄筋コンクリート造柱の断面検定（RESP-D マニュアル「04 断面検定」、
+//! 鉄骨鉄筋コンクリート造柱の断面検定（許容応力度検定。
 //! SRC 規準 1987 の累加強度式）。
 //!
 //! 軸力＋二軸曲げ＋二方向せん断の複合検定を行う。曲げ耐力 MA(N) は
@@ -164,7 +164,7 @@ fn interp_ma_curve(points: &[(f64, f64)], n_design: f64) -> f64 {
     points[last].1
 }
 
-/// SRC 柱 1 軸分の許容曲げモーメント MA(N)。マニュアルの 3 分岐
+/// SRC 柱 1 軸分の許容曲げモーメント MA(N)。SRC規準1987 の 3 分岐
 /// （RC+鉄骨累加 / 圧縮超過で鉄骨のみ / 引張超過で鉄骨のみ）を実装する。
 #[allow(clippy::too_many_arguments)]
 fn src_column_axis_ma(
@@ -209,7 +209,7 @@ pub(crate) fn src_column_check(
     let grade = mat.name.as_str();
 
     // 軽量コンクリート1種・2種は許容応力度（圧縮・せん断）を 0.9 倍に低減
-    // （マニュアル「04 断面検定」。class 対応版を使用）。
+    // （SRC規準1987。class 対応版を使用）。
     let fc_allow = concrete_allowable_compression_class(fc_raw, mat.concrete_class, long_term);
     let fs = concrete_allowable_shear_class(fc_raw, mat.concrete_class, long_term);
     let n_ratio = young_ratio_n(fc_raw);

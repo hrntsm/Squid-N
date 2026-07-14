@@ -24,28 +24,28 @@ pub enum ElementKind {
     Ms,
     Wall,
     PanelZone,
-    /// 一般ブレース（軸材。RESP-D マニュアル計算編02「剛性計算」§一般ブレースの剛性）。
+    /// 一般ブレース（軸材。軸剛性のみのトラス要素。材料力学）。
     /// 剛性は軸剛性のみのトラス要素（KB=E·A/L）で評価する。
     /// K 型ブレースの重量配分規則（`LoadCfg::k_brace_rule`）の適用対象。
     /// `tension_only`: 引張専用ブレースか（true の場合、弾性解析では剛性を1/2に
-    /// モデル化する。弾塑性解析では初期剛性は1倍。マニュアル既定の「引張と圧縮が
+    /// モデル化する。弾塑性解析では初期剛性は1倍。本実装既定の「引張と圧縮が
     /// 対で存在するとみなす」モデル化）。
     Brace {
         tension_only: bool,
     },
-    /// 節点バネ要素（RESP-D マニュアル計算編03「応力解析」§部材の変形と自由度）。
+    /// 節点バネ要素（ばね要素の変形と自由度。構造力学）。
     ///
-    /// マニュアルの「部材の変形と自由度」表で、節点バネは θX=―（非考慮）、
+    /// 部材の変形と自由度の考え方では、節点バネは θX=―（非考慮）、
     /// θY=○, θZ=○, γY=○, γZ=○, δX=○。すなわちねじり以外の曲げ・せん断・
     /// 軸方向の変形成分を独立なバネ剛性として持ちうる 2 節点要素。
     /// 各自由度のバネ定数は `ElementData::spring` に保持する（局所軸 6 成分）。
     NodalSpring,
-    /// 免震支承材（RESP-D マニュアル「05 非線形モデル」免震支承材）。
+    /// 免震支承材（各免震部材指針）。
     /// 2 節点要素で、水平は非線形せん断ばね（マルチシアスプリング＝積層ゴム系
     /// バイリニア、または摩擦ばね＝弾性すべり支承 Qmax=μN）、鉛直は弾性軸ばね。
     /// 特性は `Model::isolator_attrs` に要素 ID と対で保持する。
     Isolator,
-    /// 制振ダンパー要素（RESP-D「07 非線形解析（動的解析）」制振要素）。
+    /// 制振ダンパー要素（各制振部材の力学モデル）。
     /// 2 節点の軸方向要素で、マクスウェル要素（バネ Kd と粘性ダッシュポットの直列）等で
     /// モデル化する。減衰要素の要素力は節点力として運動方程式へ与えられ、特性は
     /// `Model::damper_attrs` に要素 ID と対で保持する。
@@ -59,8 +59,8 @@ pub enum ForceRegime {
     Auto,
 }
 
-/// 部材の復元力特性（履歴則）。RESP-D「07 非線形解析（動的解析）」の
-/// 「履歴特性」および「立体解析モデルの非線形特性（既定の非線形特性）」に対応する。
+/// 部材の復元力特性（履歴則）。各履歴則の原典（武田モデル等）に基づく
+/// 履歴特性で、既定の非線形特性は本実装の既定として与える。
 /// 材端集中バネ（`ConcentratedSpringBeam`）の曲げ履歴に適用され、`Auto` は
 /// 構造種別ごとの既定（[`default_member_hysteresis`]）へ解決される。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -112,8 +112,8 @@ impl HysteresisModel {
     ];
 }
 
-/// 既定の部材曲げ履歴則（RESP-D「07 非線形解析（動的解析）」立体解析モデルの
-/// 既定の非線形特性表）。梁の曲げは **RC/SRC/CFT 造＝武田型（トリリニア）**、
+/// 既定の部材曲げ履歴則（本実装の既定の非線形特性。各履歴則の原典による）。
+/// 梁の曲げは **RC/SRC/CFT 造＝武田型（トリリニア）**、
 /// **S 造＝標準型（バイリニア）** を既定とする。ブレースの軸は S 造＝標準型。
 /// `rc_like` は RC/SRC/CFT（コンクリート系）か否か。
 pub fn default_member_hysteresis(rc_like: bool) -> HysteresisModel {
@@ -125,7 +125,7 @@ pub fn default_member_hysteresis(rc_like: bool) -> HysteresisModel {
 }
 
 /// 部材の履歴則の指定（要素 ID と履歴則の対。`Model::member_hysteresis_attrs`）。
-/// RESP-D「07 非線形解析（動的解析）」履歴特性。既定（Auto）と異なる履歴則を
+/// 各履歴則の原典による履歴特性。既定（Auto）と異なる履歴則を
 /// 部材個別に指定する場合に用いる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MemberHysteresisAttr {
@@ -224,7 +224,7 @@ pub struct ElementData {
     pub plastic_zone: Option<f64>,
     /// 節点バネ要素（`ElementKind::NodalSpring`）の局所軸バネ定数
     /// `[kx, ky, kz, krx, kry, krz]`（軸[N/mm]・せん断[N/mm]・回転[N·mm/rad]）。
-    /// RESP-D マニュアル計算編03「応力解析」§部材の変形と自由度により、節点バネは
+    /// 部材の変形と自由度の一般的な取り扱い（構造力学）では、節点バネは
     /// ねじり（θX）を非考慮とするのが既定だが、本実装では全 6 成分を入力可能とし、
     /// `krx` を明示的に 0 とすることで既定挙動に合わせる（入力で 0 以外も指定できる）。
     /// `None` は他要素種別、またはバネ定数未指定（剛性ゼロ扱い）。
@@ -238,12 +238,12 @@ pub struct DiaphragmDef {
     pub slaves: Vec<NodeId>,
     pub rigid: bool,
     /// この剛床が負担する地震用重量 [N]。多剛床の階では層の水平力 Pi を
-    /// 剛床ごとの重量比で分配するために用いる（RESP-D マニュアル
-    /// 「多剛床の設計用せん断力」）。None は未算定（階に単一剛床なら層重量全量）。
+    /// 剛床ごとの重量比で分配するために用いる（多剛床の設計用せん断力。
+    /// 令88条・昭55建告1793号）。None は未算定（階に単一剛床なら層重量全量）。
     #[serde(default)]
     pub weight: Option<f64>,
-    /// 副剛床の層せん断力係数 Ci の直接入力（RESP-D マニュアル
-    /// 「副剛床の Ci を直接入力した場合」）。Some の剛床は主系統の Ai 分布から
+    /// 副剛床の層せん断力係数 Ci の直接入力（令88条・昭55建告1793号の
+    /// 層せん断力係数）。Some の剛床は主系統の Ai 分布から
     /// 除外され、水平力 = ci_override × 剛床重量（等価震度扱い。上階に同一系統の
     /// 剛床が積み上がらない副剛床を想定）として作用する。None は主系統（Ai 分布）。
     #[serde(default)]
@@ -309,7 +309,7 @@ pub struct AreaLoad {
 }
 
 /// スラブの種別。片持ちスラブは境界の辺 0（`boundary[0]`→`boundary[1]`）を
-/// 取付き辺（大梁側）とし、荷重は取付き辺へ伝達する（RESP-D マニュアル「片持ちスラブ」）。
+/// 取付き辺（大梁側）とし、荷重は取付き辺へ伝達する（片持ちスラブの床荷重分配）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SlabKind {
     #[default]
@@ -317,11 +317,11 @@ pub enum SlabKind {
     Cantilever,
     /// 出隅の片持ちスラブ。荷重は伝達方向・片持ち梁の有無に関わらず
     /// 全て節点荷重として柱（`boundary[0]` の節点）へ伝達する
-    /// （RESP-D マニュアル「出隅の片持ちスラブ」）。
+    /// （出隅の片持ちスラブの床荷重分配）。
     Corner,
 }
 
-/// 一方向スラブの荷重伝達方向（床ごとに指定。RESP-D マニュアル「スラブ荷重」の〔X〕〔Y〕）。
+/// 一方向スラブの荷重伝達方向（床ごとに指定。床荷重の分配における伝達方向〔X〕〔Y〕）。
 /// `X` は全体座標 X 方向へ伝達（＝X 方向両側の辺が負担）、`Y` は Y 方向へ伝達。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OneWayDir {
@@ -347,7 +347,7 @@ pub struct Slab {
     /// （Interior は全辺支持、Cantilever は辺 0 のみ支持）。片持ちスラブに
     /// 片持ち梁・先端リブ小梁が取り付く場合、支持辺を追加指定すると
     /// スラブと同様のルール（最近接支持辺の負担面積）で分割伝達される
-    /// （RESP-D マニュアル「片持ちスラブ」の片持ち梁あり/先端リブ小梁ありの場合）。
+    /// （片持ちスラブに片持ち梁あり/先端リブ小梁ありの場合の床荷重分配）。
     #[serde(default)]
     pub edge_supported: Option<Vec<bool>>,
 }
@@ -389,9 +389,9 @@ pub struct Material {
     /// `None` の場合、ファイバ材料は弾性（降伏しない）として扱う（P5 非線形）。
     #[serde(default)]
     pub fy: Option<f64>,
-    /// コンクリートの種類（普通/軽量1種/軽量2種）。RESP-D マニュアル「柱梁自重」の
-    /// 単位体積重量表・「04 断面検定」の許容応力度低減（軽量コンクリートは
-    /// 普通コンクリートの 0.9 倍）に用いる。鋼材では意味を持たない（既定 Normal）。
+    /// コンクリートの種類（普通/軽量1種/軽量2種）。固定荷重の
+    /// 単位体積重量表・許容応力度低減（軽量コンクリートは
+    /// 普通コンクリートの 0.9 倍。技術基準解説書）に用いる。鋼材では意味を持たない（既定 Normal）。
     /// 旧スキーマ（フィールド無し）は Normal 扱い。
     #[serde(default)]
     pub concrete_class: crate::units::ConcreteClass,
@@ -434,10 +434,10 @@ pub struct Section {
     pub shape: Option<crate::section_shape::SectionShape>,
 }
 
-/// 長期応力解析の計算条件（RESP-D マニュアル計算編03「応力解析」）。
+/// 長期応力解析の計算条件（令82条の応力解析）。
 ///
-/// マニュアル原文:「長期応力解析においては、計算条件の指定により以下の部材について
-/// 長期軸力を負担させないことも可能です。― ブレース ― 柱、制振間柱」。
+/// 計算条件の指定により、一部の部材（ブレース・柱・制振間柱）について
+/// 長期軸力を負担させないことが可能である。
 ///
 /// 制振間柱（damper-equipped mullion column）は本リポジトリに要素種別が未実装のため、
 /// 対象外（既知の制約）。ブレースと柱（鉛直部材）のみ対応する。
@@ -447,7 +447,7 @@ pub struct StressAnalysisCfg {
     pub no_long_axial_brace: bool,
     /// 長期応力解析で柱（鉛直な `ElementKind::Beam`）に軸力を負担させない。
     pub no_long_axial_column: bool,
-    /// 剛性率・偏心率算定時の雑壁剛性の n 倍法係数（RESP-D「(7) 雑壁の剛性評価」
+    /// 剛性率・偏心率算定時の雑壁剛性の n 倍法係数（雑壁の剛性評価。RC 規準。
     /// `Kw' = n·Aw'·ΣKc/ΣAc` の n。入力値）。`None` は雑壁剛性を考慮しない。
     #[serde(default)]
     pub misc_wall_n: Option<f64>,
@@ -487,8 +487,8 @@ pub struct Model {
     /// 構造節点と区別するために保持し、再生成時に再利用する。
     #[serde(default)]
     pub generated_masters: Vec<NodeId>,
-    /// 剛性計算用の床スラブ厚 [mm]（建物全体で一律。RESP-D 計算編 02「剛性計算」
-    /// 注1 の設定に対応）。0 以下でスラブ協力幅による梁剛性増大を無効化（既定）。
+    /// 剛性計算用の床スラブ厚 [mm]（建物全体で一律。スラブ協力幅による梁剛性
+    /// 増大の算定に用いる。RC 規準）。0 以下でスラブ協力幅による梁剛性増大を無効化（既定）。
     #[serde(default)]
     pub slab_thickness: f64,
     /// 自重算定の付加設定（鉄骨重量割増率・部材付加線重量）。`None` は既定値。
@@ -497,7 +497,7 @@ pub struct Model {
     /// 壁要素の自重算定属性（開口・三方スリット）。
     #[serde(default)]
     pub wall_attrs: Vec<WallAttr>,
-    /// 複数開口の取り扱い（建物一律。RESP-D 計算編 02「剛性計算」）。
+    /// 複数開口の取り扱い（建物一律。耐震壁の開口。RC 規準）。
     /// 剛性の開口低減・耐震壁判定・検定への開口供給に適用する
     /// （自重控除は常に生の開口面積和）。既定は「等価開口とする」。
     #[serde(default)]
@@ -505,32 +505,32 @@ pub struct Model {
     /// フレーム外雑壁。
     #[serde(default)]
     pub misc_walls: Vec<MiscWall>,
-    /// 応力解析の計算条件（RESP-D 計算編03「応力解析」。長期軸力を負担させない部材の指定）。
+    /// 応力解析の計算条件（令82条の応力解析。長期軸力を負担させない部材の指定）。
     #[serde(default)]
     pub stress_cfg: StressAnalysisCfg,
     /// S 造部材の断面検定用属性（継手部・スカラップ欠損、横座屈長さ指定。
-    /// RESP-D マニュアル 04 断面検定）。
+    /// 鋼構造設計規準）。
     #[serde(default)]
     pub steel_design_attrs: Vec<SteelDesignAttr>,
     /// 座屈補剛ブレース（BRB）の断面検定用属性（メーカー許容値。
-    /// RESP-D マニュアル 04 断面検定）。
+    /// 各メーカーの製品技術資料）。
     #[serde(default)]
     pub brb_attrs: Vec<BrbAttr>,
-    /// PCa（プレキャスト）梁の水平接合面検定用属性（RESP-D マニュアル 04 断面検定）。
+    /// PCa（プレキャスト）梁の水平接合面検定用属性（水平接合面のせん断摩擦検定）。
     #[serde(default)]
     pub pca_attrs: Vec<PcaBeamAttr>,
-    /// 免震支承材の非線形特性（`ElementKind::Isolator` 要素、RESP-D 05 非線形モデル）。
+    /// 免震支承材の非線形特性（`ElementKind::Isolator` 要素、各免震部材指針）。
     #[serde(default)]
     pub isolator_attrs: Vec<IsolatorAttr>,
-    /// 部材の履歴則の個別指定（RESP-D「07 非線形解析（動的解析）」履歴特性）。
+    /// 部材の履歴則の個別指定（各履歴則の原典）。
     /// 未指定の部材は構造種別ごとの既定（[`default_member_hysteresis`]）に従う。
     #[serde(default)]
     pub member_hysteresis_attrs: Vec<MemberHysteresisAttr>,
-    /// 制振ダンパー要素（`ElementKind::Damper`）の特性（RESP-D「07」制振要素）。
+    /// 制振ダンパー要素（`ElementKind::Damper`）の特性（各制振部材の力学モデル）。
     #[serde(default)]
     pub damper_attrs: Vec<DamperAttr>,
-    /// 一本部材の指定（RESP-D マニュアル 04 断面検定「採用応力 ■一本部材指定時の
-    /// 採用応力」）。各エントリは**軸方向に連続する梁要素の ID を並び順**で持ち、
+    /// 一本部材の指定（断面検定の採用応力。一本部材指定時の採用応力の扱い）。
+    /// 各エントリは**軸方向に連続する梁要素の ID を並び順**で持ち、
     /// 断面検定の採用応力（端部・中央モーメント、部材長、内法長、せん断スパン比
     /// 代表値）をグループ 1 本の部材として評価する。要素の解析（剛性・内力）は
     /// 分割部材のまま行い、検定の文脈だけを合成する。

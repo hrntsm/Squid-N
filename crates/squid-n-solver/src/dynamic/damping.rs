@@ -3,8 +3,8 @@ use squid_n_math::sparse::{assemble_csc, sparse_matvec, weighted_sum_csc, Triple
 
 type SparseMat = SparseColMat<usize, f64>;
 
-/// モード別減衰の 1 モード分（RESP-D「07 非線形解析（動的解析）」減衰マトリクス
-/// 「モード別減衰」）。`shape` は質量正規化した固有ベクトル（φᵀMφ=1、縮約空間）。
+/// モード別減衰の 1 モード分（モード別減衰、構造動力学）。
+/// `shape` は質量正規化した固有ベクトル（φᵀMφ=1、縮約空間）。
 #[derive(Clone, Debug)]
 pub struct ModalDampingMode {
     /// 固有円振動数 ω [rad/s]。
@@ -15,7 +15,7 @@ pub struct ModalDampingMode {
     pub shape: Vec<f64>,
 }
 
-/// 減衰モデル（設計書 §10.5 / R9、RESP-D「07」減衰マトリクス）。
+/// 減衰モデル（設計書 §10.5 / R9、減衰マトリクス、構造動力学）。
 pub enum Damping {
     /// 質量比例減衰 C = a0·M。a0 = 2·h·ω で対象振動数 ω に減衰比 h を与える。
     /// 低次モードを強く減衰させる（高次は残る）。
@@ -34,7 +34,7 @@ pub enum Damping {
     /// モード別減衰。各モードに独立の減衰比 h_i を与える。
     /// C = Σ_i 2·h_i·ω_i·(M φ_i)(M φ_i)ᵀ（質量正規化モード）。
     Modal { modes: Vec<ModalDampingMode> },
-    /// 瞬間剛性比例・h1 一定（RESP-D「07」減衰マトリクス「h1 一定」）。
+    /// 瞬間剛性比例・h1 一定（h1 一定、構造動力学）。
     /// C = 2·h1/ω1·[S]、ω1 = ω1e·√(uᵀ[S]u / uᵀ[Se]u)（[S]=瞬間剛性, [Se]=初期剛性）。
     /// 非線形解析で減衰比 h1 を一定に保つよう ω1 を毎ステップ更新する。
     TangentStiffnessConstantH { h1: f64, omega1e: f64 },
@@ -49,8 +49,8 @@ pub enum StiffnessKind {
     Tangent,
 }
 
-/// 減衰力の評価方式（RESP-D「07 非線形解析（動的解析）」減衰マトリクス
-/// 「累積型・非累積型」）。減衰行列 C が時々刻々変化する（接線比例・モード別で
+/// 減衰力の評価方式（累積型・非累積型、構造動力学）。
+/// 減衰行列 C が時々刻々変化する（接線比例・モード別で
 /// 剛性が変化する）場合に両者は異なる。C 一定なら両者は一致する。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum DampingAccumulation {
@@ -104,7 +104,7 @@ impl Damping {
     }
 
     /// 瞬間剛性 `k_t`・初期剛性 `k_e`・現在変位 `u` から接線減衰行列 C を再構成する
-    /// （RESP-D「07」剛性変更に伴う減衰項の変更）。接線比例でない場合は初期 C を返す。
+    /// （剛性変更に伴う減衰項の変更、構造動力学）。接線比例でない場合は初期 C を返す。
     pub fn assemble_c_tangent(
         &self,
         m: &SparseMat,

@@ -114,7 +114,7 @@ pub enum SectionShape {
 /// SRC 断面の解析剛性算定に用いる鉄骨の等価ヤング係数比（暫定既定）。
 pub const N_S_EQ: f64 = 15.0;
 
-/// RC 断面のせん断変形用断面積の形状係数 κ（As = A/κ。RESP-D 計算編 02「剛性計算」）。
+/// RC 断面のせん断変形用断面積の形状係数 κ（As = A/κ。材料力学のせん断形状係数）。
 pub const KAPPA_RC: f64 = 1.2;
 
 /// 鋼材のヤング係数 [N/mm²]（SRC 内蔵鉄骨・CFT 鋼管の換算用標準値）。
@@ -131,7 +131,7 @@ const NU_CONCRETE: f64 = 0.2;
 const GAMMA_CONCRETE: f64 = 23.0;
 
 /// コンクリート強度 Fc [N/mm²] からヤング係数 Ec [N/mm²] を算定する
-/// （RESP-D 計算編 02 の Ec=3.35·10⁴·(γ/24)²·(Fc/60)^(1/3)、γ=23 固定）。
+/// （RC 規準の Ec=3.35·10⁴·(γ/24)²·(Fc/60)^(1/3)、γ=23 固定）。
 pub fn concrete_young_modulus(fc: f64) -> f64 {
     if fc <= 0.0 {
         return 0.0;
@@ -140,7 +140,7 @@ pub fn concrete_young_modulus(fc: f64) -> f64 {
 }
 
 /// 耐震壁（壁板＋両側柱＝平面 I 形断面）のせん断形状係数
-/// （RESP-D 計算編 02「剛性計算」耐震壁の式）。
+/// （側柱付き壁を I 形断面とみなしたせん断形状係数。材料力学）。
 ///
 /// κ = 3(1+ξ)/(5·(1−ξ³(1−η))²)·[η + ξ(1−η)·((15/8)(1−ξ²)² − ξ⁴·η)]
 ///
@@ -166,7 +166,7 @@ pub fn wall_shear_shape_factor(xi: f64, eta: f64) -> f64 {
     }
 }
 
-/// SRC/CFT の複合換算断面性能（要素剛性用。RESP-D 計算編 02「剛性計算」）。
+/// SRC/CFT の複合換算断面性能（要素剛性用。各種合成構造設計指針）。
 ///
 /// いずれも要素に割り当てた材料（SRC はコンクリート、CFT は鋼管）を基準とした
 /// 等価値。質量算定用の断面積（`calc_area`）とは区別して用いること。
@@ -181,7 +181,7 @@ pub struct CompositeProps {
     pub as_z: f64,
 }
 
-/// 矩形断面の St.Venant ねじり定数（RESP-D 計算編 02「剛性計算」の式）。
+/// 矩形断面の St.Venant ねじり定数（材料力学）。
 ///
 /// J = (b³·h/16)·[16/3 − 3.36·(b/h)·(1 − (1/12)(b/h)⁴)]（b: 短辺, h: 長辺）
 ///
@@ -259,8 +259,8 @@ impl SectionShape {
     }
 
     /// 鉄骨断面の塑性断面係数 Zp [mm³]（強軸）。H・箱・パイプは閉形式、
-    /// それ以外（RC・SRC・CFT・不明形状）は None を返す（RESP-D「05 非線形モデル」
-    /// 鉄骨梁の全塑性モーメント Mp=Zp·σy に用いる）。
+    /// それ以外（RC・SRC・CFT・不明形状）は None を返す（鉄骨梁の全塑性
+    /// モーメント Mp=Zp·σy の算定に用いる。材料力学）。
     pub fn plastic_modulus_strong(&self) -> Option<f64> {
         match *self {
             SectionShape::SteelH {
@@ -533,7 +533,7 @@ impl SectionShape {
             SectionShape::RcRect { b, d, .. } => rect_torsion_j(b, d),
             SectionShape::RcCircle { d, .. } => std::f64::consts::PI * d.powi(4) / 32.0,
             // ねじりは RC 矩形と同じ扱い（内蔵鉄骨の寄与は無視。
-            // マニュアルの J=(sG/cG)·sJ+cJ 複合換算は Material 依存のため今後の課題）。
+            // 各種合成構造設計指針の J=(sG/cG)·sJ+cJ 複合換算は Material 依存のため今後の課題）。
             SectionShape::SrcRect { b, d, .. } => rect_torsion_j(b, d),
             SectionShape::CftBox {
                 height,
@@ -555,7 +555,7 @@ impl SectionShape {
 
     /// 軸剛性（EA）算定用の等価断面積 [mm²]。
     ///
-    /// SRC はマニュアル（RESP-D 計算編 02「剛性計算」）の
+    /// SRC は各種合成構造設計指針の
     /// An = rcAn + sAn·(ns−1) に従い鉄骨の等価換算断面を累加する
     /// （ns は暫定的に `N_S_EQ`）。質量算定用の断面積（`calc_area` は
     /// コンクリート全断面）とは区別して用いること。他形状は `calc_area` と同値。
@@ -579,7 +579,7 @@ impl SectionShape {
     }
 
     /// SRC 断面の等価断面性能を、実際のヤング係数比 ns=Es/Ec から算定する
-    /// （RESP-D 計算編 02: An=rcAn+sAn·(ns−1)、Ie=rcIe+sIe·(ns−1)、
+    /// （各種合成構造設計指針: An=rcAn+sAn·(ns−1)、Ie=rcIe+sIe·(ns−1)、
     /// As=rcAs+sAs·(ngs−1)、J=cJ+(sG/cG)·sJ）。
     ///
     /// `ec`/`nu_c`: 要素材料（コンクリート）のヤング係数・ポアソン比。
@@ -623,8 +623,8 @@ impl SectionShape {
     }
 
     /// CFT 断面（CftBox/CftPipe）の等価断面性能を鋼管基準で算定する
-    /// （RESP-D 計算編 02: SRC柱「CFTもこれに準じます」の累加を鋼基準の
-    /// 1/n 換算で適用。J は S柱の J=(sG/cG)·sJ+cJ を鋼基準 J=sJ+cJ/ngs に換算）。
+    /// （各種合成構造設計指針: SRC 柱に準じる累加（CFT もこれに準じる）を鋼基準の
+    /// 1/n 換算で適用。J は S 柱の J=(sG/cG)·sJ+cJ を鋼基準 J=sJ+cJ/ngs に換算）。
     ///
     /// `es`/`nu_s`: 要素材料（鋼管）のヤング係数・ポアソン比、
     /// `fc`: 充填コンクリート強度（`Material.fc`）。
@@ -691,7 +691,7 @@ impl SectionShape {
         let iy = self.calc_iy();
         let iz = self.calc_iz();
         let j = self.calc_j();
-        // せん断変形用断面積 As（RESP-D 計算編 02「剛性計算」）。
+        // せん断変形用断面積 As（材料力学のせん断形状係数）。
         // ペアリング規約（P1 §4.1）: as_z ↔ iy（強軸曲げ→z方向せん断）、
         // as_y ↔ iz（弱軸曲げ→y方向せん断）。
         // - RC/SRC: As = A/κ（κ=1.2）。SRC は鉄骨分 sAs·(ngs−1) を累加

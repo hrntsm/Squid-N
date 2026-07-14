@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// 複数開口の取り扱い（RESP-D マニュアル計算編 02「剛性計算」）。
+/// 複数開口の取り扱い（耐震壁の開口。RC 規準）。
 /// 建物全体で一律に選択する（`Model::multi_opening_mode`）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MultiOpeningMode {
@@ -17,7 +17,7 @@ pub enum MultiOpeningMode {
     Auto,
 }
 
-/// 壁の個別開口（RESP-D マニュアル計算編 02「剛性計算」複数開口の取り扱い）。
+/// 壁の個別開口（耐震壁の複数開口の取り扱い。RC 規準）。
 ///
 /// 寸法は壁面内で定義する: `width`=壁長さ方向の開口長さ l0 [mm]、
 /// `height`=壁高さ方向の開口高さ h0 [mm]。
@@ -62,7 +62,7 @@ impl WallOpening {
     }
 
     /// 自動判定モードで 2 開口を包絡してよいかの判定
-    /// （RESP-D マニュアル計算編 02「複数開口の取り扱い」の判定図）。
+    /// （複数開口の取り扱いの判定図。RC 規準）。
     ///
     /// **l < 1.5·h または l < 1m（1000mm）のとき包絡開口とみなす。**
     /// - l: 開口間距離（矩形間の純距離。重なっていれば 0）
@@ -84,8 +84,8 @@ impl WallOpening {
 }
 
 /// 壁要素（`ElementKind::Wall`/`Shell`）の壁属性
-/// （RESP-D マニュアル「壁自重」の開口・三方スリット、および
-/// 計算編 02「剛性計算」の開口低減・耐震壁判定に用いる個別開口寸法）。
+/// （壁自重（固定荷重）の開口・三方スリット、および
+/// 剛性計算の開口低減・耐震壁判定に用いる個別開口寸法。RC 規準）。
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WallAttr {
     pub elem: ElemId,
@@ -98,8 +98,8 @@ pub struct WallAttr {
     #[serde(default)]
     pub opening_weight: f64,
     /// 三方スリット。true の場合、壁自重は上下分配せず全て上部の節点
-    /// （壁頂部の節点）へ伝達する（マニュアル「壁に三方スリットが指定されて
-    /// いる場合、壁荷重は全て上部の大梁に伝達され」の節点重量版）。
+    /// （壁頂部の節点）へ伝達する（三方スリット壁の壁荷重は全て上部の大梁に
+    /// 伝達する扱いの節点重量版）。
     #[serde(default)]
     pub three_side_slit: bool,
     /// 個別開口の寸法リスト。非空の場合、開口の面積評価（自重控除・
@@ -146,14 +146,14 @@ impl WallAttr {
         }
     }
 
-    /// 複数開口の取り扱い（RESP-D 計算編 02）を適用した開口リスト。
+    /// 複数開口の取り扱い（RC 規準）を適用した開口リスト。
     /// - `Equivalent`: 個別開口をそのまま返す（等価開口への統合は消費側の式）。
     /// - `Envelope`: 位置（offset）を持つ開口全体の包絡矩形 1 つに置換。
     ///   位置不明の開口は包絡できないため個別のまま残る。
     /// - `Auto`: 包絡可能（`WallOpening::can_envelope`、l<1.5h または l<1m）な開口対が
     ///   無くなるまで繰り返し包絡開口を作成し、残った開口を返す
-    ///   （マニュアル「包絡できなくなった時点の開口状況で『等価開口とする』と
-    ///   同様の判定を行います」に対応。等価開口への統合は消費側）。
+    ///   （包絡できなくなった時点の開口状況で『等価開口とする』と
+    ///   同様の判定を行う扱いに対応。等価開口への統合は消費側）。
     pub fn openings_for_mode(&self, mode: MultiOpeningMode) -> Vec<WallOpening> {
         match mode {
             MultiOpeningMode::Equivalent => self.openings.clone(),
@@ -216,8 +216,8 @@ impl WallAttr {
     }
 }
 
-/// S 造部材の断面検定用属性（RESP-D マニュアル 04 断面検定「鉄骨の断面検定に
-/// おける断面性能」）。継手部・スカラップによる断面欠損と横座屈長さの指定に用いる。
+/// S 造部材の断面検定用属性（鋼構造設計規準。鉄骨の断面検定における
+/// 断面性能）。継手部・スカラップによる断面欠損と横座屈長さの指定に用いる。
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SteelDesignAttr {
     pub elem: ElemId,
@@ -239,8 +239,7 @@ pub struct SteelDesignAttr {
 }
 
 /// 座屈補剛ブレース（BRB）の断面検定用属性。許容値はメーカー資料による入力値
-/// （RESP-D マニュアル「JFEシビル二重鋼管座屈補剛ブレース／日鉄アンボンド
-/// ブレースの断面検定」）。
+/// （各メーカーの製品技術資料による）。
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BrbAttr {
     pub elem: ElemId,
@@ -253,7 +252,7 @@ pub struct BrbAttr {
     pub length_reduction: f64,
 }
 
-/// 免震支承材の種別（RESP-D マニュアル「05 非線形モデル」免震支承材）。
+/// 免震支承材の種別（各免震部材指針）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IsolatorKind {
     /// 天然ゴム系積層ゴム（マルチシアスプリング、水平バイリニア）。
@@ -274,7 +273,7 @@ fn default_cqd_gamma() -> [f64; 3] {
 }
 
 /// 免震支承材の特性（`ElementKind::Isolator` 要素の非線形特性、
-/// RESP-D「05 非線形モデル」）。`Model::isolator_attrs` に要素 ID と対で保持する。
+/// 各免震部材指針）。`Model::isolator_attrs` に要素 ID と対で保持する。
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IsolatorProps {
     /// 支承種別。
@@ -297,7 +296,7 @@ pub struct IsolatorProps {
     #[serde(default)]
     pub total_rubber_thickness: f64,
     /// 二次剛性の歪依存係数 CKd(γ)=c0+c1·γ+c2·γ²（K2(γ)=K2·CKd(γ)）。
-    /// 既定 [1,0,0]（歪依存なし）。RESP-D「07」LRB 統一型・高減衰ゴムの歪依存。
+    /// 既定 [1,0,0]（歪依存なし）。LRB・高減衰ゴムの歪依存（各免震部材の製品技術資料）。
     #[serde(default = "default_ckd_gamma")]
     pub ckd_gamma: [f64; 3],
     /// 特性耐力の歪依存係数 CQd(γ)=c0+c1·γ+c2·γ²（Qd(γ)=Qd·CQd(γ)）。既定 [1,0,0]。
@@ -330,14 +329,14 @@ pub struct IsolatorAttr {
     pub props: IsolatorProps,
 }
 
-/// 制振ダンパーの種別（RESP-D「07 非線形解析（動的解析）」制振要素）。
+/// 制振ダンパーの種別（各制振部材の力学モデル）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum DamperKind {
     /// マクスウェル要素（バネ Kd と粘性ダッシュポットの直列。速度依存型）。
     #[default]
     Maxwell,
     /// 履歴型（弾塑性バイリニア）ダンパー。鋼材系ダンパー（SUB／アンボンドブレース／
-    /// 二重鋼管座屈補剛ブレース／鉛ダンパー／U 型ダンパー等、RESP-D の標準型バイリニア）。
+    /// 二重鋼管座屈補剛ブレース／鉛ダンパー／U 型ダンパー等の標準型バイリニア）。
     HystereticBilinear,
 }
 
@@ -348,7 +347,7 @@ fn default_damper_k2_ratio() -> f64 {
     0.02
 }
 
-/// 制振ダンパー要素（`ElementKind::Damper`）の特性（RESP-D「07」制振要素）。
+/// 制振ダンパー要素（`ElementKind::Damper`）の特性（各制振部材の力学モデル）。
 ///
 /// - **マクスウェル（速度依存型）:** バネ剛性 `Kd` と粘性ダッシュポット
 ///   （力 `Fc=C0·sign(V)·|V|^α`）の直列。α=1 で線形粘性。
@@ -392,7 +391,7 @@ pub struct DamperAttr {
     pub props: DamperProps,
 }
 
-/// PCa（プレキャスト）梁の水平接合面検定用属性（RESP-D マニュアル 04）。
+/// PCa（プレキャスト）梁の水平接合面検定用属性（水平接合面のせん断摩擦検定）。
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PcaBeamAttr {
     pub elem: ElemId,
@@ -406,7 +405,7 @@ pub struct PcaBeamAttr {
     pub joint_depth_from_top: f64,
 }
 
-/// フレーム外雑壁の荷重伝達タイプ（RESP-D マニュアル「フレーム外雑壁」）。
+/// フレーム外雑壁の荷重伝達タイプ（雑壁自重の伝達。本実装の規則）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MiscWallTransfer {
     /// 0.5m 分割した各領域の中心から最も近い柱の上下節点へ 1/2 ずつ伝達。

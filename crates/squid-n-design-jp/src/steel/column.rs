@@ -1,5 +1,5 @@
-//! 鉄骨造柱の断面検定（RESP-D マニュアル「04 断面検定」鋼構造部分
-//! 「鉄骨造柱の断面検定」）。
+//! 鉄骨造柱の断面検定（鋼構造設計規準の
+//! 鉄骨造柱の許容応力度検定）。
 
 use crate::material_strength::{steel_fc, steel_fs, steel_ft};
 use crate::{CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
@@ -8,7 +8,7 @@ use squid_n_core::model::Section;
 use super::section::{steel_fb_h, steel_i_t, steel_lateral_buckling_c};
 use super::{nonzero, safe_denom, section_modulus, shape_of, shear_area, ShapeCategory};
 
-/// 鉄骨造柱の断面検定（マニュアル「鉄骨造柱の断面検定」）。
+/// 鉄骨造柱の断面検定（鋼構造設計規準）。
 ///
 /// 軸力+二軸曲げ: `σ/f + σbX/fbX + σbY/fbY ≤ 1.0`
 /// （円形鋼管は `σb=√(mz²+my²)/Z` に一本化）。

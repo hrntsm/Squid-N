@@ -629,7 +629,7 @@ fn compute_design_check_job(model: &Model, load_case: Option<u32>) -> Result<Job
     })
 }
 
-/// 終局検定ジョブ（RESP-D「06 終局検定」）。RC 矩形部材の塑性理論式による
+/// 終局検定ジョブ（靭性保証型耐震設計指針）。RC 矩形部材の塑性理論式による
 /// 終局せん断強度 Qsu・付着割裂耐力 Qbu・軸終局耐力に対する余裕度を算定する。
 ///
 /// 柱の曲げ終局強度 Mu・軸余裕度に用いる設計軸力は、`load_case`（未指定なら
