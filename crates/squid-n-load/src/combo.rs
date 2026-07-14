@@ -7,7 +7,7 @@ use squid_n_core::model::LoadCombination;
 /// - `delta2`: 暴風時 `G+P+δ2・S±W` の低減係数（既定 0.35）
 /// - `delta3`: 地震時 `G+P+δ3・S±K` の低減係数（既定 0.35）
 ///
-/// マニュアルでは直接入力が可能（デフォルト δ1=0.7、δ2=δ3=0.35）。
+/// 本実装では直接入力が可能（デフォルト δ1=0.7、δ2=δ3=0.35）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SnowFactors {
     pub delta1: f64,

@@ -188,7 +188,7 @@ pub(crate) fn collect_misc_walls(model: &Model) -> Vec<MiscWall> {
             (t1, t0)
         };
 
-        // 位置付き開口の包絡矩形（マニュアル: 複数開口は包絡開口により
+        // 位置付き開口の包絡矩形（複数開口は包絡開口により
         // 壁の長さを考慮する）
         let envelope = attr.and_then(|a| {
             let mut rect: Option<[f64; 4]> = None;

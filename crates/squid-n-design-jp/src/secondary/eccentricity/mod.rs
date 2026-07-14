@@ -355,7 +355,7 @@ pub fn story_eccentricity(model: &Model, story: StoryId) -> Eccentricity {
     eccentricity(&cols, com, cor)
 }
 
-// ===== 雑壁の剛性評価（n 倍法。マニュアル「(7) 雑壁の剛性評価」）=====
+// ===== 雑壁の剛性評価（n 倍法）=====
 
 /// 雑壁 1 枚の等価水平剛性 `Kw' = n·Aw'·ΣKc/ΣAc`。
 ///
@@ -382,14 +382,14 @@ pub fn sum_column_area(model: &Model, story: StoryId) -> f64 {
 }
 
 /// 当該層に帰属するフレーム外雑壁を n 倍法で等価剛性要素へ換算し、`cols` に
-/// 追加する（剛心・ねじり剛性への寄与。マニュアル「(7) 雑壁の剛性評価」）。
+/// 追加する（剛心・ねじり剛性への寄与）。
 ///
 /// - n 係数は `Model::stress_cfg.misc_wall_n`（`None` なら雑壁剛性を考慮しない）
 /// - 帰属層: 壁の中間高さ z が（直下層 elevation, 当該層 elevation] に入る壁
 /// - `Aw' = 壁の平面長さ × 壁厚`（`MiscWall::thickness` 未設定の壁は対象外）
 /// - 方向別に `Kw'x = n·Aw'·ΣKc,x/ΣAc`, `Kw'y = n·Aw'·ΣKc,y/ΣAc` を求め、
 ///   壁面内方向の方向余弦 (cx, cy) で `dx = Kw'x·cx²`, `dy = Kw'y·cy²` として
-///   壁の平面中点に置く。ΣAc = 0 の場合は Kw' = 0（マニュアル但し書き）。
+///   壁の平面中点に置く。ΣAc = 0 の場合は Kw' = 0（0 除算回避）。
 pub fn append_misc_wall_stiffnesses(
     model: &Model,
     story: StoryId,

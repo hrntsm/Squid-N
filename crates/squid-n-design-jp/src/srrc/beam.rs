@@ -35,8 +35,8 @@ pub(crate) fn src_beam_check(
     let long_term = ctx.term == LoadTerm::Long;
     let grade = mat.name.as_str();
 
-    // 軽量コンクリート1種・2種は許容応力度を 0.9 倍に低減（マニュアル
-    // 「04 断面検定」。`mat.concrete_class` を考慮した class 対応版を使用）。
+    // 軽量コンクリート1種・2種は許容応力度を 0.9 倍に低減（SRC規準1987。
+    // `mat.concrete_class` を考慮した class 対応版を使用）。
     let fs = concrete_allowable_shear_class(fc_raw, mat.concrete_class, long_term);
     let shear_grade = rebar
         .shear

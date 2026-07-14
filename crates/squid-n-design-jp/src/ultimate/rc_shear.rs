@@ -275,7 +275,7 @@ pub fn bond_split_ratio(b: f64, db1: f64, n_bars: u32, cover_side: f64, cover_bo
 /// ```
 ///
 /// # 簡略化（doc 兼申し送り）
-/// マニュアルの `kst` は `(54 + 45·Nw/N1)·(bsi+1)·pw`（bci≥bsi）と
+/// 同指針の `kst` は `(54 + 45·Nw/N1)·(bsi+1)·pw`（bci≥bsi）と
 /// `140·Aw/(db·s)`（bci<bsi）の 2 分岐だが、前者の `Nw`（中子筋の本数）・`N1`
 /// （外側鉄筋本数）はモデルに保持されないため、本実装では後者の
 /// `kst = 140·aw/(db1·x)`（横補強筋の直接的な拘束効果）を代表式として全域に

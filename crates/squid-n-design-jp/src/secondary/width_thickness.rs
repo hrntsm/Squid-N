@@ -186,7 +186,7 @@ fn h_web_limits(member_use: SteelMemberUse, is_490: bool) -> WtLimits {
 
 /// 円形鋼管（径厚比 D/t）の幅厚比限界。
 ///
-/// マニュアル表には柱の行のみが定義されている。梁の円形鋼管はマニュアルに
+/// 構造規定表には柱の行のみが定義されている。梁の円形鋼管は同表に
 /// 独立の行が無いため、柱の行を準用する（呼び出し側では `member_use` を
 /// 見ずに本関数を呼ぶ）。
 fn pipe_limits(is_490: bool) -> WtLimits {
@@ -235,7 +235,7 @@ fn box_grade_from_name(name: &str) -> Option<BoxGrade> {
 }
 
 /// 角形鋼管（角形鋼管・BOX）の幅厚比限界（d=H、部位は柱の行のみ。梁の角形鋼管も
-/// マニュアルに独立の行が無いため柱の行を準用する）。
+/// 構造規定表に独立の行が無いため柱の行を準用する）。
 fn box_limits(g: BoxGrade) -> WtLimits {
     match g {
         BoxGrade::Stkr400 => WtLimits {
@@ -320,7 +320,7 @@ fn is_490_class(grade_name: &str, thickness: f64) -> bool {
 ///
 /// # 部材用途と表の行
 /// `member_use` で柱／梁の行を選ぶ（H形はフランジ・ウェブとも柱・梁で異なる
-/// 限界値を持つ）。角形鋼管・円形鋼管はマニュアル表に梁の行が無いため、
+/// 限界値を持つ）。角形鋼管・円形鋼管は構造規定表に梁の行が無いため、
 /// `member_use` によらず柱の行を準用する。
 ///
 /// # 鋼種の判定
@@ -586,7 +586,7 @@ mod tests {
     }
 
     /// フランジは FA だがウェブが FC → 悪い方の FC が採用される（worst 合成）。
-    /// かつ、マニュアルの取り方（フランジ b/(2*t2)、ウェブ (H-2*t2)/t1）を
+    /// かつ、構造規定表の取り方（フランジ b/(2*t2)、ウェブ (H-2*t2)/t1）を
     /// 内部で使っていることの検証も兼ねる:
     /// SteelH { height:400, width:200, web_thick:8, flange_thick:13 } では
     /// flange_wt = (200/2)/13 ≈ 7.69（柱400級 FA=9.5 以下 → FA）、
@@ -684,7 +684,7 @@ mod tests {
         assert_eq!(rank, MemberRank::FC);
     }
 
-    /// 梁の円形鋼管・角形鋼管は柱の行を準用する（マニュアルに梁の行が無いため）。
+    /// 梁の円形鋼管・角形鋼管は柱の行を準用する（構造規定表に梁の行が無いため）。
     #[test]
     fn test_s_member_rank_by_kihon_beam_pipe_and_box_use_column_row() {
         let pipe = SectionShape::SteelPipe {

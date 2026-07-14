@@ -685,7 +685,7 @@ fn test_corner_slab_all_load_to_column_node() {
 
 #[test]
 fn test_corner_slab_ignores_one_way_and_edge_supported() {
-    // マニュアル: 出隅の片持ちスラブは伝達方向・片持ち梁の取付きに関わらず全て節点荷重。
+    // 出隅の片持ちスラブは伝達方向・片持ち梁の取付きに関わらず全て節点荷重。
     use squid_n_core::ids::{NodeId, SlabId};
     use squid_n_core::model::{AreaLoad, OneWayDir, SlabKind};
     let (lx, ly) = (2500.0_f64, 1800.0_f64);

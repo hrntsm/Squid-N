@@ -344,7 +344,7 @@ fn test_build_behavior_brace_normal_full_stiffness() {
 }
 
 /// 引張専用ブレース: 弾性解析（build_behavior）では剛性を1/2にモデル化する
-/// （マニュアル「引張と圧縮が対で存在するとみなし、弾性解析では剛性を1/2」）。
+/// （引張と圧縮が対で存在するとみなし、弾性解析では剛性を1/2）。
 #[test]
 fn test_build_behavior_brace_tension_only_half_stiffness() {
     let (model, elem) = make_brace_model(true);
@@ -360,7 +360,7 @@ fn test_build_behavior_brace_tension_only_half_stiffness() {
 }
 
 /// 引張専用ブレース: 弾塑性解析（build_nonlinear_behavior）では初期剛性を
-/// 1倍とする（マニュアル「弾塑性解析の場合は初期剛性は1倍とする」）。
+/// 1倍とする（弾塑性解析の場合は初期剛性は1倍とする）。
 #[test]
 fn test_build_nonlinear_behavior_brace_tension_only_full_stiffness() {
     let (model, elem) = make_brace_model(true);

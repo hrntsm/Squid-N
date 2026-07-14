@@ -180,7 +180,7 @@ impl App {
                     self.last_static = Some(StaticKey::Combo(pos));
                     self.staleness.mark_fresh();
                     // 荷重継続性区分（長期/短期）は組合せ内容から自動判定する
-                    // （マニュアル「荷重の組合せ」: G+P=長期、地震・積雪・風入り=短期）。
+                    // （令82条の荷重組合せ: G+P=長期、地震・積雪・風入り=短期）。
                     self.design_term = if squid_n_load::combo::is_short_term_combo(&combo.name) {
                         LoadTerm::Short
                     } else {
@@ -1268,8 +1268,8 @@ impl App {
     /// 設計書 §6.2.3）。
     ///
     /// - 部材種別は部材軸の鉛直成分から判定（柱/梁/ブレース）。
-    /// - せん断スパン比 M/(Q·d) 用の代表値は、マニュアルの規定
-    ///   「モーメントが最大となる検定位置の値を採用」に従い部材単位で求める。
+    /// - せん断スパン比 M/(Q·d) 用の代表値は、モーメントが最大となる
+    ///   検定位置の値を採用する方針で部材単位に求める。
     /// - 柱は軸力＋二軸曲げ（n, my, mz）を検定に渡す。
     /// - 検定器は形状優先（SRC/CFT）、それ以外は材料名で鋼/RC を選択する。
     pub fn run_design_check(&mut self) {
@@ -1393,7 +1393,7 @@ impl App {
                     };
                     squid_n_design_jp::SeismicQd {
                         long_at: mf_long.at.clone(),
-                        // 割増係数 n（マニュアル: 柱は 1.5 以上）。梁・柱とも 1.5。
+                        // 割増係数 n（柱は 1.5 以上）。梁・柱とも 1.5。
                         n_factor: 1.5,
                         clear_length,
                         method: self.analysis_cfg.qd_method,

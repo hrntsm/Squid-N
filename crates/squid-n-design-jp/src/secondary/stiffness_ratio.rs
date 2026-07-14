@@ -8,7 +8,7 @@
 //!
 //! 剛性率の式自体（Ks=H/δ, Rs=Ks/mean）は
 //! `crate::secondary::holding_capacity::stiffness_ratios` を再利用する。
-//! 本モジュールは「δ に何を使うか」をマニュアル通りに揃える層である。
+//! 本モジュールは「δ に何を使うか」を上記の実務的取扱いに沿って揃える層である。
 
 use squid_n_core::ids::{ElemId, StoryId};
 use squid_n_core::model::{ElementKind, Model, Node};
@@ -24,7 +24,7 @@ pub struct ColumnDrift {
 }
 
 /// 斜め柱判定の許容平面ズレ [mm]。柱頭・柱脚の平面位置がこれを超えて
-/// 異なる柱は「斜め柱」として層間変形角の確認から除外する（マニュアル規定）。
+/// 異なる柱は「斜め柱」として層間変形角の確認から除外する（本実装の扱い）。
 const INCLINED_PLAN_TOL: f64 = 1.0;
 
 /// 鉛直部材（柱）判定の方向余弦しきい値（`eccentricity::column_stiffnesses` と同じ）。
@@ -90,7 +90,7 @@ pub fn column_drifts(
     out
 }
 
-/// 当該層の柱の層間変位の最大値 `max(δ1, δ2, …, δn)` [mm]（マニュアル式の分子）。
+/// 当該層の柱の層間変位の最大値 `max(δ1, δ2, …, δn)` [mm]（層間変形角の式の分子）。
 /// 柱が無い（または全て斜め柱の）層は `None`。
 pub fn max_column_drift(
     model: &Model,

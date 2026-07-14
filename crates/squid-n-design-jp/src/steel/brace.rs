@@ -7,7 +7,7 @@ use squid_n_core::model::Section;
 
 use super::{nonzero, safe_denom};
 
-/// 鉄骨ブレースの断面検定（マニュアル「鉄骨ブレースの断面検定」）。
+/// 鉄骨ブレースの断面検定（鋼構造設計規準）。
 ///
 /// 軸力のみ（曲げ・せん断は考慮しない）: 引張 `σt/ft`、圧縮 `σc/fc`（座屈考慮）。
 pub(crate) fn check_brace(

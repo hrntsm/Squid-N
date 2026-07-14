@@ -818,7 +818,7 @@ fn simple_rc_rebar() -> squid_n_core::section_shape::RcRebar {
 }
 
 /// S造仕口（柱・梁とも鋼材形状）: 直交する RC/SRC 系の柱（梁）が存在しないため、
-/// マニュアル「仕口部に接続する柱(梁)がすべてＳの場合、剛域長さは0」どおり λ=0 になる。
+/// 仕口部に接続する柱(梁)がすべてＳの場合は剛域長さ0（λ=0）になる。
 #[test]
 fn test_auto_rigid_zone_steel_joint_is_zero() {
     use squid_n_core::ids::{ElemId, MaterialId, NodeId, SectionId};
@@ -920,8 +920,8 @@ fn test_auto_rigid_zone_steel_joint_is_zero() {
     );
 }
 
-/// S梁 + RC柱: マニュアル「Ｓ・ＣＦＴ柱の場合…ＲＣ・ＳＲＣ大梁のうち最大せいの梁
-/// フェイスまでの長さ」どおり、λ = 柱せい/2（D/4控除なし・reductionも掛けない）。
+/// S梁 + RC柱: Ｓ・ＣＦＴ柱の場合はＲＣ・ＳＲＣ大梁のうち最大せいの梁
+/// フェイスまでの長さとなり、λ = 柱せい/2（D/4控除なし・reductionも掛けない）。
 #[test]
 fn test_auto_rigid_zone_steel_beam_rc_column() {
     use squid_n_core::ids::{ElemId, MaterialId, NodeId, SectionId};
@@ -1147,8 +1147,8 @@ fn test_auto_rigid_zone_rc_beam_steel_column_only_is_zero() {
 }
 
 /// 耐震壁要素（ElementKind::Wall）が節点に接続していても、直交せい探索の対象は
-/// Beam 要素のみなので結果に影響しない（マニュアル「耐震壁周辺の柱・梁の剛域は
-/// 考慮しません」）。壁を追加しても標準ケース（柱600・梁700 → λ=125）と同じ結果。
+/// Beam 要素のみなので結果に影響しない（耐震壁周辺の柱・梁の剛域は
+/// 考慮しない扱い）。壁を追加しても標準ケース（柱600・梁700 → λ=125）と同じ結果。
 #[test]
 fn test_auto_rigid_zone_wall_does_not_affect_orthogonal_search() {
     use squid_n_core::ids::{ElemId, MaterialId, NodeId, SectionId};
