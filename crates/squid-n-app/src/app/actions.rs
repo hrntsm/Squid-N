@@ -238,7 +238,7 @@ impl App {
         let mut bundle = self.results.take().unwrap_or_default();
         let mut errors: Vec<String> = Vec::new();
         let mut last_ok: Option<(usize, String)> = None;
-        for (combo, res) in combos.iter().zip(results.into_iter()) {
+        for (combo, res) in combos.iter().zip(results) {
             match res {
                 Ok(res) => {
                     let member_forces = res.member_forces.clone();
