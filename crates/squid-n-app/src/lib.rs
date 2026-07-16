@@ -7,6 +7,8 @@ pub mod design_view;
 #[cfg(feature = "gui")]
 pub mod mn_view;
 #[cfg(feature = "gui")]
+pub mod quantity_view;
+#[cfg(feature = "gui")]
 pub mod section_editor;
 #[cfg(feature = "gui")]
 pub mod tables;

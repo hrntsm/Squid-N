@@ -1110,6 +1110,7 @@ impl App {
             let sel_table = self.design_view == DesignView::Table;
             let sel_ult = self.design_view == DesignView::Ultimate;
             let sel_mn = self.design_view == DesignView::MnSurface;
+            let sel_qty = self.design_view == DesignView::Quantities;
             if ui.selectable_label(sel_table, "検定表").clicked() {
                 self.design_view = DesignView::Table;
             }
@@ -1119,12 +1120,16 @@ impl App {
             if ui.selectable_label(sel_mn, "MN相関曲面").clicked() {
                 self.design_view = DesignView::MnSurface;
             }
+            if ui.selectable_label(sel_qty, "数量積算").clicked() {
+                self.design_view = DesignView::Quantities;
+            }
         });
         ui.separator();
         match self.design_view {
             DesignView::Table => crate::design_view::design_table(ui, self),
             DesignView::Ultimate => crate::ultimate_view::ultimate_table(ui, self),
             DesignView::MnSurface => crate::mn_view::mn_surface_panel(ui, self),
+            DesignView::Quantities => crate::quantity_view::quantity_panel(ui, self),
         }
     }
 

@@ -44,7 +44,7 @@ pub enum ResultsView {
     LumpedMass,
 }
 
-/// 設計タブ内の切替（検定表・終局検定表・MN相関曲面ビュー）。
+/// 設計タブ内の切替（検定表・終局検定表・MN相関曲面ビュー・数量積算）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DesignView {
     #[default]
@@ -52,6 +52,8 @@ pub enum DesignView {
     /// 終局検定（靭性保証型耐震設計指針による終局せん断・付着余裕度）。
     Ultimate,
     MnSurface,
+    /// 数量積算（部位別の概算数量）。
+    Quantities,
 }
 
 /// ナビゲータ（左ペイン）。階/部材群/ケース系の選択状態。
@@ -454,6 +456,9 @@ pub struct App {
     /// 荷重タブ「荷重計算条件」フォームのドラフト状態
     #[cfg(feature = "gui")]
     pub load_cfg_draft: crate::tables::load_cfg::LoadCfgDraft,
+    /// 設計タブ「数量積算」ビューの状態（集計単位の切替）
+    #[cfg(feature = "gui")]
+    pub quantity_view: crate::quantity_view::QuantityViewState,
 }
 
 /// 荷重組合せ自動生成 UI のドラフト（GUI 専用）。DL/LL は必須、地震X/Y・積雪は任意。
@@ -553,6 +558,8 @@ impl Default for App {
             misc_wall_draft: crate::tables::misc_walls::MiscWallDraft::default(),
             #[cfg(feature = "gui")]
             load_cfg_draft: crate::tables::load_cfg::LoadCfgDraft::default(),
+            #[cfg(feature = "gui")]
+            quantity_view: crate::quantity_view::QuantityViewState::default(),
         }
     }
 }
