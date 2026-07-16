@@ -317,3 +317,22 @@ fn test_job_registry_lifecycle() {
     assert_ne!(id, id2);
     assert!(reg.get("nonexistent").is_none());
 }
+
+#[test]
+fn test_quantity_takeoff_json_column() {
+    let model = rc_column_model();
+    // 部位別（既定）: RC 柱 1 本 → 0.6×0.6×3.0 = 1.08 m³。
+    let v = quantity_takeoff_json(&model, None);
+    let rows = v["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["category"], "柱");
+    assert!((rows[0]["concrete_m3"].as_f64().unwrap() - 1.08).abs() < 1e-9);
+    // 明細: 部材 1 件。合計と注記も返る。
+    let detail = quantity_takeoff_json(&model, Some("detail"));
+    assert_eq!(detail["rows"].as_array().unwrap().len(), 1);
+    assert!(detail["totals"]["rebar_t"].as_f64().unwrap() > 0.0);
+    assert!(!detail["notes"].as_array().unwrap().is_empty());
+    // 鉄筋径別: D25（主筋）と D10（フープ）。
+    let rebar = quantity_takeoff_json(&model, Some("rebar"));
+    assert_eq!(rebar["rows"].as_array().unwrap().len(), 2);
+}

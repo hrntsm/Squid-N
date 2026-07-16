@@ -229,6 +229,9 @@ pub fn build_report_csv(app: &App) -> String {
         }
     }
 
+    // 数量積算（モデルのみから算定できるため解析結果の有無に関わらず出力する）。
+    out.push_str(&build_quantity_csv(model));
+
     let Some(results) = &app.results else {
         out.push_str("\n(解析結果なし)\n");
         return out;
@@ -379,6 +382,105 @@ pub fn build_report_csv(app: &App) -> String {
     out
 }
 
+/// 数量積算の CSV 文字列を生成する（GUI 非依存）。
+///
+/// 部位別の概算数量
+/// （[`squid_n_design_jp::quantity::compute_quantity_takeoff`]）を、
+/// 部位別・階別・鉄骨種類別・鉄筋径別・明細・注記のセクションに整形する。
+pub fn build_quantity_csv(model: &Model) -> String {
+    use squid_n_design_jp::quantity::{compute_quantity_takeoff, QuantityCfg};
+
+    let q = compute_quantity_takeoff(model, &QuantityCfg::default());
+    let mut out = String::new();
+    if q.items.is_empty() {
+        return out;
+    }
+
+    out.push_str(
+        "\n[数量積算 部位別]\n部位,コンクリート[m3],型枠[m2],鉄筋[t],鉄骨[t],鉄筋継手[個所]\n",
+    );
+    for (cat, t) in q.totals_by_category() {
+        out.push_str(&format!(
+            "{},{:.2},{:.2},{:.3},{:.3},{:.1}\n",
+            cat.label(),
+            t.concrete_m3,
+            t.formwork_m2,
+            t.rebar_t,
+            t.steel_t,
+            t.rebar_joints
+        ));
+    }
+    let totals = q.totals();
+    out.push_str(&format!(
+        "合計,{:.2},{:.2},{:.3},{:.3},{:.1}\n",
+        totals.concrete_m3, totals.formwork_m2, totals.rebar_t, totals.steel_t, totals.rebar_joints
+    ));
+
+    out.push_str(
+        "\n[数量積算 階別]\n階,コンクリート[m3],型枠[m2],鉄筋[t],鉄骨[t],鉄筋継手[個所]\n",
+    );
+    for (story, t) in q.totals_by_story() {
+        out.push_str(&format!(
+            "{},{:.2},{:.2},{:.3},{:.3},{:.1}\n",
+            story, t.concrete_m3, t.formwork_m2, t.rebar_t, t.steel_t, t.rebar_joints
+        ));
+    }
+
+    let steel = q.steel_by_section();
+    if !steel.is_empty() {
+        out.push_str("\n[数量積算 鉄骨種類別]\n断面,長さ[m],重量[t]\n");
+        for s in steel {
+            out.push_str(&format!(
+                "{},{:.2},{:.3}\n",
+                s.section_name, s.length_m, s.weight_t
+            ));
+        }
+    }
+
+    let rebar = q.rebar_by_dia();
+    if !rebar.is_empty() {
+        out.push_str("\n[数量積算 鉄筋径別]\n呼び径,長さ[m],重量[t]\n");
+        for (dia, len, w) in rebar {
+            let name = if dia > 0.0 {
+                format!("D{:.0}", dia)
+            } else {
+                "(鉄筋比概算)".to_string()
+            };
+            out.push_str(&format!("{},{:.1},{:.3}\n", name, len, w));
+        }
+    }
+
+    out.push_str(
+        "\n[数量積算 明細]\nID,階,部位,構造,符号,コンクリート[m3],型枠[m2],鉄筋[t],鉄骨[t],鉄筋継手[個所]\n",
+    );
+    for it in &q.items {
+        let id = it
+            .elem
+            .map(|e| e.0.to_string())
+            .or_else(|| it.slab.map(|s| format!("S{}", s.0)))
+            .unwrap_or_else(|| "-".to_string());
+        out.push_str(&format!(
+            "{},{},{},{},{},{:.3},{:.2},{:.4},{:.4},{:.1}\n",
+            id,
+            it.story,
+            it.category.label(),
+            it.structure.label(),
+            it.label,
+            it.concrete_m3,
+            it.formwork_m2,
+            it.rebar_weight_t(),
+            it.steel_weight_t(),
+            it.rebar_joints
+        ));
+    }
+
+    out.push_str("\n[数量積算 注記]\n");
+    for n in &q.notes {
+        out.push_str(&format!("{}\n", n));
+    }
+    out
+}
+
 /// ResultsBundle が空でないか（レポートに載せる内容があるか）。
 pub fn has_report_content(results: &Option<ResultsBundle>) -> bool {
     results
@@ -416,6 +518,22 @@ mod tests {
         assert!(csv.contains("[モデル概要]"));
         assert!(csv.contains("[層指標(二次設計)]"));
         assert!(csv.contains("[部材検定]"));
+        // 数量積算セクションも常時含まれる。
+        assert!(csv.contains("[数量積算 部位別]"));
+    }
+
+    #[test]
+    fn test_quantity_csv_from_sample_model() {
+        // サンプルモデル（門型ラーメン）で数量積算 CSV が生成される
+        // エンドツーエンド確認。柱・大梁が分類され、合計行が出力される。
+        let model = crate::sample::portal_frame();
+        let csv = build_quantity_csv(&model);
+        assert!(csv.contains("[数量積算 部位別]"), "{csv}");
+        assert!(csv.contains("柱"), "{csv}");
+        assert!(csv.contains("大梁"), "{csv}");
+        assert!(csv.contains("合計"), "{csv}");
+        assert!(csv.contains("[数量積算 明細]"));
+        assert!(csv.contains("[数量積算 注記]"));
     }
 
     #[test]

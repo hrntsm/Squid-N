@@ -16,6 +16,8 @@ pub mod joint_wiring;
 /// 許容応力度・材料定数を集約する。構成則モデルの `squid-n-material`
 /// クレートとは別物（本モジュールは設計規準の許容応力度）。
 pub mod material_strength;
+/// 数量積算（部位別の概算数量集計）。
+pub mod quantity;
 pub mod rc;
 pub mod srrc;
 pub mod steel;

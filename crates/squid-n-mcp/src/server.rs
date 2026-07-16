@@ -45,6 +45,17 @@ impl SquidNServer {
         Ok(CallToolResult::success(vec![Content::json(result)?]))
     }
 
+    #[tool(description = "数量積算（コンクリート体積・型枠面積・鉄筋/鉄骨重量の概算）を集計する")]
+    pub async fn quantity_takeoff(
+        &self,
+        Parameters(args): Parameters<QuantityTakeoffArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let st = self.state.lock().await;
+        // 実集計は feature 非依存の quantity_takeoff_json に委譲（テスト済み）。
+        let result = super::quantity_takeoff_json(&st.model, args.group_by.as_deref());
+        Ok(CallToolResult::success(vec![Content::json(result)?]))
+    }
+
     #[tool(description = "解析を非同期で実行する")]
     pub async fn analysis_run(
         &self,
@@ -179,6 +190,13 @@ pub struct QueryArgs {
 #[derive(Debug, serde::Serialize, schemars::JsonSchema)]
 pub struct QueryResult {
     pub items: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct QuantityTakeoffArgs {
+    /// 集計単位: "category"（部位別、既定）/"story"（階別）/"steel"（鉄骨種類別）/
+    /// "rebar"（鉄筋径別）/"detail"（明細）。
+    pub group_by: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -356,6 +374,7 @@ mod tests {
                     values: [0.0, 0.0, 1000.0, 0.0, 0.0, 0.0],
                 }],
                 member: Vec::new(),
+                kind: Default::default(),
             }],
             ..Default::default()
         }
@@ -450,8 +469,12 @@ mod tests {
                     master: NodeId(1),
                     slaves: vec![],
                     rigid: true,
+                    weight: None,
+                    ci_override: None,
                 }],
                 seismic_weight: Some(80_000.0),
+                structure: Default::default(),
+                level_kind: Default::default(),
             }],
             ..Default::default()
         }

@@ -73,7 +73,7 @@ pub fn portal_frame() -> Model {
 
     // 部材: 柱 2 本 + 梁 1 本
     let members = [
-        (0u32, 1u32, 2u32, 0u32), // id, i, j, section
+        (0u32, 0u32, 2u32, 0u32), // id, i, j, section
         (1, 1, 3, 0),
         (2, 2, 3, 1),
     ];

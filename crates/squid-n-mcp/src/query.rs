@@ -98,6 +98,94 @@ pub fn query_model(model: &Model, kind: &str, filter: Option<&str>) -> Vec<serde
     }
 }
 
+/// 数量積算（feature 非依存・テスト可能）。MCP ツール `quantity_takeoff` の中核。
+///
+/// 部位別の概算数量（`squid_n_design_jp::quantity`）を JSON で返す。
+/// `group_by` は `category`（部位別、既定）/`story`（階別）/`steel`（鉄骨種類別）/
+/// `rebar`（鉄筋径別）/`detail`（明細）。
+pub fn quantity_takeoff_json(model: &Model, group_by: Option<&str>) -> serde_json::Value {
+    use serde_json::json;
+    use squid_n_design_jp::quantity::{compute_quantity_takeoff, QuantityCfg, QuantityTotals};
+
+    let q = compute_quantity_takeoff(model, &QuantityCfg::default());
+    let totals_json = |t: &QuantityTotals| {
+        json!({
+            "concrete_m3": t.concrete_m3,
+            "formwork_m2": t.formwork_m2,
+            "rebar_t": t.rebar_t,
+            "steel_t": t.steel_t,
+            "rebar_joints": t.rebar_joints,
+        })
+    };
+    let rows: Vec<serde_json::Value> = match group_by.unwrap_or("category") {
+        "story" | "stories" => q
+            .totals_by_story()
+            .iter()
+            .map(|(story, t)| {
+                let mut v = totals_json(t);
+                v["story"] = json!(story);
+                v
+            })
+            .collect(),
+        "steel" => q
+            .steel_by_section()
+            .iter()
+            .map(|s| {
+                json!({
+                    "section": s.section_name,
+                    "length_m": s.length_m,
+                    "weight_t": s.weight_t,
+                })
+            })
+            .collect(),
+        "rebar" => q
+            .rebar_by_dia()
+            .iter()
+            .map(|(dia, len, w)| {
+                json!({
+                    "dia_mm": dia,
+                    "length_m": len,
+                    "weight_t": w,
+                })
+            })
+            .collect(),
+        "detail" | "items" => q
+            .items
+            .iter()
+            .map(|it| {
+                json!({
+                    "elem": it.elem.map(|e| e.0),
+                    "slab": it.slab.map(|s| s.0),
+                    "label": it.label,
+                    "story": it.story,
+                    "category": it.category.label(),
+                    "structure": it.structure.label(),
+                    "concrete_m3": it.concrete_m3,
+                    "formwork_m2": it.formwork_m2,
+                    "rebar_t": it.rebar_weight_t(),
+                    "steel_t": it.steel_weight_t(),
+                    "rebar_joints": it.rebar_joints,
+                })
+            })
+            .collect(),
+        // 既定: 部位別小計。
+        _ => q
+            .totals_by_category()
+            .iter()
+            .map(|(cat, t)| {
+                let mut v = totals_json(t);
+                v["category"] = json!(cat.label());
+                v
+            })
+            .collect(),
+    };
+    json!({
+        "rows": rows,
+        "totals": totals_json(&q.totals()),
+        "notes": q.notes,
+    })
+}
+
 /// 解析の実処理（feature 非依存・テスト可能）。`Model` の参照だけを受け取るため、
 /// `ServerState` のロックを取らずに（= ロック解放後に）呼び出せる。
 /// 現状は先頭の荷重ケースに対する線形静的解析のみ（他ジョブ種別は将来対応）。
