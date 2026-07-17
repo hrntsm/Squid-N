@@ -145,7 +145,9 @@ let model = load_scz(Path::new("model.scz"))?;
 |---|---|
 | H形鋼・角形鋼管・鋼管・山形鋼・溝形鋼・T形鋼 | 形鋼ライブラリ `StbSecSteel`（`StbSecRoll-H`/`-BOX`/`StbSecPipe` 等）＋ `StbSecColumn_S` / `StbSecBeam_S` |
 | RC 矩形・円形 | `StbSecColumn_RC` / `StbSecBeam_RC`（断面の幾何 ＋ 配筋 `StbSecBarArrangement*`） |
-| 上記以外（SRC・CFT・耐震壁・形状未定義） | `StbSecRaw`（物性）へフォールバック |
+| CFT 角形・円形 | `StbSecColumn_CFT` ＋ 充填鋼管の `StbSecSteel` 参照（柱のみ。梁に使うと `StbSecRaw`） |
+| SRC 矩形 | `StbSecColumn_SRC` / `StbSecBeam_SRC`（コンクリート図形＋内蔵鉄骨 `StbSecSteel` 参照＋配筋＋鋼種 `strength_steel`） |
+| 上記以外（耐震壁・形状未定義） | `StbSecRaw`（物性）へフォールバック |
 
 補足:
 

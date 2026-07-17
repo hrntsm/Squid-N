@@ -79,9 +79,13 @@ RcRect / RcCircle / SrcRect / CftBox / CftPipe / RcWall`。
    - **未認識図形の断面欠落**: テーパ・ハンチ等 `StbSecColumn_RC_Rect`/`_Circle`・
      `StbSecBeam_RC_Straight` 以外の図形を持つ RC 断面は幾何を復元できず、import で断面が
      欠落する（参照部材は断面なし）。バケット2 の断面型追加＋下記 7（未対応要素の可視化）で対応。
-2. **SRC / CFT 断面の標準要素対応**: モデルに `SrcRect` / `CftBox` / `CftPipe` があるが、
-   export はフォールバック（`StbSecRaw`）・import は `StbSecColumn_SRC` / `_CFT` を無視。
-   両者を標準要素（`StbSecColumn_SRC` / `StbSecColumn_CFT` ＋内蔵鉄骨/鋼管の形鋼参照）へマップ。
+2. **SRC / CFT 断面の標準要素対応**: ✅ **実装済み**（本 PR）。
+   `CftBox`/`CftPipe` → `StbSecColumn_CFT`＋充填鋼管の `StbSecSteel` 参照（柱のみ。梁は Raw）。
+   `SrcRect` → `StbSecColumn_SRC`/`StbSecBeam_SRC`（コンクリート図形＋内蔵鉄骨の `StbSecSteel`
+   参照＋配筋 `StbSecBarArrangement*_SRC`＋鋼種 `strength_steel`）。いずれも形状・配筋・
+   内蔵鉄骨・鋼種とも完全一致で往復（テスト済み）。
+   - 残課題: CFT 梁（ST-Bridge に定義が無い）、SRC 円形・充腹/非充腹の別、実 STB の配筋
+     スキーマ準拠（③-1 と同様）。
 3. **材料参照の往復**: 断面と材料の関連（鋼断面の `strength_main`、RC の `id_material`）を
    ST-Bridge の形で書く／読む。現状 import は断面へ材料を結び付けていない。
 4. **ブレース・壁・スラブ**: `StbBrace_S` ↔ `ElementKind::Brace`、`StbWall_RC` ↔ 壁、

@@ -41,15 +41,17 @@ pub enum SectionExportMode {
     /// 物性を独自要素 `StbSecRaw` として直接保持する。`import_stbridge` で往復可能。既定。
     #[default]
     Raw,
-    /// ST-Bridge 標準の断面要素（`StbSecColumn_S`/`StbSecBeam_S`/`StbSecColumn_RC`/
-    /// `StbSecBeam_RC`）＋形鋼ライブラリ（`StbSecSteel`）で書き出す。BIM/他ソフトとの
-    /// 連携向け。形状（`Section.shape`）を持たない断面や SRC・CFT・耐震壁は `StbSecRaw`
-    /// へフォールバックする。
+    /// ST-Bridge 標準の断面要素（鋼 `StbSecColumn_S`/`StbSecBeam_S`、RC `StbSecColumn_RC`/
+    /// `StbSecBeam_RC`、CFT `StbSecColumn_CFT`、SRC `StbSecColumn_SRC`/`StbSecBeam_SRC`）＋
+    /// 形鋼ライブラリ（`StbSecSteel`）で書き出す。BIM/他ソフトとの連携向け。形状
+    /// （`Section.shape`）を持たない断面や耐震壁は `StbSecRaw` へフォールバックする。
     ///
     /// `import_stbridge` は本モードのファイル（および同じ断面表現の他社ファイル）を
-    /// 読み戻せる（形鋼名から形状を復元し断面性能を再算定する。RC は配筋も
+    /// 読み戻せる（形鋼名から形状を復元し断面性能を再算定する。RC/SRC は配筋も
     /// `StbSecBarArrangement*` で往復する）。ただし柱・梁で共有していた断面は書き出し時に
-    /// 2 断面へ分割される。配筋を持たない（幾何のみの）他社ファイルは無筋相当で読む。
+    /// 2 断面へ分割される。CFT は柱のみ対応で梁に使うと `StbSecRaw` へ、RC 円形も梁では
+    /// `StbSecRaw` へフォールバックする（形状・配筋は往復しない）。配筋を持たない
+    /// （幾何のみの）他社ファイルは無筋相当で読む。
     Standard,
 }
 
@@ -864,6 +866,130 @@ mod tests {
             }
             other => panic!("RcRect を期待: {other:?}"),
         }
+    }
+
+    /// 標準モード: CFT 角形柱が `StbSecColumn_CFT`＋形鋼ライブラリとして往復する。
+    #[test]
+    fn test_standard_roundtrip_cft_box() {
+        let mut m = frame_nodes();
+        let shape = SectionShape::CftBox {
+            height: 400.0,
+            width: 400.0,
+            thick: 16.0,
+        };
+        m.sections
+            .push(shape.to_section(SectionId(0), "CFT1".into()));
+        m.elements.push(member(0, true, 0)); // 柱
+
+        let xml = export_stbridge_with(&m, SectionExportMode::Standard).unwrap();
+        assert!(xml.contains("<StbSecColumn_CFT "), "CFT 柱要素: {xml}");
+        assert!(xml.contains("<StbSecRoll-BOX "), "充填鋼管の形鋼ライブラリ");
+        let back = import_stbridge(&xml).expect("import");
+        assert!(back.validate().is_ok(), "{:?}", back.validate());
+        assert_eq!(
+            back.sections[0].shape, m.sections[0].shape,
+            "CFT 角形が往復"
+        );
+    }
+
+    /// 標準モード: CFT 円形柱が往復する。
+    #[test]
+    fn test_standard_roundtrip_cft_pipe() {
+        let mut m = frame_nodes();
+        let shape = SectionShape::CftPipe {
+            outer_dia: 500.0,
+            thick: 12.0,
+        };
+        m.sections
+            .push(shape.to_section(SectionId(0), "CFT2".into()));
+        m.elements.push(member(0, true, 0));
+
+        let xml = export_stbridge_with(&m, SectionExportMode::Standard).unwrap();
+        assert!(xml.contains("<StbSecColumn_CFT "));
+        assert!(xml.contains("<StbSecPipe "));
+        let back = import_stbridge(&xml).expect("import");
+        assert!(back.validate().is_ok(), "{:?}", back.validate());
+        assert_eq!(
+            back.sections[0].shape, m.sections[0].shape,
+            "CFT 円形が往復"
+        );
+    }
+
+    /// 標準モード: SRC 柱（コンクリート＋内蔵鉄骨＋配筋＋鋼種）が完全に往復する。
+    #[test]
+    fn test_standard_roundtrip_src_column() {
+        let mut m = frame_nodes();
+        let shape = SectionShape::SrcRect {
+            b: 800.0,
+            d: 800.0,
+            rebar: rebar_distinct(),
+            steel_height: 400.0,
+            steel_width: 200.0,
+            steel_web_thick: 8.0,
+            steel_flange_thick: 13.0,
+            steel_grade: "SN490B".into(),
+        };
+        m.sections
+            .push(shape.to_section(SectionId(0), "SRC1".into()));
+        m.elements.push(member(0, true, 0)); // 柱
+
+        let xml = export_stbridge_with(&m, SectionExportMode::Standard).unwrap();
+        assert!(xml.contains("<StbSecColumn_SRC "), "SRC 柱要素: {xml}");
+        assert!(
+            xml.contains("strength_steel=\"SN490B\""),
+            "鋼種が書き出される"
+        );
+        assert!(xml.contains("<StbSecRoll-H "), "内蔵鉄骨の形鋼ライブラリ");
+        let back = import_stbridge(&xml).expect("import");
+        assert!(back.validate().is_ok(), "{:?}", back.validate());
+        assert_eq!(
+            back.sections[0].shape, m.sections[0].shape,
+            "SRC 柱が形状・配筋・内蔵鉄骨・鋼種とも往復する"
+        );
+    }
+
+    /// 標準モード: SRC 梁も往復する（`StbSecBeam_SRC`）。
+    #[test]
+    fn test_standard_roundtrip_src_beam() {
+        let mut m = frame_nodes();
+        let shape = SectionShape::SrcRect {
+            b: 500.0,
+            d: 800.0,
+            rebar: rebar_distinct(),
+            steel_height: 450.0,
+            steel_width: 200.0,
+            steel_web_thick: 9.0,
+            steel_flange_thick: 14.0,
+            steel_grade: "SN400B".into(),
+        };
+        m.sections
+            .push(shape.to_section(SectionId(0), "SG1".into()));
+        m.elements.push(member(0, false, 0)); // 梁
+
+        let xml = export_stbridge_with(&m, SectionExportMode::Standard).unwrap();
+        assert!(xml.contains("<StbSecBeam_SRC "), "SRC 梁要素: {xml}");
+        let back = import_stbridge(&xml).expect("import");
+        assert!(back.validate().is_ok(), "{:?}", back.validate());
+        assert_eq!(back.sections[0].shape, m.sections[0].shape, "SRC 梁が往復");
+    }
+
+    /// CFT を梁に使うと（ST-Bridge に CFT 梁が無いため）Raw へフォールバックする。
+    #[test]
+    fn test_standard_cft_beam_falls_back_to_raw() {
+        let mut m = frame_nodes();
+        let shape = SectionShape::CftBox {
+            height: 300.0,
+            width: 300.0,
+            thick: 12.0,
+        };
+        m.sections.push(shape.to_section(SectionId(0), "CB".into()));
+        m.elements.push(member(0, false, 0)); // 梁
+
+        let xml = export_stbridge_with(&m, SectionExportMode::Standard).unwrap();
+        assert!(xml.contains("<StbSecRaw "), "CFT 梁は Raw にフォールバック");
+        let back = import_stbridge(&xml).expect("import");
+        assert!(back.validate().is_ok(), "{:?}", back.validate());
+        assert!(back.sections[0].shape.is_none());
     }
 
     /// 形鋼ライブラリが断面要素より後ろに現れても解決できる（順序非依存）。

@@ -8,7 +8,9 @@
 //! # 対応形状
 //! - 鋼: H形鋼／角形鋼管／鋼管／山形鋼／溝形鋼／T形鋼（`StbSecSteel` 参照）。
 //! - RC: 矩形・円形（幾何＋配筋。配筋は `StbSecBarArrangement*` として書き出す）。
-//! - 上記以外（SRC・CFT・耐震壁・形状未定義）は `StbSecRaw` へフォールバックする。
+//! - CFT: 角形・円形（充填鋼管を `StbSecColumn_CFT`＋`StbSecSteel` 参照で。柱のみ。梁は Raw）。
+//! - SRC: 矩形（`StbSecColumn_SRC`/`StbSecBeam_SRC`。コンクリート図形＋内蔵鉄骨＋配筋＋鋼種）。
+//! - 上記以外（耐震壁・形状未定義）は `StbSecRaw` へフォールバックする。
 //!
 //! # 柱／梁の型分けと id 再割当て
 //! ST-Bridge では断面が柱用（`StbSecColumn_*`）と梁用（`StbSecBeam_*`）に型分けされ、
@@ -92,6 +94,51 @@ impl SteelLibrary {
     }
 }
 
+/// H 形鋼の形鋼図形名と `StbSecSteel` エントリ（鋼断面・SRC 内蔵鉄骨で共用）。
+fn h_figure(height: f64, width: f64, web_thick: f64, flange_thick: f64) -> (String, String) {
+    let name = format!(
+        "H-{}x{}x{}x{}",
+        num(height),
+        num(width),
+        num(web_thick),
+        num(flange_thick)
+    );
+    let body = format!(
+        "<StbSecRoll-H name=\"{}\" type=\"H\" A=\"{}\" B=\"{}\" t1=\"{}\" t2=\"{}\" r=\"0\"/>",
+        esc(&name),
+        num(height),
+        num(width),
+        num(web_thick),
+        num(flange_thick)
+    );
+    (name, body)
+}
+
+/// 角形鋼管の形鋼図形名と `StbSecSteel` エントリ（鋼断面・CFT 角形で共用）。
+fn box_figure(height: f64, width: f64, thick: f64) -> (String, String) {
+    let name = format!("BOX-{}x{}x{}", num(height), num(width), num(thick));
+    let body = format!(
+        "<StbSecRoll-BOX name=\"{}\" type=\"BOX\" A=\"{}\" B=\"{}\" t=\"{}\" r=\"0\"/>",
+        esc(&name),
+        num(height),
+        num(width),
+        num(thick)
+    );
+    (name, body)
+}
+
+/// 鋼管の形鋼図形名と `StbSecSteel` エントリ（鋼断面・CFT 円形で共用）。
+fn pipe_figure(outer_dia: f64, thick: f64) -> (String, String) {
+    let name = format!("P-{}x{}", num(outer_dia), num(thick));
+    let body = format!(
+        "<StbSecPipe name=\"{}\" D=\"{}\" t=\"{}\"/>",
+        esc(&name),
+        num(outer_dia),
+        num(thick)
+    );
+    (name, body)
+}
+
 /// 鋼断面 → 形鋼図形名 と `StbSecSteel` エントリ。対応しない形状は `None`。
 fn steel_figure(shape: &SectionShape) -> Option<(String, String)> {
     let e = |name: &str, body: String| (name.to_string(), body);
@@ -101,49 +148,13 @@ fn steel_figure(shape: &SectionShape) -> Option<(String, String)> {
             width,
             web_thick,
             flange_thick,
-        } => {
-            let name = format!(
-                "H-{}x{}x{}x{}",
-                num(height),
-                num(width),
-                num(web_thick),
-                num(flange_thick)
-            );
-            let body = format!(
-                "<StbSecRoll-H name=\"{}\" type=\"H\" A=\"{}\" B=\"{}\" t1=\"{}\" t2=\"{}\" r=\"0\"/>",
-                esc(&name),
-                num(height),
-                num(width),
-                num(web_thick),
-                num(flange_thick)
-            );
-            Some(e(&name, body))
-        }
+        } => Some(h_figure(height, width, web_thick, flange_thick)),
         SectionShape::SteelBox {
             height,
             width,
             thick,
-        } => {
-            let name = format!("BOX-{}x{}x{}", num(height), num(width), num(thick));
-            let body = format!(
-                "<StbSecRoll-BOX name=\"{}\" type=\"BOX\" A=\"{}\" B=\"{}\" t=\"{}\" r=\"0\"/>",
-                esc(&name),
-                num(height),
-                num(width),
-                num(thick)
-            );
-            Some(e(&name, body))
-        }
-        SectionShape::SteelPipe { outer_dia, thick } => {
-            let name = format!("P-{}x{}", num(outer_dia), num(thick));
-            let body = format!(
-                "<StbSecPipe name=\"{}\" D=\"{}\" t=\"{}\"/>",
-                esc(&name),
-                num(outer_dia),
-                num(thick)
-            );
-            Some(e(&name, body))
-        }
+        } => Some(box_figure(height, width, thick)),
+        SectionShape::SteelPipe { outer_dia, thick } => Some(pipe_figure(outer_dia, thick)),
         SectionShape::SteelAngle {
             leg_a,
             leg_b,
@@ -355,6 +366,160 @@ fn rc_beam(id: u32, sec: &Section, shape: &SectionShape, figure_body: &str) -> S
     )
 }
 
+/// CFT 断面の充填鋼管図形（角形/円形）。`SteelLibrary` に登録し、参照名を返す。
+/// CFT 以外は `None`。
+fn cft_figure(shape: &SectionShape, steel: &mut SteelLibrary) -> Option<String> {
+    let (name, body) = match *shape {
+        SectionShape::CftBox {
+            height,
+            width,
+            thick,
+        } => box_figure(height, width, thick),
+        SectionShape::CftPipe { outer_dia, thick } => pipe_figure(outer_dia, thick),
+        _ => return None,
+    };
+    steel.add(&name, body);
+    Some(name)
+}
+
+/// CFT 柱断面 `StbSecColumn_CFT`（充填鋼管の形鋼参照）。
+fn cft_column(id: u32, sec: &Section, figure: &str) -> String {
+    format!(
+        "      <StbSecColumn_CFT id=\"{}\" name=\"{}\">\n\
+         \x20       <StbSecSteelFigureColumn_CFT>\n\
+         \x20         <StbSecSteelColumn_CFT_Same shape=\"{}\"/>\n\
+         \x20       </StbSecSteelFigureColumn_CFT>\n\
+         \x20     </StbSecColumn_CFT>\n",
+        id,
+        esc(&sec.name),
+        esc(figure)
+    )
+}
+
+/// SRC 断面の内蔵鉄骨（H 形鋼）図形。`SteelLibrary` に登録し、参照名を返す。SRC 以外は `None`。
+fn src_steel_figure(shape: &SectionShape, steel: &mut SteelLibrary) -> Option<String> {
+    match *shape {
+        SectionShape::SrcRect {
+            steel_height,
+            steel_width,
+            steel_web_thick,
+            steel_flange_thick,
+            ..
+        } => {
+            let (name, body) = h_figure(
+                steel_height,
+                steel_width,
+                steel_web_thick,
+                steel_flange_thick,
+            );
+            steel.add(&name, body);
+            Some(name)
+        }
+        _ => None,
+    }
+}
+
+/// SRC 柱／梁断面 `StbSecColumn_SRC` / `StbSecBeam_SRC`
+/// （コンクリート図形＋内蔵鉄骨参照＋配筋＋鋼種）。
+fn src_section(
+    id: u32,
+    sec: &Section,
+    is_beam: bool,
+    shape: &SectionShape,
+    steel_fig: &str,
+) -> String {
+    let (b, d, rebar_arrangement, grade) = match shape {
+        SectionShape::SrcRect {
+            b, d, steel_grade, ..
+        } => (
+            *b,
+            *d,
+            rebar_arrangement_generic(shape, is_beam, "SRC"),
+            steel_grade.clone(),
+        ),
+        // 呼び出し側で SrcRect のみ渡す想定。防御的に空で返す。
+        _ => return raw(id, sec),
+    };
+    let (elem, fig_wrap, fig_body, steel_wrap) = if is_beam {
+        (
+            "StbSecBeam_SRC",
+            "StbSecFigureBeam_SRC",
+            format!(
+                "<StbSecBeam_SRC_Straight width=\"{}\" depth=\"{}\"/>",
+                num(b),
+                num(d)
+            ),
+            "StbSecSteelFigureBeam_SRC",
+        )
+    } else {
+        (
+            "StbSecColumn_SRC",
+            "StbSecFigureColumn_SRC",
+            format!(
+                "<StbSecColumn_SRC_Rect width_X=\"{}\" width_Y=\"{}\"/>",
+                num(b),
+                num(d)
+            ),
+            "StbSecSteelFigureColumn_SRC",
+        )
+    };
+    let steel_same = if is_beam {
+        "StbSecSteelBeam_SRC_Same"
+    } else {
+        "StbSecSteelColumn_SRC_Same"
+    };
+    format!(
+        "      <{elem} id=\"{id}\" name=\"{name}\" strength_steel=\"{grade}\">\n\
+         \x20       <{fig_wrap}>\n\
+         \x20         {fig_body}\n\
+         \x20       </{fig_wrap}>\n\
+         \x20       <{steel_wrap}>\n\
+         \x20         <{steel_same} shape=\"{steel_fig}\"/>\n\
+         \x20       </{steel_wrap}>\n\
+         {rebar_arrangement}\
+         \x20     </{elem}>\n",
+        elem = elem,
+        id = id,
+        name = esc(&sec.name),
+        grade = esc(&grade),
+        fig_wrap = fig_wrap,
+        fig_body = fig_body,
+        steel_wrap = steel_wrap,
+        steel_same = steel_same,
+        steel_fig = esc(steel_fig),
+        rebar_arrangement = rebar_arrangement,
+    )
+}
+
+/// SRC の配筋要素 `StbSecBarArrangement{Column,Beam}_SRC`。配筋の無い形状は空文字。
+/// `kind` は要素名の中置（"SRC"）。
+fn rebar_arrangement_generic(shape: &SectionShape, is_beam: bool, kind: &str) -> String {
+    let r = match shape {
+        SectionShape::SrcRect { rebar, .. } => rebar,
+        _ => return String::new(),
+    };
+    let (wrap, child) = if is_beam {
+        (
+            format!("StbSecBarArrangementBeam_{kind}"),
+            format!("StbSecBarBeam_{kind}_Same"),
+        )
+    } else {
+        (
+            format!("StbSecBarArrangementColumn_{kind}"),
+            format!("StbSecBarColumn_{kind}_RectSame"),
+        )
+    };
+    format!(
+        "        <{}>\n\
+         \x20         <{} {}/>\n\
+         \x20       </{}>\n",
+        wrap,
+        child,
+        rebar_attrs(r),
+        wrap
+    )
+}
+
 /// `StbSecRaw` フォールバック（既定モードと同一形式）。
 fn raw(id: u32, sec: &Section) -> String {
     format!(
@@ -404,6 +569,50 @@ pub(super) fn standard_sections(model: &Model) -> StandardSections {
             if need_beam {
                 let bid = if need_col { alloc() } else { base };
                 body.push_str(&steel_beam(bid, sec, &fig_name));
+                beam_map.insert(base, bid);
+            }
+            continue;
+        }
+
+        // CFT（充填鋼管）: 柱として StbSecColumn_CFT。ST-Bridge に CFT 梁が無いため
+        // 梁で使われる場合は Raw へフォールバックする。
+        if matches!(
+            sec.shape,
+            Some(SectionShape::CftBox { .. } | SectionShape::CftPipe { .. })
+        ) {
+            let shape = sec.shape.as_ref().unwrap();
+            if need_col {
+                let fig = cft_figure(shape, &mut steel).expect("CFT 図形");
+                body.push_str(&cft_column(base, sec, &fig));
+                col_map.insert(base, base);
+            }
+            if need_beam {
+                let bid = if col_map.contains_key(&base) {
+                    alloc()
+                } else {
+                    base
+                };
+                body.push_str(&raw(bid, sec));
+                beam_map.insert(base, bid);
+            }
+            continue;
+        }
+
+        // SRC（RC＋内蔵鉄骨）: 柱 StbSecColumn_SRC / 梁 StbSecBeam_SRC。
+        if matches!(sec.shape, Some(SectionShape::SrcRect { .. })) {
+            let shape = sec.shape.as_ref().unwrap();
+            let steel_fig = src_steel_figure(shape, &mut steel).expect("SRC 内蔵鉄骨図形");
+            if need_col {
+                body.push_str(&src_section(base, sec, false, shape, &steel_fig));
+                col_map.insert(base, base);
+            }
+            if need_beam {
+                let bid = if col_map.contains_key(&base) {
+                    alloc()
+                } else {
+                    base
+                };
+                body.push_str(&src_section(bid, sec, true, shape, &steel_fig));
                 beam_map.insert(base, bid);
             }
             continue;

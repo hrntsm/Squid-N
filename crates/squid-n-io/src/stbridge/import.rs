@@ -42,6 +42,17 @@ enum PendingSecKind {
     Shape(SectionShape),
     /// 形鋼ライブラリ参照（後で名前解決する鋼断面）。
     SteelRef(Option<String>),
+    /// CFT（充填鋼管）。充填鋼管の形鋼名を後で解決して CftBox/CftPipe を作る。
+    CftRef(Option<String>),
+    /// SRC（RC＋内蔵鉄骨）。コンクリート寸法・配筋・鋼種は確定済み、内蔵鉄骨は
+    /// 形鋼名を後で解決する。
+    SrcRef {
+        b: f64,
+        d: f64,
+        rebar: RcRebar,
+        steel_name: Option<String>,
+        grade: String,
+    },
 }
 
 /// 取り込み途中の部材（id 正規化前。参照はすべて file id）。
@@ -104,6 +115,19 @@ enum CurSec {
         name: String,
         geom: Option<RcGeom>,
         rebar: Option<RcRebar>,
+    },
+    Cft {
+        file_id: u32,
+        name: String,
+        steel_name: Option<String>,
+    },
+    Src {
+        file_id: u32,
+        name: String,
+        geom: Option<(f64, f64)>,
+        rebar: Option<RcRebar>,
+        steel_name: Option<String>,
+        grade: String,
     },
 }
 
@@ -204,19 +228,28 @@ pub fn import_stbridge(xml: &str) -> Result<Model, StbError> {
                             shape_name: None,
                         };
                     }
-                    // 鋼断面の図形参照（一定断面・テーパ等）。`shape` 系属性から形鋼名を取る。
-                    tag if tag.starts_with("StbSecSteelColumn_S")
-                        || tag.starts_with("StbSecSteelBeam_S") =>
+                    // 鋼／CFT／SRC 断面の図形参照（`*_Same` / `*_Straight`）。`shape` 系属性から
+                    // 形鋼名を取り、現在の断面種別（Steel/Cft/Src）へ格納する。
+                    tag if tag.starts_with("StbSecSteelColumn_")
+                        || tag.starts_with("StbSecSteelBeam_") =>
                     {
-                        if let CurSec::Steel { shape_name, .. } = &mut cur {
-                            if shape_name.is_none() {
-                                *shape_name = a
-                                    .get("shape")
-                                    .or_else(|| a.get("shape_start"))
-                                    .or_else(|| a.get("shape_center"))
-                                    .or_else(|| a.get("shape_main"))
-                                    .cloned();
+                        let sname = a
+                            .get("shape")
+                            .or_else(|| a.get("shape_start"))
+                            .or_else(|| a.get("shape_center"))
+                            .or_else(|| a.get("shape_main"))
+                            .cloned();
+                        match &mut cur {
+                            CurSec::Steel { shape_name, .. } if shape_name.is_none() => {
+                                *shape_name = sname
                             }
+                            CurSec::Cft { steel_name, .. } if steel_name.is_none() => {
+                                *steel_name = sname
+                            }
+                            CurSec::Src { steel_name, .. } if steel_name.is_none() => {
+                                *steel_name = sname
+                            }
+                            _ => {}
                         }
                     }
                     // --- 断面: 標準要素（RC） ---
@@ -257,14 +290,61 @@ pub fn import_stbridge(xml: &str) -> Result<Model, StbError> {
                             }
                         }
                     }
-                    // RC 配筋（StbSecBarArrangement* の子要素）。柱矩形/円形・梁で共通に読む。
-                    tag if tag.starts_with("StbSecBarColumn_RC")
-                        || tag.starts_with("StbSecBarBeam_RC") =>
-                    {
-                        if let CurSec::Rc { rebar, .. } = &mut cur {
-                            if rebar.is_none() {
-                                *rebar = Some(parse_rebar(&a));
+                    // --- 断面: 標準要素（CFT） ---
+                    "StbSecColumn_CFT" => {
+                        cur = CurSec::Cft {
+                            file_id: get_u32(&a, "id")?,
+                            name: a.get("name").cloned().unwrap_or_default(),
+                            steel_name: None,
+                        };
+                    }
+                    // --- 断面: 標準要素（SRC） ---
+                    "StbSecColumn_SRC" | "StbSecBeam_SRC" => {
+                        cur = CurSec::Src {
+                            file_id: get_u32(&a, "id")?,
+                            name: a.get("name").cloned().unwrap_or_default(),
+                            geom: None,
+                            rebar: None,
+                            steel_name: None,
+                            grade: a
+                                .get("strength_steel")
+                                .or_else(|| a.get("strength_main_S"))
+                                .cloned()
+                                .unwrap_or_default(),
+                        };
+                    }
+                    "StbSecColumn_SRC_Rect" => {
+                        if let CurSec::Src { geom, .. } = &mut cur {
+                            if geom.is_none() {
+                                *geom = Some((
+                                    get_f64_any(&a, &["width_X", "width_x"])?,
+                                    get_f64_any(&a, &["width_Y", "width_y"])?,
+                                ));
                             }
+                        }
+                    }
+                    "StbSecBeam_SRC_Straight" => {
+                        if let CurSec::Src { geom, .. } = &mut cur {
+                            if geom.is_none() {
+                                *geom = Some((
+                                    get_f64_any(&a, &["width", "width_X"])?,
+                                    get_f64_any(&a, &["depth", "width_Y"])?,
+                                ));
+                            }
+                        }
+                    }
+                    // 配筋（RC / SRC の StbSecBarArrangement* 子要素）。現在の断面種別へ格納。
+                    tag if tag.starts_with("StbSecBarColumn_")
+                        || tag.starts_with("StbSecBarBeam_") =>
+                    {
+                        match &mut cur {
+                            CurSec::Rc { rebar, .. } if rebar.is_none() => {
+                                *rebar = Some(parse_rebar(&a))
+                            }
+                            CurSec::Src { rebar, .. } if rebar.is_none() => {
+                                *rebar = Some(parse_rebar(&a))
+                            }
+                            _ => {}
                         }
                     }
                     // --- 形鋼ライブラリ ---
@@ -350,6 +430,43 @@ pub fn import_stbridge(xml: &str) -> Result<Model, StbError> {
                                 file_id,
                                 name,
                                 kind: PendingSecKind::Shape(shape),
+                            });
+                        }
+                    }
+                    "StbSecColumn_CFT" => {
+                        if let CurSec::Cft {
+                            file_id,
+                            name,
+                            steel_name,
+                        } = std::mem::replace(&mut cur, CurSec::None)
+                        {
+                            pending_secs.push(PendingSec {
+                                file_id,
+                                name,
+                                kind: PendingSecKind::CftRef(steel_name),
+                            });
+                        }
+                    }
+                    "StbSecColumn_SRC" | "StbSecBeam_SRC" => {
+                        if let CurSec::Src {
+                            file_id,
+                            name,
+                            geom: Some((b, d)),
+                            rebar,
+                            steel_name,
+                            grade,
+                        } = std::mem::replace(&mut cur, CurSec::None)
+                        {
+                            pending_secs.push(PendingSec {
+                                file_id,
+                                name,
+                                kind: PendingSecKind::SrcRef {
+                                    b,
+                                    d,
+                                    rebar: rebar.unwrap_or_else(default_rebar),
+                                    steel_name,
+                                    grade,
+                                },
                             });
                         }
                     }
@@ -527,33 +644,92 @@ fn build_sections(
             },
             PendingSecKind::Shape(shape) => shape.to_section(new_id, ps.name),
             PendingSecKind::SteelRef(shape_name) => {
+                // 形鋼ライブラリに定義が無い参照は物性ゼロの断面として残す
+                // （参照する部材の断面リンクを保つため。解析前に要確認）。
                 match shape_name.and_then(|nm| steel_lib.get(&nm).cloned()) {
                     Some(shape) => shape.to_section(new_id, ps.name),
-                    None => {
-                        // 形鋼ライブラリに定義が無い参照は物性ゼロの断面として残す
-                        // （参照する部材の断面リンクを保つため。解析前に要確認）。
-                        Section {
-                            id: new_id,
-                            name: ps.name,
-                            area: 0.0,
-                            iy: 0.0,
-                            iz: 0.0,
-                            j: 0.0,
-                            depth: 0.0,
-                            width: 0.0,
-                            as_y: 0.0,
-                            as_z: 0.0,
-                            panel_thickness: None,
-                            thickness: None,
-                            shape: None,
-                        }
-                    }
+                    None => zero_section(new_id, ps.name),
                 }
+            }
+            PendingSecKind::CftRef(steel_name) => {
+                // 充填鋼管の形鋼（BOX/Pipe）を CFT 形状へ読み替える。
+                let cft = steel_name
+                    .and_then(|nm| steel_lib.get(&nm).cloned())
+                    .and_then(|s| match s {
+                        SectionShape::SteelBox {
+                            height,
+                            width,
+                            thick,
+                        } => Some(SectionShape::CftBox {
+                            height,
+                            width,
+                            thick,
+                        }),
+                        SectionShape::SteelPipe { outer_dia, thick } => {
+                            Some(SectionShape::CftPipe { outer_dia, thick })
+                        }
+                        _ => None,
+                    });
+                match cft {
+                    Some(shape) => shape.to_section(new_id, ps.name),
+                    None => zero_section(new_id, ps.name),
+                }
+            }
+            PendingSecKind::SrcRef {
+                b,
+                d,
+                rebar,
+                steel_name,
+                grade,
+            } => {
+                // 内蔵鉄骨（H 形鋼）の寸法を解決する。未解決なら 0 とし、形状は保持する。
+                let (sh, sw, sweb, sfl) = steel_name
+                    .and_then(|nm| steel_lib.get(&nm).cloned())
+                    .and_then(|s| match s {
+                        SectionShape::SteelH {
+                            height,
+                            width,
+                            web_thick,
+                            flange_thick,
+                        } => Some((height, width, web_thick, flange_thick)),
+                        _ => None,
+                    })
+                    .unwrap_or((0.0, 0.0, 0.0, 0.0));
+                SectionShape::SrcRect {
+                    b,
+                    d,
+                    rebar,
+                    steel_height: sh,
+                    steel_width: sw,
+                    steel_web_thick: sweb,
+                    steel_flange_thick: sfl,
+                    steel_grade: grade,
+                }
+                .to_section(new_id, ps.name)
             }
         };
         model.sections.push(section);
     }
     index_map
+}
+
+/// 物性ゼロ・形状なしの断面（形鋼名未解決などのフォールバック。解析前に要確認）。
+fn zero_section(id: SectionId, name: String) -> Section {
+    Section {
+        id,
+        name,
+        area: 0.0,
+        iy: 0.0,
+        iz: 0.0,
+        j: 0.0,
+        depth: 0.0,
+        width: 0.0,
+        as_y: 0.0,
+        as_z: 0.0,
+        panel_thickness: None,
+        thickness: None,
+        shape: None,
+    }
 }
 
 /// 形鋼ライブラリ要素（`StbSecRoll-H` 等）と属性から [`SectionShape`] を復元する。
