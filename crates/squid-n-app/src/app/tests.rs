@@ -2287,6 +2287,54 @@ fn test_sync_slab_loads_action_seismic_live_case() {
     );
 }
 
+/// 床 Phase A-3 レビュー指摘: 用途の地震用値が明示的に 0（骨組用のみ正）の場合、
+/// 地震用積載(LiveSeismic)ケースは生成されないが、骨組用 Live(床積載)ケースへ
+/// フォールバックして地震用重量が過大にならないことを確認する
+/// （自動生成の骨組用 Live ケースは地震用重量の代用対象から除外される）。
+#[test]
+fn test_gravity_cases_excludes_auto_frame_live_when_no_seismic() {
+    use squid_n_core::model::SlabUsage;
+
+    let mut model = make_square_slab_test_model();
+    // 骨組用のみ正・地震用 0 の用途（serde 由来を想定した異常系）。
+    model.slabs[0].usage = Some(SlabUsage::Custom {
+        floor: 3e-3,
+        frame: 2e-3,
+        seismic: 0.0,
+    });
+    model
+        .validate()
+        .expect("テストモデルは validate を通るはず");
+    let mut app = App {
+        model,
+        ..App::default()
+    };
+    app.sync_slab_loads_action();
+
+    // 地震用値 0 なので LiveSeismic ケースは生成されない。
+    assert!(
+        !app.model
+            .load_cases
+            .iter()
+            .any(|lc| lc.name == SLAB_LIVE_SEISMIC_AUTO_LOAD_CASE_NAME),
+        "地震用値 0 なら床地震用積載(自動)は作られないはず"
+    );
+    // 骨組用 Live ケースは生成される。
+    let live_id = app
+        .model
+        .load_cases
+        .iter()
+        .find(|lc| lc.name == SLAB_LIVE_AUTO_LOAD_CASE_NAME)
+        .expect("床積載(自動)は作られるはず")
+        .id;
+    // 地震用重量の重力ケースに、骨組用 Live(床積載)を含めてはならない。
+    let gravity = gravity_cases_for_seismic_weight(&app.model);
+    assert!(
+        !gravity.contains(&live_id),
+        "自動生成の骨組用 Live(床積載)は地震用重量にフォールバックしてはならない"
+    );
+}
+
 /// レビュー §1.7: 地震用重量に使う荷重ケースの選択が、並び順ではなく
 /// `LoadCaseKind` に基づくことを確認する（Dead+LiveSeismic 優先、
 /// LiveSeismic が無ければ Dead+Live、種別が一つも設定されていなければ

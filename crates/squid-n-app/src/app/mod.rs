@@ -699,7 +699,11 @@ pub fn column_live_load_factors(model: &squid_n_core::model::Model) -> Vec<(Elem
 /// - `kind == LiveSeismic`（地震用積載）のケースがあれば併せて対象とする。
 ///   無ければ `kind == Live`（長期用積載）で代用する
 ///   （地震用の積載荷重には地震用の値を用いる（令85条）。地震用の値が
-///   個別に定義されていなければ長期用の値をそのまま使う）。
+///   個別に定義されていなければ長期用の値をそのまま使う）。ただし
+///   スラブ自動生成の骨組用積載ケース（[`SLAB_LIVE_AUTO_LOAD_CASE_NAME`]）は
+///   **骨組用**の値を持つため、この代用対象から除外する（地震用値が明示的に
+///   0 の用途で骨組用値へフォールバックし地震用重量が過大になるのを防ぐ。
+///   スラブの地震用積載は常に [`SLAB_LIVE_SEISMIC_AUTO_LOAD_CASE_NAME`] が担う）。
 /// - いずれのケースも `kind` が設定されていない（全ケースが既定値 `Other`）
 ///   場合は、旧スキーマ・後方互換のため先頭ケースのみを返す
 ///   （並び順に依存する旧規約。新規モデルは kind 設定を推奨）。
@@ -734,7 +738,9 @@ fn gravity_cases_for_seismic_weight(model: &squid_n_core::model::Model) -> Vec<L
             model
                 .load_cases
                 .iter()
-                .filter(|lc| lc.kind == LoadCaseKind::Live)
+                .filter(|lc| {
+                    lc.kind == LoadCaseKind::Live && lc.name != SLAB_LIVE_AUTO_LOAD_CASE_NAME
+                })
                 .map(|lc| lc.id),
         );
     }
