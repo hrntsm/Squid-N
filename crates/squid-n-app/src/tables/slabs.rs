@@ -490,25 +490,40 @@ fn joists_section(ui: &mut egui::Ui, app: &mut App) {
         .trim()
         .parse::<f64>()
         .unwrap_or(0.0);
-    let can_add_joist = matches!((s0, s1), (Some(a), Some(b)) if a != b) && spacing > 0.0;
-
-    if ui
-        .add_enabled(can_add_joist, egui::Button::new("+ 小梁を追加"))
-        .on_hover_text("異なる支持2節点と正の負担幅を指定してください")
-        .clicked()
-    {
-        let (a, b) = (s0.expect("can_add_joist で確認済み"), s1.expect("同上"));
-        // dir は支持2節点の平面（XY）ベクトルから算定する。
-        let ca = app.model.nodes[a.index()].coord;
-        let cb = app.model.nodes[b.index()].coord;
+    // 追加可能な小梁を安全に構成する。両支持節点が現存し（節点削除でドラフトが
+    // 陳腐化しても out-of-bounds しないよう `nodes.get` で確認）、平面（XY）方向に
+    // 有意な離間がある（`dir≈[0,0]` は分配エンジンが Y 軸へ暗黙フォールバックし
+    // 誤分配となるため弾く）場合のみ Some を返す。
+    let addable_joist: Option<JoistLine> = (|| {
+        let (a, b) = (s0?, s1?);
+        if a == b || spacing <= 0.0 {
+            return None;
+        }
+        let ca = app.model.nodes.get(a.index())?.coord;
+        let cb = app.model.nodes.get(b.index())?.coord;
         let dir = [cb[0] - ca[0], cb[1] - ca[1]];
-        let mut v = joists.clone();
-        v.push(JoistLine {
+        if dir[0].hypot(dir[1]) <= 1e-9 {
+            return None; // 平面上で重なる2節点（鉛直に積層等）は小梁として無効。
+        }
+        Some(JoistLine {
             dir,
             spacing,
             support: [a, b],
-        });
-        new_joists = Some(v);
+        })
+    })();
+
+    if ui
+        .add_enabled(addable_joist.is_some(), egui::Button::new("+ 小梁を追加"))
+        .on_hover_text(
+            "現存する異なる支持2節点（平面上で離れている）と正の負担幅を指定してください",
+        )
+        .clicked()
+    {
+        if let Some(joist) = addable_joist {
+            let mut v = joists.clone();
+            v.push(joist);
+            new_joists = Some(v);
+        }
     }
 
     if let Some(v) = new_joists {
