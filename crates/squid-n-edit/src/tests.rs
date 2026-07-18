@@ -1605,6 +1605,7 @@ fn test_set_slab_joists_roundtrip() {
         dir: [0.0, 1.0],
         spacing: 900.0,
         support: [NodeId(0), NodeId(3)],
+        section: None,
     }];
     stack.run(
         &mut model,
@@ -1645,6 +1646,7 @@ fn test_materialize_slab_joists_creates_beams() {
                 dir: [0.0, 1.0],
                 spacing: 900.0,
                 support: [NodeId(0), NodeId(3)],
+                section: None,
             }],
             loads: vec![],
             method: DistributionMethod::TriTrapezoid,

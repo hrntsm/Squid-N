@@ -19,12 +19,12 @@ mod rect;
 mod rigid_zone;
 mod types;
 
-pub use geometry::polygon_area;
+pub use geometry::{polygon_area, slab_dimensions};
 pub use rigid_zone::{cmq_with_rigid_zone, RigidZoneCmqMode, RigidZoneCmqResult};
 pub use types::{BeamLoad, Cmq, LoadShape, LoadTarget};
 
 use cantilever::{distribute_cantilever, distribute_corner};
-use geometry::{boundary_coords, slab_dimensions};
+use geometry::boundary_coords;
 use polygon::{distribute_polygon, distribute_polygon_supported};
 use rect::{distribute_rect, distribute_rect_with_joists};
 use squid_n_core::model::{DistributionMethod, Model, Slab, SlabKind};

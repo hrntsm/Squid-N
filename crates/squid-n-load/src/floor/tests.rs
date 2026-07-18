@@ -432,11 +432,13 @@ fn test_joist_two_stage_transfer_conservation() {
             dir: [0.0, 1.0],
             spacing,
             support: [NodeId(4), NodeId(5)],
+            section: None,
         },
         JoistLine {
             dir: [0.0, 1.0],
             spacing,
             support: [NodeId(6), NodeId(7)],
+            section: None,
         },
     ];
     let slab = Slab {
@@ -543,11 +545,13 @@ fn test_materialized_joist_uses_span_distributed_load() {
             dir: [0.0, 1.0],
             spacing,
             support: [NodeId(4), NodeId(5)],
+            section: None,
         },
         JoistLine {
             dir: [0.0, 1.0],
             spacing,
             support: [NodeId(6), NodeId(7)],
+            section: None,
         },
     ];
     let slab = Slab {

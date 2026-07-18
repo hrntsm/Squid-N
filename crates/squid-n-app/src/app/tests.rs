@@ -2337,6 +2337,142 @@ fn test_gravity_cases_excludes_auto_frame_live_when_no_seismic() {
     );
 }
 
+/// 床 Phase E: 床の中での小梁・スラブ設計。断面を割り当てた小梁は単純支持梁として
+/// 検定され、矩形スラブは一方向版として設計曲げ・必要鉄筋量が算定される。
+#[test]
+fn test_floor_design_checks_joist_and_slab() {
+    use squid_n_core::ids::SectionId;
+    use squid_n_core::model::{JoistLine, Section, SlabUsage};
+
+    let mut model = make_square_slab_test_model();
+    // 事務室用途（床用積載 2900 N/m² = 2.9e-3 N/mm²）＋固定荷重 0.005。
+    model.slabs[0].usage = Some(SlabUsage::Office);
+    model.slabs[0].thickness = Some(150.0);
+    // 鋼小梁の断面（Iy=1e8 mm⁴, せい 400mm → Z=5e5 mm³）。
+    model.sections.push(Section {
+        id: SectionId(0),
+        name: "H-400".into(),
+        area: 10000.0,
+        iy: 1.0e8,
+        iz: 1.0e7,
+        j: 1.0e6,
+        depth: 400.0,
+        width: 200.0,
+        as_y: 0.0,
+        as_z: 0.0,
+        panel_thickness: None,
+        thickness: None,
+        shape: None,
+    });
+    // 対辺の中間節点 N4(2000,0)・N5(2000,4000) を追加し、その間に小梁を架ける
+    // （境界大梁で直接結ばれていない＝実部材化されていない現実的な小梁）。
+    let mk_mid = |id: u32, x: f64, y: f64| squid_n_core::model::Node {
+        id: NodeId(id),
+        coord: [x, y, 0.0],
+        restraint: Default::default(),
+        mass: None,
+        story: None,
+    };
+    model.nodes.push(mk_mid(4, 2000.0, 0.0));
+    model.nodes.push(mk_mid(5, 2000.0, 4000.0));
+    // 支持 N4(2000,0)–N5(2000,4000)、スパン 4000、負担幅 2000、断面 S0。
+    model.slabs[0].joists.push(JoistLine {
+        dir: [0.0, 1.0],
+        spacing: 2000.0,
+        support: [NodeId(4), NodeId(5)],
+        section: Some(SectionId(0)),
+    });
+    model.validate().expect("validate");
+    let app = App {
+        model,
+        ..App::default()
+    };
+
+    let (joists, slabs) = app.floor_design_checks();
+    assert_eq!(joists.len(), 1, "断面付き小梁が1件設計される");
+    let (_sid, _ji, jr) = &joists[0];
+    // w = (固定0.005 + 床用積載2.9e-3) × spacing2000。M = wL²/8。
+    let w_udl = (0.005 + 2.9e-3) * 2000.0;
+    assert!((jr.w - w_udl).abs() / w_udl < 1e-9, "w={}", jr.w);
+    assert!((jr.m_max - w_udl * 4000.0 * 4000.0 / 8.0).abs() < 1.0);
+    assert!(jr.span > 0.0 && jr.bending_ratio > 0.0);
+
+    assert_eq!(slabs.len(), 1, "矩形スラブが1件設計される");
+    let (_sid, sr) = &slabs[0];
+    assert!((sr.span - 4000.0).abs() < 1e-6, "短辺スパン");
+    assert!(sr.moment > 0.0 && sr.as_req_per_m > 0.0);
+    assert!((sr.effective_depth - 120.0).abs() < 1e-6, "d=t-かぶり");
+}
+
+/// 実部材化された小梁は全体 FEM で検定するため、床設計（小梁）の対象外になる。
+#[test]
+fn test_floor_design_skips_materialized_joist() {
+    use squid_n_core::ids::SectionId;
+    use squid_n_core::model::{
+        ElementData, ElementKind, EndCondition, ForceRegime, JoistLine, LocalAxis, Section,
+    };
+
+    let mut model = make_square_slab_test_model();
+    model.sections.push(Section {
+        id: SectionId(0),
+        name: "H".into(),
+        area: 1.0,
+        iy: 1.0e8,
+        iz: 1.0,
+        j: 1.0,
+        depth: 400.0,
+        width: 1.0,
+        as_y: 0.0,
+        as_z: 0.0,
+        panel_thickness: None,
+        thickness: None,
+        shape: None,
+    });
+    let mk_mid = |id: u32, x: f64, y: f64| squid_n_core::model::Node {
+        id: NodeId(id),
+        coord: [x, y, 0.0],
+        restraint: Default::default(),
+        mass: None,
+        story: None,
+    };
+    model.nodes.push(mk_mid(4, 2000.0, 0.0));
+    model.nodes.push(mk_mid(5, 2000.0, 4000.0));
+    model.slabs[0].joists.push(JoistLine {
+        dir: [0.0, 1.0],
+        spacing: 2000.0,
+        support: [NodeId(4), NodeId(5)],
+        section: Some(SectionId(0)),
+    });
+    // 支持 N4–N5 を両端に持つ実 Beam を追加（実部材化相当）。
+    let next = model.elements.len() as u32;
+    model.elements.push(ElementData {
+        id: ElemId(next),
+        kind: ElementKind::Beam,
+        nodes: [NodeId(4), NodeId(5)].into_iter().collect(),
+        section: Some(SectionId(0)),
+        material: None,
+        local_axis: LocalAxis {
+            ref_vector: [0.0, 0.0, 1.0],
+        },
+        end_cond: [EndCondition::Pinned, EndCondition::Pinned],
+        force_regime: ForceRegime::Auto,
+        rigid_zone: Default::default(),
+        plastic_zone: None,
+        spring: None,
+    });
+    model.validate().expect("validate");
+    let app = App {
+        model,
+        ..App::default()
+    };
+
+    let (joists, _slabs) = app.floor_design_checks();
+    assert!(
+        joists.is_empty(),
+        "実部材化された小梁は床設計の対象外（全体 FEM で検定）"
+    );
+}
+
 /// レビュー §1.7: 地震用重量に使う荷重ケースの選択が、並び順ではなく
 /// `LoadCaseKind` に基づくことを確認する（Dead+LiveSeismic 優先、
 /// LiveSeismic が無ければ Dead+Live、種別が一つも設定されていなければ

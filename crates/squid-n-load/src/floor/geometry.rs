@@ -33,7 +33,7 @@ pub(crate) fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// 注: この判定は「向かい合う辺が等長・平行」という平行四辺形条件のみを検証しており、
 /// 直交性（90°）までは検証しない。実運用では境界は軸直交の矩形である前提のため、
 /// 既存の TriTrapezoid/OneWay/TributaryArea の面積計算（`lx*ly`）はその前提の下でのみ厳密。
-pub(crate) fn slab_dimensions(model: &Model, slab: &Slab) -> Option<(f64, f64)> {
+pub fn slab_dimensions(model: &Model, slab: &Slab) -> Option<(f64, f64)> {
     if slab.boundary.len() != 4 {
         return None;
     }

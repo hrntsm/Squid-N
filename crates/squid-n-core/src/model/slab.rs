@@ -107,6 +107,10 @@ pub struct JoistLine {
     pub dir: [f64; 2],
     pub spacing: f64,
     pub support: [NodeId; 2],
+    /// 小梁の断面参照（床の中での小梁設計に用いる。単純支持梁として検定する）。
+    /// `None`（旧スキーマ・未設定）は断面未割当（設計対象外）。
+    #[serde(default)]
+    pub section: Option<crate::ids::SectionId>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

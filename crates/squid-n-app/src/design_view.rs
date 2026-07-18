@@ -611,6 +611,158 @@ pub fn design_table(ui: &mut egui::Ui, app: &mut App) {
             ui.colored_label(crate::theme::GRAY_600, note);
         }
     }
+
+    floor_design_section(ui, app);
+}
+
+/// 床の中での小梁・スラブ設計の表示（`ResultsBundle.joist_checks`/`slab_checks`）。
+/// 小梁は単純支持梁として曲げ・たわみを検定し、スラブは一方向版として設計曲げ
+/// モーメント・必要鉄筋量を表示する（いずれも全体 FEM から独立）。
+fn floor_design_section(ui: &mut egui::Ui, app: &App) {
+    use egui_extras::{Column, TableBuilder};
+    let Some(r) = app.results.as_ref() else {
+        return;
+    };
+    if r.joist_checks.is_empty() && r.slab_checks.is_empty() {
+        return;
+    }
+
+    ui.add_space(12.0);
+    ui.strong("小梁・床の設計（床の中で・単純支持／一方向）");
+    ui.colored_label(
+        crate::theme::GRAY_600,
+        "小梁は大梁を分割せず、床の中で単純支持梁として曲げ・たわみを検定します（反力は\
+         大梁へ CMQ として伝達）。スラブは一方向版として設計曲げと必要鉄筋量を算定します。\
+         鋼小梁 E=205000・F=235、鉄筋 SD295（長期 ft=195）の既定値を用います。",
+    );
+
+    if !r.joist_checks.is_empty() {
+        ui.label("小梁（単純支持梁）:");
+        TableBuilder::new(ui)
+            .id_salt("joist_design_table")
+            .striped(true)
+            .column(Column::auto())
+            .column(Column::auto())
+            .column(Column::initial(80.0))
+            .column(Column::initial(90.0))
+            .column(Column::initial(90.0))
+            .column(Column::initial(90.0))
+            .column(Column::initial(70.0))
+            .column(Column::auto())
+            .header(20.0, |mut h| {
+                for t in &[
+                    "スラブ",
+                    "小梁",
+                    "スパン[mm]",
+                    "M[kN·m]",
+                    "Q[kN]",
+                    "δ[mm]",
+                    "検定比",
+                    "判定",
+                ] {
+                    h.col(|ui| {
+                        ui.strong(*t);
+                    });
+                }
+            })
+            .body(|mut body| {
+                for (sid, ji, jr) in &r.joist_checks {
+                    body.row(22.0, |mut row| {
+                        row.col(|ui| {
+                            ui.label(format!("#{}", sid.0));
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("{ji}"));
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("{:.0}", jr.span));
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("{:.2}", jr.m_max * 1e-6));
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("{:.2}", jr.q_max * 1e-3));
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("{:.2} (δ/L=1/{:.0})", jr.deflection, {
+                                if jr.deflection_span_ratio > 0.0 {
+                                    1.0 / jr.deflection_span_ratio
+                                } else {
+                                    f64::INFINITY
+                                }
+                            }));
+                        });
+                        row.col(|ui| {
+                            ui.colored_label(
+                                crate::theme::status_color(jr.ratio),
+                                format!("{:.2}", jr.ratio),
+                            );
+                        });
+                        row.col(|ui| {
+                            if jr.ok {
+                                ui.colored_label(crate::theme::GOOD_GREEN, "OK");
+                            } else {
+                                ui.colored_label(crate::theme::ERROR_RED, "NG");
+                            }
+                        });
+                    });
+                }
+            });
+    }
+
+    if !r.slab_checks.is_empty() {
+        ui.add_space(6.0);
+        ui.label("スラブ（一方向版）:");
+        TableBuilder::new(ui)
+            .id_salt("slab_design_table")
+            .striped(true)
+            .column(Column::auto())
+            .column(Column::initial(80.0))
+            .column(Column::initial(90.0))
+            .column(Column::initial(100.0))
+            .column(Column::initial(80.0))
+            .column(Column::initial(120.0))
+            .header(20.0, |mut h| {
+                for t in &[
+                    "スラブ",
+                    "スパン[mm]",
+                    "w[kN/m²]",
+                    "M[kN·m/m]",
+                    "t[mm]",
+                    "必要As[mm²/m]",
+                ] {
+                    h.col(|ui| {
+                        ui.strong(*t);
+                    });
+                }
+            })
+            .body(|mut body| {
+                for (sid, sr) in &r.slab_checks {
+                    body.row(22.0, |mut row| {
+                        row.col(|ui| {
+                            ui.label(format!("#{}", sid.0));
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("{:.0}", sr.span));
+                        });
+                        row.col(|ui| {
+                            // w[N/mm²] → kN/m²（×1e3）。
+                            ui.label(format!("{:.2}", sr.w * 1e3));
+                        });
+                        row.col(|ui| {
+                            // M[N·mm/mm] → kN·m/m（×1e-3）。
+                            ui.label(format!("{:.2}", sr.moment * 1e-3));
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("{:.0}", sr.thickness));
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("{:.0}", sr.as_req_per_m));
+                        });
+                    });
+                }
+            });
+    }
 }
 
 /// `MemberRank` の表示名（FA〜FD）。

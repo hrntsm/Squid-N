@@ -134,6 +134,18 @@ pub struct Selection {
     pub members: Vec<squid_n_core::ids::ElemId>,
 }
 
+/// 床の中での小梁設計結果1件（`(スラブ id, 小梁インデックス, 設計結果)`）。
+pub type JoistCheck = (
+    squid_n_core::ids::SlabId,
+    usize,
+    squid_n_design_jp::floor::JoistDesignResult,
+);
+/// スラブ（床）設計結果1件（`(スラブ id, 設計結果)`）。
+pub type SlabCheck = (
+    squid_n_core::ids::SlabId,
+    squid_n_design_jp::floor::SlabDesignResult,
+);
+
 #[derive(Default)]
 pub struct ResultsBundle {
     pub statics: Vec<(StaticCaseKey, squid_n_solver::linear::StaticOnce)>,
@@ -149,6 +161,11 @@ pub struct ResultsBundle {
         String,
         squid_n_design_jp::CheckResult,
     )>,
+    /// 床の中での小梁設計（単純支持梁）。実部材化された小梁は全体 FEM で検定する
+    /// ためここには含めない。
+    pub joist_checks: Vec<JoistCheck>,
+    /// スラブ（床）の設計（一方向曲げ）。
+    pub slab_checks: Vec<SlabCheck>,
     pub pushover: Option<squid_n_solver::pushover::PushoverResult>,
     pub time_history: Option<squid_n_solver::timehistory::ResponseResult>,
 }
