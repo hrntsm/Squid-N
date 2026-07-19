@@ -97,6 +97,9 @@ struct RawStory {
     file_id: u32,
     name: String,
     elevation: f64,
+    /// 実 ST-Bridge の `StbStory` 直下 `StbNodeIdList/StbNodeId` が示す所属節点
+    /// （file node id 列）。Squid 方言は `StbNode` の `story` 属性を使うため空になる。
+    node_ids: Vec<u32>,
 }
 
 /// 取り込み途中の材料（id 正規化前）。
@@ -258,6 +261,9 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
     let mut wall_sec_thickness: HashMap<u32, f64> = HashMap::new();
     let mut cur_wall: Option<RawWall> = None;
     let mut in_node_id_order = false;
+    // 実 ST-Bridge の `StbStory`（内部に `StbNodeIdList/StbNodeId` を持つ）を開いている間 true。
+    // 開いている `StbNodeId` を直近の階の所属節点として集めるために使う。
+    let mut in_story = false;
 
     loop {
         let ev = reader
@@ -305,7 +311,12 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                             file_id: get_u32(&a, "id")?,
                             name: a.get("name").cloned().unwrap_or_default(),
                             elevation: get_f64_any(&a, &["height", "Z"])?,
+                            node_ids: Vec::new(),
                         });
+                        // 直下の StbNodeIdList/StbNodeId をこの階へ集める窓を開く
+                        // （空の <StbStory/> でも害は無い。StbNodeId はスラブ・壁を優先し、
+                        // かつ階は通常部材より前に現れるため誤取り込みしない）。
+                        in_story = true;
                     }
                     "StbMaterial" => {
                         raw_materials.push(RawMaterial {
@@ -612,6 +623,10 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                                 slab.boundary.push(id);
                             } else if let Some(wall) = cur_wall.as_mut() {
                                 wall.boundary.push(id);
+                            } else if in_story {
+                                if let Some(story) = raw_stories.last_mut() {
+                                    story.node_ids.push(id);
+                                }
                             }
                         }
                     }
@@ -743,6 +758,9 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                     "StbNodeIdOrder" => {
                         in_node_id_order = false;
                     }
+                    "StbStory" => {
+                        in_story = false;
+                    }
                     "StbSlab" => {
                         if let Some(slab) = cur_slab.take() {
                             raw_slabs.push(slab);
@@ -795,15 +813,31 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
     let story_index = build_index(raw_stories.iter().map(|s| s.file_id));
     let material_index = build_index(raw_materials.iter().map(|m| m.file_id));
 
+    // 実 ST-Bridge の階所属（StbStory/StbNodeIdList）から file node id → file story id を作る。
+    // 節点の所属階は、まず節点自身の `story` 属性（Squid 方言）を優先し、無ければこの表を引く。
+    let node_story_from_list: HashMap<u32, u32> = raw_stories
+        .iter()
+        .flat_map(|s| {
+            let sid = s.file_id;
+            s.node_ids.iter().map(move |&nid| (nid, sid))
+        })
+        .collect();
+
     raw_stories.sort_by_key(|s| s.file_id);
     for s in raw_stories {
+        // 階の所属節点を正規化後の NodeId へ解決する（存在しない節点は除外）。
+        let node_ids = s
+            .node_ids
+            .iter()
+            .filter_map(|fid| node_index.get(fid).copied().map(NodeId))
+            .collect();
         model.stories.push(Story {
             level_kind: Default::default(),
             structure: Default::default(),
             id: StoryId(story_index[&s.file_id]),
             name: s.name,
             elevation: s.elevation,
-            node_ids: vec![],
+            node_ids,
             diaphragms: vec![],
             seismic_weight: None,
         });
@@ -816,11 +850,24 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
             coord: n.coord,
             restraint: squid_n_core::dof::Dof6Mask::FREE,
             mass: None,
+            // 節点自身の story 属性（Squid 方言）を優先し、無ければ階の所属節点リストから引く。
             story: n
                 .story
-                .and_then(|s| story_index.get(&s).copied())
+                .or_else(|| node_story_from_list.get(&n.file_id).copied())
+                .and_then(|sfid| story_index.get(&sfid).copied())
                 .map(StoryId),
         });
+    }
+
+    // 階の所属節点リストを節点の story 属性からも補完する（StbNodeIdList を持たない
+    // Squid 方言でも Story.node_ids を完全にする。StbNodeIdList 由来との重複は除く）。
+    for node in &model.nodes {
+        if let Some(sid) = node.story {
+            let list = &mut model.stories[sid.index()].node_ids;
+            if !list.contains(&node.id) {
+                list.push(node.id);
+            }
+        }
     }
 
     raw_materials.sort_by_key(|m| m.file_id);

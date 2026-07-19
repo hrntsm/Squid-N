@@ -942,6 +942,61 @@ mod tests {
         }
     }
 
+    /// 実 ST-Bridge の階所属（`StbStory` 直下 `StbNodeIdList/StbNodeId`）を取り込み、
+    /// 節点の `story` と `Story.node_ids` の双方へ反映することを確認する。
+    #[test]
+    fn test_import_story_node_list() {
+        let xml = r#"<?xml version="1.0"?>
+<ST_BRIDGE version="2.0.0"><StbModel>
+  <StbNodes>
+    <StbNode id="0" X="0" Y="0" Z="0"/>
+    <StbNode id="1" X="4000" Y="0" Z="0"/>
+    <StbNode id="2" X="0" Y="0" Z="3000"/>
+    <StbNode id="3" X="4000" Y="0" Z="3000"/>
+  </StbNodes>
+  <StbStories>
+    <StbStory id="0" name="1F" height="0"/>
+    <StbStory id="1" name="2F" height="3000">
+      <StbNodeIdList>
+        <StbNodeId id="2"/>
+        <StbNodeId id="3"/>
+      </StbNodeIdList>
+    </StbStory>
+  </StbStories>
+</StbModel></ST_BRIDGE>"#;
+        let m = import_stbridge(xml).expect("import");
+        assert!(m.validate().is_ok(), "{:?}", m.validate());
+        // 節点 2・3 は 2F（StoryId(1)）に所属し、0・1 はいずれの階にも属さない。
+        assert_eq!(m.nodes[2].story, Some(StoryId(1)), "節点2 → 2F");
+        assert_eq!(m.nodes[3].story, Some(StoryId(1)), "節点3 → 2F");
+        assert_eq!(m.nodes[0].story, None, "節点0 は階リスト外");
+        // Story.node_ids へも反映される。
+        assert_eq!(
+            m.stories[1].node_ids,
+            vec![NodeId(2), NodeId(3)],
+            "2F の所属節点"
+        );
+        assert!(m.stories[0].node_ids.is_empty(), "1F は所属節点なし");
+    }
+
+    /// `StbNode` の `story` 属性（Squid 方言）でも `Story.node_ids` が補完される。
+    #[test]
+    fn test_import_story_from_node_attr_fills_node_ids() {
+        let xml = r#"<?xml version="1.0"?>
+<ST_BRIDGE version="2.0.0"><StbModel>
+  <StbNodes>
+    <StbNode id="0" X="0" Y="0" Z="0" story="-1"/>
+    <StbNode id="1" X="0" Y="0" Z="3000" story="0"/>
+  </StbNodes>
+  <StbStories>
+    <StbStory id="0" name="1F" height="3000"/>
+  </StbStories>
+</StbModel></ST_BRIDGE>"#;
+        let m = import_stbridge(xml).expect("import");
+        assert_eq!(m.nodes[1].story, Some(StoryId(0)));
+        assert_eq!(m.stories[0].node_ids, vec![NodeId(1)], "story 属性から補完");
+    }
+
     /// 標準モード: CFT 角形柱が `StbSecColumn_CFT`＋形鋼ライブラリとして往復する。
     #[test]
     fn test_standard_roundtrip_cft_box() {

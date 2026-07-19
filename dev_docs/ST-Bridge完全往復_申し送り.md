@@ -110,8 +110,13 @@ RcRect / RcCircle / SrcRect / CftBox / CftPipe / RcWall`。
      大きい。モデルは壁を持つのでパーサ側の面要素シリアライズが主作業。
 5. **実 ST-Bridge 構造への準拠**: 現状は自社方言（`StbMaterials` を `StbModel` 直下、
    `StbNode` に `story` 属性、`StbSecRaw` 独自要素）。他社完全互換には
-   標準構造（材料は `StbCommon` 配下、node-story は `StbStory` の `StbNodeIdList` 経由、
-   `StbAxes`、部材の `kind_structure`、単位系宣言）の read/write を実装する。
+   標準構造（材料は `StbCommon` 配下、`StbAxes`、部材の `kind_structure`、単位系宣言）の
+   read/write を実装する。
+   - **node-story の `StbStory/StbNodeIdList` 読取り**は ✅ **実装済み**（import）。
+     実 ST-Bridge は階の所属節点を `StbStory` 直下の `StbNodeIdList/StbNodeId` で持つ。
+     これを取り込み、節点の `story`（属性が無い場合の補完）と `Story.node_ids` の双方へ
+     反映する。Squid 方言の `StbNode@story` 属性からも `Story.node_ids` を補完し、どちらの
+     表現でも階の所属が完全になる（書き出しは当面 `StbNode@story` 属性のまま）。
 6. **テーパ/ハンチ/非一様鋼断面**: `StbSecSteelColumn_S_NotSame` / `_Taper` / `_Joint`、
    梁ハンチ図形の読取り（バケット2 の断面型追加とセット）。
 7. **未対応要素の可視化**: ✅ **実装済み**（本 PR）。`import_stbridge_with_report` を追加し、
