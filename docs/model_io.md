@@ -96,17 +96,108 @@ let model = load_scz(Path::new("model.scz"))?;
 | 層 | 名称、標高 |
 | 材料 | ヤング係数 E、ポアソン比 ν、密度、コンクリート強度 Fc、鋼材強度 Fy |
 | 断面 | 面積、断面二次モーメント（Iy・Iz）、ねじり定数 J、せい・幅などの物性 |
-| 部材 | 柱（鉛直材）／大梁（水平材）／ブレース（斜材・引張専用の別）、節点・断面・材料の参照、部材軸（`ref_vector`） |
+| 部材 | 柱（鉛直材）／大梁（水平材）／間柱／ブレース（斜材・引張専用の別）、節点・断面・材料の参照、部材軸（`ref_vector`） |
+| 床・壁 | スラブ（境界節点ループ＋厚さ）、壁（境界節点ループ＋厚さ＋材料） |
 | 荷重 | 荷重ケース（節点荷重） |
+
+要素ごとの詳細な変換状況（取り込み／書き出し／往復・備考）は、下記の
+[ST-Bridge 要素別 変換状況一覧](#st-bridge-要素別-変換状況一覧)を参照。
 
 ### 非対応（対象外）
 
 以下は ST-Bridge 入出力の対象に含まれない。読み込み後は既定値になる。
 
-- 解析結果・独自属性。
+- 解析結果・Squid-N 独自の解析／設計属性。
 - 拘束条件（支点）・質量（ST-Bridge の幾何スコープ外）。
-- 部材荷重・荷重組合せ。
-- 床（スラブ）・壁・剛域・端部接合などの詳細（ブレースは対応済み）。
+- 部材荷重・面荷重・温度荷重・荷重組合せ（節点荷重のみ対応）。
+- 基礎・杭・フーチング、開口、パラペット、通り芯（`StbAxes`）。
+- 剛域・端部接合・製作情報などの詳細属性。
+
+> これら未対応の要素のうち、**取り込み時にデータを欠落させるもの**（部材・断面・荷重・
+> 通り芯）は、取りこぼしを無言で捨てず **[`ImportReport`] の警告として必ず通知**する
+> （手動リストに無い ST-Bridge 2.1 の新要素・ベンダー拡張も、部材・断面・荷重の直属子で
+> あれば要素名で通知する。fail-loud）。
+
+### ST-Bridge 要素別 変換状況一覧
+
+ST-Bridge の主要要素ごとの変換状況。凡例: **✅ 対応** ／ **⚠️ 一部・近似** ／ **❌ 非対応**。
+「取り込み」は他社ファイルを読めるか、「書き出し」は Squid-N が出力するか、「往復・備考」は
+`import→export→再import` での保存性と注意点を示す。断面（形鋼・RC 等）は**断面形状モード**
+（`Standard`）での状況。物性モード（`Raw`）は全断面が `StbSecRaw` で完全一致往復する。
+
+#### 節点・層・材料
+
+| ST-Bridge 要素 | 取り込み | 書き出し | 往復・備考 |
+|---|:--:|:--:|---|
+| `StbNode`（座標・所属層） | ✅ | ✅ | 座標（小文字 `x/y/z`・大文字 `X/Y/Z` 双方可）。拘束・質量は対象外 |
+| `StbStory`（名称・標高） | ✅ | ✅ | — |
+| `StbStory/StbNodeIdList/StbNodeId`（階の所属節点） | ✅ | ⚠️ | 取り込みで `Node.story`・`Story.node_ids` へ反映。書き出しは `StbNode@story` 属性（方言）で表現 |
+| `StbMaterial`（E・ν・密度・Fc・Fy） | ✅ | ✅ | 材料の種別・規格名は `name` のみ（型分けは非対応） |
+
+#### 部材
+
+| ST-Bridge 要素 | 取り込み | 書き出し | 往復・備考 |
+|---|:--:|:--:|---|
+| `StbColumn`（柱） | ✅ | ✅ | 鉛直材として往復 |
+| `StbGirder` / `StbBeam`（大梁・小梁） | ✅ | ✅ | 水平材として往復 |
+| `StbPost`（間柱） | ⚠️ | ⚠️ | 梁部材として取り込む（間柱の別種別が無く情報一部欠落） |
+| `StbBrace`（ブレース） | ✅ | ✅ | `tension_only` 含む。取り込み時は両端ピン既定 |
+| `StbSlab`（スラブ） | ✅ | ✅ | 境界節点ループ（`StbNodeIdOrder`・子要素 `StbNodeId`・CDATA 可）＋厚さ。荷重・用途・分配法は対象外 |
+| `StbWall`（壁） | ✅ | ✅ | 境界節点ループ＋厚さ＋材料。開口（`StbOpen`）は対象外 |
+| `StbFooting` / `StbPile` / `StbFoundationColumn` / `StbStripFooting`（基礎系） | ❌ | ❌ | 取り込み時に警告 |
+| `StbParapet` / `StbOpen`（パラペット・開口） | ❌ | ❌ | 取り込み時に警告 |
+
+#### 断面 — 鋼（形鋼ライブラリ `StbSecSteel`）
+
+`StbSecColumn_S` / `StbSecBeam_S` / `StbSecBrace_S` が形鋼図形を参照する。
+
+| 形鋼要素 | 取り込み | 書き出し | 内部形状・備考 |
+|---|:--:|:--:|---|
+| `StbSecRoll-H` / `StbSecBuild-H` | ✅ | ✅ | H 形鋼（`SteelH`） |
+| `StbSecBuild-H`（上下フランジ相違） | ✅ | ✅ | 非対称組立 H（`SteelBuiltH`）。下フランジは方言属性 `B2`/`t2_lower`。第三者は上フランジの対称 H として読む |
+| `StbSecRoll-BOX` / `StbSecBuild-BOX` | ✅ | ✅ | 角形鋼管（`SteelBox`） |
+| `StbSecPipe` / `StbSecRoll-Pipe` / `StbSecBuild-Pipe` | ✅ | ✅ | 鋼管（`SteelPipe`）。書き出しは `StbSecPipe` |
+| `StbSecRoll-L` | ✅ | ✅ | 山形鋼（`SteelAngle`） |
+| `StbSecRoll-C` | ✅ | ✅ | 溝形鋼（`SteelChannel`） |
+| `StbSecRoll-T` / `StbSecBuild-T` | ✅ | ✅ | T 形鋼（`SteelTee`） |
+| `StbSecRoll-FlatBar` | ✅ | ✅ | 平鋼・鋼板（`SteelFlatBar`） |
+| `StbSecRoll-RoundBar` | ✅ | ✅ | 中実丸鋼（`SteelRoundBar`） |
+| `StbSecRoll-LipC` | ✅ | ✅ | リップ溝形鋼（`SteelLipChannel`）。幅厚比・部材ランク検定は対象外 |
+| 組立断面（2L・2C・十字）・リップ Z・その他軽量形鋼 | ❌ | ❌ | 未対応。参照解決できず物性ゼロ／断面欠落として警告 |
+| テーパ・非一様鋼（`_NotSame` / `_Taper` / `_Joint`） | ❌ | ❌ | 図形を復元できず断面欠落として警告 |
+
+#### 断面 — RC・SRC・CFT
+
+| ST-Bridge 要素 | 取り込み | 書き出し | 往復・備考 |
+|---|:--:|:--:|---|
+| `StbSecColumn_RC`（`_Rect` / `_Circle`） | ✅ | ✅ | RC 矩形・円形柱（`RcRect`/`RcCircle`）＋配筋 |
+| `StbSecBeam_RC`（`_Straight`） | ✅ | ✅ | RC 矩形梁＋配筋。円形梁は ST-Bridge に図形が無く物性へフォールバック |
+| `StbSecBarArrangement*`（配筋） | ⚠️ | ✅ | 主筋（本数・径・段数、段別本数の合算）・帯筋・かぶりを best-effort。呼び名径 `D22` 可。実スキーマ完全準拠は今後の課題 |
+| `StbSecColumn_CFT`（＋充填鋼管） | ✅ | ⚠️ | CFT 角形・円形（`CftBox`/`CftPipe`）。**柱のみ**。梁に使うと物性（`StbSecRaw`）へ |
+| `StbSecColumn_SRC` / `StbSecBeam_SRC` | ✅ | ✅ | SRC 矩形（`SrcRect`）＋内蔵鉄骨＋配筋＋鋼種 `strength_steel` |
+| RC の T 形・L 形梁、テーパ・ハンチ | ❌ | ❌ | 図形を復元できず断面欠落として警告 |
+| `StbSecFoundation_RC` / `StbSecPile_*` / `StbSecParapet_RC` / `StbSecOpen_RC` | ❌ | ❌ | 取り込み時に警告 |
+
+#### 断面 — スラブ・壁
+
+| ST-Bridge 要素 | 取り込み | 書き出し | 往復・備考 |
+|---|:--:|:--:|---|
+| `StbSecSlab_RC`（厚さ） | ✅ | ✅ | 図形要素（`StbSecSlab_RC_Straight` 等）から厚さを取得 |
+| `StbSecWall_RC`（厚さ） | ✅ | ✅ | 同上 |
+| `StbSecSlab_S` / `StbSecSlabDeck`（鋼・デッキ） | ❌ | ❌ | 取り込み時に警告 |
+
+#### 荷重・その他
+
+| ST-Bridge 要素 | 取り込み | 書き出し | 往復・備考 |
+|---|:--:|:--:|---|
+| `StbLoadCase` / `StbNodalLoad`（節点荷重） | ✅ | ✅ | 存在しない節点への荷重は破棄して警告 |
+| `StbLoadMember` / 面荷重 / 温度荷重 等 | ❌ | ❌ | 未対応。取り込み時に警告（fail-loud） |
+| `StbAxes`（通り芯） | ❌ | ❌ | grid/axis 概念が無く取り込み時に警告 |
+| 拘束条件（支点）・質量 | ❌ | ❌ | ST-Bridge の幾何スコープ外 |
+
+> **物性モード（`Raw`）との違い**: 上表の断面欄は**断面形状モード（`Standard`）**の状況。
+> 既定の**物性モード**では全断面を `StbSecRaw`（面積・断面二次モーメント等）で書き出すため、
+> 形状の種類によらず Squid-N 同士で**完全一致**往復する（形状の種類は失われ、物性のみ残る）。
 
 ### 断面表現モード（書き出し）
 
@@ -143,7 +234,9 @@ let model = load_scz(Path::new("model.scz"))?;
 
 | 内部形状 | 書き出し先 |
 |---|---|
-| H形鋼・角形鋼管・鋼管・山形鋼・溝形鋼・T形鋼 | 形鋼ライブラリ `StbSecSteel`（`StbSecRoll-H`/`-BOX`/`StbSecPipe` 等）＋ `StbSecColumn_S` / `StbSecBeam_S` |
+| H形鋼・角形鋼管・鋼管・山形鋼・溝形鋼・T形鋼 | 形鋼ライブラリ `StbSecSteel`（`StbSecRoll-H`/`-BOX`/`StbSecPipe`/`-L`/`-C`/`-T`）＋ `StbSecColumn_S` / `StbSecBeam_S` |
+| 平鋼・中実丸鋼・リップ溝形鋼 | 形鋼ライブラリ（`StbSecRoll-FlatBar`/`-RoundBar`/`-LipC`）＋ `StbSecColumn_S` / `StbSecBeam_S` |
+| 非対称組立 H（上下フランジ相違） | `StbSecBuild-H`（標準 `A/B/t1/t2`＝上フランジ＋下フランジの方言属性 `B2`/`t2_lower`） |
 | RC 矩形・円形 | `StbSecColumn_RC` / `StbSecBeam_RC`（断面の幾何 ＋ 配筋 `StbSecBarArrangement*`） |
 | CFT 角形・円形 | `StbSecColumn_CFT` ＋ 充填鋼管の `StbSecSteel` 参照（柱のみ。梁に使うと `StbSecRaw`） |
 | SRC 矩形 | `StbSecColumn_SRC` / `StbSecBeam_SRC`（コンクリート図形＋内蔵鉄骨 `StbSecSteel` 参照＋配筋＋鋼種 `strength_steel`） |
@@ -152,7 +245,7 @@ let model = load_scz(Path::new("model.scz"))?;
 補足:
 
 - ST-Bridge では断面が柱用（`StbSecColumn_*`）と梁用（`StbSecBeam_*`）に型分けされる。内部モデルで 1 つの断面を柱と梁の両方が共有している場合、書き出し時に柱用・梁用の 2 要素へ分割し、梁用へ新しい断面 id を割り当てる（各部材の断面参照は自動で張り替える）。読み戻すとこの分割がそのまま 2 断面になる。
-- 読み込み時は、形鋼名（`StbSecRoll-H` 等）から H形鋼・角形鋼管・鋼管・山形鋼・溝形鋼・T形鋼を、`StbSecColumn_RC_Rect`/`_Circle`・`StbSecBeam_RC_Straight` から RC 矩形・円形を復元し、`StbSecBarArrangement*` から配筋を復元する。node/material/story/section/element/荷重ケースの id が 1 始まりや歯抜けでも 0 始まり連番へ正規化し、全参照を張り替える。
+- 読み込み時は、形鋼名（`StbSecRoll-H` 等）から H形鋼・角形鋼管・鋼管・山形鋼・溝形鋼・T形鋼・平鋼・中実丸鋼・リップ溝形鋼・非対称組立 H を、`StbSecColumn_RC_Rect`/`_Circle`・`StbSecBeam_RC_Straight` から RC 矩形・円形を復元し、`StbSecBarArrangement*` から配筋を復元する。node/material/story/section/element/荷重ケースの id が 1 始まりや歯抜けでも 0 始まり連番へ正規化し、全参照を張り替える。
 - 材料は ST-Bridge の慣習に合わせ断面側にも付す（鋼は形鋼参照の `strength_main`＝材料名、RC/CFT/SRC は `id_material`）。読み込み時、部材が `id_material` を持たない他社ファイルでは、断面の材料を部材へ伝播する。
 
 ### ライブラリからの利用
