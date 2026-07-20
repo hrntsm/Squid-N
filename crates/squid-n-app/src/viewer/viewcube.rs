@@ -161,8 +161,9 @@ pub(crate) fn draw(
     for (i, nz) in faces {
         let (n, label) = FACES[i];
         let quad = face_vertices(n).map(|v| project_cube(cam, v, layout).0);
+        // ホバー色は TONMANUAL §6 のボタンホバー慣例（blue-300）に合わせる
         let fill = if hover == Some(Hit::Face(i)) {
-            theme::BLUE_200
+            theme::BLUE_300
         } else {
             theme::translucent(theme::GRAY_100, 230)
         };
@@ -184,7 +185,8 @@ pub(crate) fn draw(
         }
     }
 
-    // ホバー中のコーナーを強調（当たり判定半径に合わせた円）
+    // ホバー中のコーナーを強調（当たり判定 CORNER_HIT_PX より小さい円で描き、
+    // 立方体の見た目を隠しすぎないようにする）
     if let Some(Hit::Corner(i)) = hover {
         let (p, _) = project_cube(cam, CORNERS[i], layout);
         painter.circle_filled(p, 5.0, theme::BLUE_500);
