@@ -149,22 +149,34 @@ impl BeamElement {
             (None, Some(shape @ SectionShape::SrcRect { .. })) => shape.calc_axial_stiffness_area(),
             _ => sec.area,
         };
-        let (iy, iz, j, as_y, as_z) = match &composite {
+        let (sec_iy, sec_iz, j, sec_as_y, sec_as_z) = match &composite {
             Some(p) => (p.iy, p.iz, p.j, p.as_y, p.as_z),
             None => (sec.iy, sec.iz, sec.j, as_y, as_z),
         };
 
+        // 断面レイヤ→要素座標系のクロス変換。
+        // 断面レイヤの規約（P1 §2.3・builder.rs）は「iy=強軸（せい方向 D³ 系）、
+        // as_z=強軸曲げ用せん断面積（ウェブ）」だが、要素座標系はせい方向＝ローカル y
+        // のため、強軸曲げは z 軸まわり（Mz 面、たわみ y 方向、(uy,rz) ブロック）に
+        // 対応する（stiffness.rs は iz・as_y をこのブロックに用いる）。
+        //   要素 iz（Mz 面）  ← 断面 iy（強軸）    要素 as_y（yせん断）← 断面 as_z（ウェブ）
+        //   要素 iy（My 面）  ← 断面 iz（弱軸）    要素 as_z（zせん断）← 断面 as_y（フランジ）
+        // このクロスを行わないと、梁の鉛直曲げが弱軸剛性・水平曲げが強軸剛性で
+        // 解かれてしまう（軸名の取り違え）。
+        let (iy, iz, as_y, as_z) = (sec_iz, sec_iy, sec_as_z, sec_as_y);
+
         // スラブ協力幅による強軸剛性増大（RC規準8条のスラブ協力幅・合成梁は
         // 各種合成構造設計指針）。RC 矩形梁は T 形断面の Ie/I0、H 形鋼梁は合成梁の平均
         // 剛性 (I+sI)/(2·sI)。Model::slab_thickness=0（既定）では 1.0 で無効。
-        let iy = match &sec.shape {
+        // 強軸（鉛直曲げ）＝要素座標系では iz（Mz 面）へ乗じる。
+        let iz = match &sec.shape {
             Some(SectionShape::RcRect { .. }) => {
-                iy * slab_stiffness_factor(model, data, sec.width, sec.depth)
+                iz * slab_stiffness_factor(model, data, sec.width, sec.depth)
             }
             Some(SectionShape::SteelH { .. }) => {
-                iy * composite_beam_stiffness_factor(model, data, &sec, mat.young)
+                iz * composite_beam_stiffness_factor(model, data, &sec, mat.young)
             }
-            _ => iy,
+            _ => iz,
         };
 
         // 壁エレメントモデルの上下大梁の剛性倍率（壁エレメント置換モデルの上下大梁の断面性能）。
@@ -311,7 +323,7 @@ impl BeamElement {
                 a_stiff += a_add;
             } else if is_horizontal {
                 // 梁（水平材）: 腰壁（下辺の梁に載る壁）・垂壁（上辺の梁から垂れる壁）の
-                // 算入。鉛直曲げ（iy・as_z）へ合成する。
+                // 算入。鉛直曲げ（要素座標系では iz・as_y＝Mz 面）へ合成する。
                 let d_beam = sec.depth;
                 let ac = a_stiff;
                 let mut contrib: Vec<(f64, f64, f64)> = Vec::new();
@@ -343,8 +355,8 @@ impl BeamElement {
                 }
 
                 if !contrib.is_empty() {
-                    iy = compose(iy, ac, &contrib);
-                    as_z += contrib.iter().map(|c| c.0).sum::<f64>() / 1.2;
+                    iz = compose(iz, ac, &contrib);
+                    as_y += contrib.iter().map(|c| c.0).sum::<f64>() / 1.2;
                 }
                 a_stiff += a_add;
             }

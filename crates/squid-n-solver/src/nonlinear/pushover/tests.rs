@@ -1012,7 +1012,8 @@ fn test_compute_shear_yield_qy_zero_as_is_infinite() {
 
 /// RC 矩形断面（`SectionShape::RcRect`）+ 配筋情報がある場合、Qy は荒川式
 /// （`rc_qsu_simple`）による方向別算定値に一致すること。
-/// z 方向（強軸・main_x）、y 方向（弱軸・main_y、b/d 入れ替え）の双方を検証する。
+/// 要素座標系はせい方向＝ローカル y のため、y 方向（強軸・main_x）、
+/// z 方向（弱軸・main_y、b/d 入れ替え）の双方を検証する。
 #[test]
 fn test_compute_shear_yield_qy_rc_rect_matches_arakawa_handcalc() {
     let rebar = RcRebar {
@@ -1054,9 +1055,10 @@ fn test_compute_shear_yield_qy_rc_rect_matches_arakawa_handcalc() {
     };
     let clear_span = 3000.0;
 
-    // z 方向（強軸）: b=幅, d=せい, 引張鉄筋 main_x。
+    // y 方向（強軸曲げのせん断）: b=幅, d=せい, 引張鉄筋 main_x。
+    // しきい値のせん断有効断面積は断面 as_z（ウェブ）由来（クロス変換）。
     let bar_area = |bs: &BarSet| bs.count as f64 * std::f64::consts::PI / 4.0 * bs.dia * bs.dia;
-    let qsu_z_handcalc = rc_qsu_simple(&RcCapacityInput {
+    let qsu_y_handcalc = rc_qsu_simple(&RcCapacityInput {
         b,
         d,
         at: bar_area(&rebar.main_x) / 2.0,
@@ -1068,14 +1070,14 @@ fn test_compute_shear_yield_qy_rc_rect_matches_arakawa_handcalc() {
         clear_span,
         sigma_0: 0.0,
     });
-    let qy_z = compute_shear_yield_qy(sec.as_z, Some(&mat), Some(&sec), ShearDir::Z, clear_span);
+    let qy_y = compute_shear_yield_qy(sec.as_z, Some(&mat), Some(&sec), ShearDir::Y, clear_span);
     assert!(
-        (qy_z - qsu_z_handcalc).abs() < 1e-6,
-        "qy_z={qy_z} should equal rc_qsu_simple handcalc={qsu_z_handcalc}"
+        (qy_y - qsu_y_handcalc).abs() < 1e-6,
+        "qy_y={qy_y} should equal rc_qsu_simple handcalc={qsu_y_handcalc}"
     );
 
-    // y 方向（弱軸）: b と d を入れ替え、引張鉄筋 main_y。
-    let qsu_y_handcalc = rc_qsu_simple(&RcCapacityInput {
+    // z 方向（弱軸曲げのせん断）: b と d を入れ替え、引張鉄筋 main_y。
+    let qsu_z_handcalc = rc_qsu_simple(&RcCapacityInput {
         b: d,
         d: b,
         at: bar_area(&rebar.main_y) / 2.0,
@@ -1087,13 +1089,13 @@ fn test_compute_shear_yield_qy_rc_rect_matches_arakawa_handcalc() {
         clear_span,
         sigma_0: 0.0,
     });
-    let qy_y = compute_shear_yield_qy(sec.as_y, Some(&mat), Some(&sec), ShearDir::Y, clear_span);
+    let qy_z = compute_shear_yield_qy(sec.as_y, Some(&mat), Some(&sec), ShearDir::Z, clear_span);
     assert!(
-        (qy_y - qsu_y_handcalc).abs() < 1e-6,
-        "qy_y={qy_y} should equal rc_qsu_simple handcalc={qsu_y_handcalc}"
+        (qy_z - qsu_z_handcalc).abs() < 1e-6,
+        "qy_z={qy_z} should equal rc_qsu_simple handcalc={qsu_z_handcalc}"
     );
-    // 断面が非正方形（b≠d、主筋も非対称）なので z・y の Qy は異なるはず。
-    assert!((qy_z - qy_y).abs() > 1.0, "qy_z={qy_z} qy_y={qy_y}");
+    // 断面が非正方形（b≠d、主筋も非対称）なので y・z の Qy は異なるはず。
+    assert!((qy_y - qy_z).abs() > 1.0, "qy_y={qy_y} qy_z={qy_z}");
 }
 
 /// as_y/as_z を明示的に与えた片持ち柱モデル（`single_column_model` のせん断有効
@@ -1147,6 +1149,7 @@ fn single_column_model_with_shear_yz(fy: f64, seismic_weight: f64, as_y: f64, as
 /// なので局所座標系は ex=[0,0,1], ey=[1,0,0], ez=[0,1,0]（`LocalFrame::from_nodes`）。
 /// `SeismicDir::X` でプッシュすると力はグローバル X＝局所 y（ey）方向に生じ、
 /// 局所 z（ez＝グローバル Y）方向にはほぼ生じない。
+/// 局所 y のしきい値は断面 as_z、局所 z は断面 as_y から作られる（クロス変換）。
 fn run_pushover_has_shear_yield(as_y: f64, as_z: f64) -> bool {
     let mut model = single_column_model_with_shear_yz(235.0, 80_000.0, as_y, as_z);
     let dofmap = DofMap::build(&model);
@@ -1167,20 +1170,22 @@ fn run_pushover_has_shear_yield(as_y: f64, as_z: f64) -> bool {
 }
 
 /// 局所 y/z 方向の厳密分離（改良1）の検証:
-/// 実際に力が生じる方向（局所 y）の Qy を小さくすればせん断降伏イベントが
-/// 記録されるが、力がほぼ生じない方向（局所 z）の Qy をどれだけ小さくしても
-/// 記録されないこと。v1（軸直交合力 vs min(qy_y,qy_z)）では後者でも
-/// 誤って記録されてしまっていた（qy_z が min を支配してしまうため）。
+/// 実際に力が生じる方向（局所 y、しきい値は断面 as_z 由来）の Qy を小さくすれば
+/// せん断降伏イベントが記録されるが、力がほぼ生じない方向（局所 z、断面 as_y 由来）
+/// の Qy をどれだけ小さくしても記録されないこと。v1（軸直交合力 vs
+/// min(qy_y,qy_z)）では後者でも誤って記録されてしまっていた
+/// （qy_z が min を支配してしまうため）。
 #[test]
 fn test_pushover_shear_yield_direction_independent() {
     assert!(
-        run_pushover_has_shear_yield(50.0, 1.0e12),
-        "small as_y (the actually-stressed local direction) should trigger a shear yield event"
+        run_pushover_has_shear_yield(1.0e12, 50.0),
+        "small as_z (feeding the actually-stressed local-y threshold) should trigger a shear \
+             yield event"
     );
     assert!(
-        !run_pushover_has_shear_yield(1.0e12, 50.0),
-        "small as_z (the unstressed local direction) should NOT trigger a shear yield event \
-             once Vy/Vz are judged independently against qy_y/qy_z"
+        !run_pushover_has_shear_yield(50.0, 1.0e12),
+        "small as_y (feeding the unstressed local-z threshold) should NOT trigger a shear \
+             yield event once Vy/Vz are judged independently against qy_y/qy_z"
     );
 }
 
@@ -1310,8 +1315,9 @@ fn test_compute_shear_yield_thresholds_rc_rect_uses_rigid_zone_reduced_clear_spa
     let bar_area = |bs: &BarSet| bs.count as f64 * std::f64::consts::PI / 4.0 * bs.dia * bs.dia;
     let expected_clear_span = 2400.0;
 
-    // z方向（強軸・main_x）: RcArakawa を採用し、h0=2400 での rc_qsu_simple 手計算に一致。
-    let qsu_z_handcalc = rc_qsu_simple(&RcCapacityInput {
+    // y方向（強軸・main_x。クロス変換で局所 y が強軸側）: RcArakawa を採用し、
+    // h0=2400 での rc_qsu_simple 手計算に一致。
+    let qsu_y_handcalc = rc_qsu_simple(&RcCapacityInput {
         b,
         d,
         at: bar_area(&rebar.main_x) / 2.0,
@@ -1323,7 +1329,7 @@ fn test_compute_shear_yield_thresholds_rc_rect_uses_rigid_zone_reduced_clear_spa
         clear_span: expected_clear_span,
         sigma_0: 0.0,
     });
-    match &th.z {
+    match &th.y {
         DirThreshold::RcArakawa { input, gross_area } => {
             assert!(
                 (input.clear_span - expected_clear_span).abs() < 1e-9,
@@ -1336,10 +1342,10 @@ fn test_compute_shear_yield_thresholds_rc_rect_uses_rigid_zone_reduced_clear_spa
         DirThreshold::Static(_) => panic!("expected RcArakawa for RcRect with rebar"),
     }
     assert!(
-        (th.z.qy(0.0) - qsu_z_handcalc).abs() < 1e-6,
+        (th.y.qy(0.0) - qsu_y_handcalc).abs() < 1e-6,
         "qy(0.0)={} handcalc={}",
-        th.z.qy(0.0),
-        qsu_z_handcalc
+        th.y.qy(0.0),
+        qsu_y_handcalc
     );
 }
 
@@ -1357,7 +1363,7 @@ fn test_compute_shear_yield_thresholds_rc_rect_falls_back_when_rigid_zone_exceed
     let th = &thresholds[0];
 
     let bar_area = |bs: &BarSet| bs.count as f64 * std::f64::consts::PI / 4.0 * bs.dia * bs.dia;
-    let qsu_z_handcalc = rc_qsu_simple(&RcCapacityInput {
+    let qsu_y_handcalc = rc_qsu_simple(&RcCapacityInput {
         b,
         d,
         at: bar_area(&rebar.main_x) / 2.0,
@@ -1369,7 +1375,7 @@ fn test_compute_shear_yield_thresholds_rc_rect_falls_back_when_rigid_zone_exceed
         clear_span: 3000.0, // フォールバック後の値
         sigma_0: 0.0,
     });
-    assert!((th.z.qy(0.0) - qsu_z_handcalc).abs() < 1e-6);
+    assert!((th.y.qy(0.0) - qsu_y_handcalc).abs() < 1e-6);
 }
 
 // ---- 精緻化2: 軸力σ0の動的反映の単体テスト ----

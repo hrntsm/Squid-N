@@ -15,10 +15,13 @@ use squid_n_element::transform::LocalFrame;
 
 /// せん断降伏耐力 Qy の判定しきい値（部材ごと、局所 y・z 方向、独立）。
 ///
-/// `y` は局所 y 方向せん断力 Vy（弱軸曲げに伴う、`Section.as_y`）、
-/// `z` は局所 z 方向せん断力 Vz（強軸曲げに伴う、`Section.as_z`）に対する
-/// しきい値であり、`track_shear_yield` で Vy vs `y.qy(..)`・Vz vs `z.qy(..)` を
-/// 独立に判定する（v1 のような「合力 vs min(qy_y,qy_z)」の丸めは行わない）。
+/// 要素座標系はせい方向＝ローカル y（`LocalFrame`: ey=ref_vector 直交化）のため、
+/// `y` は局所 y 方向せん断力 Vy（**強軸**曲げ＝Mz 面に伴う。断面レイヤでは
+/// `Section.as_z`＝ウェブ）、`z` は局所 z 方向せん断力 Vz（**弱軸**曲げ＝My 面。
+/// `Section.as_y`＝フランジ）に対するしきい値であり、`track_shear_yield` で
+/// Vy vs `y.qy(..)`・Vz vs `z.qy(..)` を独立に判定する（v1 のような
+/// 「合力 vs min(qy_y,qy_z)」の丸めは行わない）。断面→要素座標系のクロス変換は
+/// `beam/construct.rs` と同一規約。
 /// RC矩形（[`DirThreshold::RcArakawa`]）方向は、各ステップの部材軸力（圧縮）
 /// から動的に σ0 を反映した Qy を都度算定する（精緻化2、`track_shear_yield` 参照）。
 pub(crate) struct ShearThreshold {
@@ -69,12 +72,12 @@ impl DirThreshold {
     }
 }
 
-/// せん断降伏耐力 Qy 算定対象の方向（局所座標系）。
+/// せん断降伏耐力 Qy 算定対象の方向（局所座標系。せい方向＝ローカル y）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShearDir {
-    /// 局所 y 方向（弱軸曲げに伴うせん断、`Section.as_y`・`RcRebar.main_y` 対応）。
+    /// 局所 y 方向（強軸曲げ＝Mz 面に伴うせん断、`Section.as_z`・`RcRebar.main_x` 対応）。
     Y,
-    /// 局所 z 方向（強軸曲げに伴うせん断、`Section.as_z`・`RcRebar.main_x` 対応）。
+    /// 局所 z 方向（弱軸曲げ＝My 面に伴うせん断、`Section.as_y`・`RcRebar.main_y` 対応）。
     Z,
 }
 
@@ -86,8 +89,8 @@ pub(crate) enum ShearDir {
 /// 変換規則は `squid-n-app::app::rc_capacity_input_from_rect` と同一の規約
 /// （上下対称配筋を仮定・at=引張側総断面積の半分、σy=fy or 345、σwy=295 固定、
 /// せん断補強筋は legs 組数を考慮）に合わせる:
-/// - 強軸（局所 z 方向せん断、`dir=Z`）: b=幅, d=せい、引張鉄筋は `rebar.main_x`。
-/// - 弱軸（局所 y 方向せん断、`dir=Y`）: b と d を入れ替え、引張鉄筋は `rebar.main_y`。
+/// - 強軸（局所 y 方向せん断、`dir=Y`）: b=幅, d=せい、引張鉄筋は `rebar.main_x`。
+/// - 弱軸（局所 z 方向せん断、`dir=Z`）: b と d を入れ替え、引張鉄筋は `rebar.main_y`。
 ///
 /// `clear_span`（h0）は [`effective_clear_span`] が剛域長を控除して算定した値を
 /// 渡す（精緻化1。旧実装は剛域控除を省略し節点間長をそのまま用いる簡略化だった）。
@@ -164,8 +167,8 @@ fn build_dir_threshold(
     }) = section
     {
         let input = match dir {
-            ShearDir::Z => rc_rect_capacity_input(*b, *d, &rebar.main_x, rebar, mat, clear_span),
-            ShearDir::Y => rc_rect_capacity_input(*d, *b, &rebar.main_y, rebar, mat, clear_span),
+            ShearDir::Y => rc_rect_capacity_input(*b, *d, &rebar.main_x, rebar, mat, clear_span),
+            ShearDir::Z => rc_rect_capacity_input(*d, *b, &rebar.main_y, rebar, mat, clear_span),
         };
         if let Some(input) = input {
             if rc_qsu_simple(&input) > 0.0 {
@@ -243,9 +246,12 @@ pub(crate) fn compute_shear_yield_thresholds(model: &Model) -> Vec<ShearThreshol
             let (as_y, as_z) = sec.map(|s| (s.as_y, s.as_z)).unwrap_or((0.0, 0.0));
             let raw_length = elem_length(model, elem).unwrap_or(0.0);
             let clear_span = effective_clear_span(raw_length, &elem.rigid_zone);
+            // 断面→要素座標系のクロス変換（beam/construct.rs と同一規約）:
+            // 局所 y（強軸曲げのせん断）には断面 as_z（ウェブ）、
+            // 局所 z（弱軸曲げのせん断）には断面 as_y（フランジ）を用いる。
             ShearThreshold {
-                y: build_dir_threshold(as_y, mat, sec, ShearDir::Y, clear_span),
-                z: build_dir_threshold(as_z, mat, sec, ShearDir::Z, clear_span),
+                y: build_dir_threshold(as_z, mat, sec, ShearDir::Y, clear_span),
+                z: build_dir_threshold(as_y, mat, sec, ShearDir::Z, clear_span),
             }
         })
         .collect()

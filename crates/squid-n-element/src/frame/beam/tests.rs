@@ -141,9 +141,10 @@ fn test_beam_new_src_cft_composite_props() {
     let src_beam = BeamElement::new(&make_elem(0, 0), &model);
     let p = src_shape.src_equivalent_props(23000.0, 0.2).unwrap();
     assert!((src_beam.a - p.area_ax).abs() < 1e-6);
-    assert!((src_beam.iy - p.iy).abs() / p.iy < 1e-12);
+    // 断面レイヤの iy（強軸）・as_z（ウェブ）は要素座標系では iz・as_y に入る
+    assert!((src_beam.iz - p.iy).abs() / p.iy < 1e-12);
     assert!((src_beam.j - p.j).abs() / p.j < 1e-12);
-    assert!((src_beam.as_z - p.as_z).abs() < 1e-6);
+    assert!((src_beam.as_y - p.as_z).abs() < 1e-6);
     // ns=205000/23000≈8.91 は既定 N_S_EQ=15 と異なる値になること
     let ns = E_STEEL / 23000.0;
     assert!((ns - N_S_EQ).abs() > 1.0);
@@ -154,14 +155,14 @@ fn test_beam_new_src_cft_composite_props() {
     let cft_beam = BeamElement::new(&make_elem(1, 1), &model);
     let pc = cft_shape.cft_equivalent_props(205000.0, 0.3, 36.0).unwrap();
     assert!((cft_beam.a - pc.area_ax).abs() < 1e-6);
-    assert!((cft_beam.iy - pc.iy).abs() / pc.iy < 1e-12);
+    assert!((cft_beam.iz - pc.iy).abs() / pc.iy < 1e-12);
     assert!((cft_beam.j - pc.j).abs() / pc.j < 1e-12);
 
     // SRC + fc の無い材料: 既定 N_S_EQ の軸剛性累加へフォールバック
     model.materials[0].fc = None;
     let src_fallback = BeamElement::new(&make_elem(0, 0), &model);
     assert!((src_fallback.a - src_shape.calc_axial_stiffness_area()).abs() < 1e-6);
-    assert!((src_fallback.iy - model.sections[0].iy).abs() < 1e-6);
+    assert!((src_fallback.iz - model.sections[0].iy).abs() < 1e-6);
 }
 
 /// スラブ協力幅による強軸剛性増大（RC規準8条）。
@@ -272,20 +273,21 @@ fn test_beam_new_slab_cooperation_width_amplifies_iy() {
         + af * (d - t / 2.0 - g).powi(2);
 
     let beam = BeamElement::new(&elem, &model);
+    // 強軸（鉛直曲げ）は要素座標系では iz（Mz 面）
     assert!(
-        (beam.iy - ie).abs() / ie < 1e-12,
-        "iy={} ie={}",
-        beam.iy,
+        (beam.iz - ie).abs() / ie < 1e-12,
+        "iz={} ie={}",
+        beam.iz,
         ie
     );
-    assert!(beam.iy / i0 > 1.3, "増大率が小さすぎる: {}", beam.iy / i0);
-    // 弱軸は増大しない
-    assert!((beam.iz - model.sections[0].iz).abs() < 1e-9);
+    assert!(beam.iz / i0 > 1.3, "増大率が小さすぎる: {}", beam.iz / i0);
+    // 弱軸（要素座標系では iy）は増大しない
+    assert!((beam.iy - model.sections[0].iz).abs() < 1e-9);
 
     // 床厚 0(既定)では従来どおり
     model.slab_thickness = 0.0;
     let beam0 = BeamElement::new(&elem, &model);
-    assert!((beam0.iy - i0).abs() < 1e-9);
+    assert!((beam0.iz - i0).abs() < 1e-9);
 }
 
 /// S 造合成梁の剛性（スラブ考慮換算断面と鉄骨単独の平均。計算編 02「合成梁の
@@ -381,21 +383,22 @@ fn test_beam_new_composite_steel_beam_averages_stiffness() {
     let expected = (i_comp + si) / 2.0;
 
     let beam = BeamElement::new(&elem, &model);
+    // 強軸（鉛直曲げ）は要素座標系では iz（Mz 面）
     assert!(
-        (beam.iy - expected).abs() / expected < 1e-12,
-        "iy={} expected={}",
-        beam.iy,
+        (beam.iz - expected).abs() / expected < 1e-12,
+        "iz={} expected={}",
+        beam.iz,
         expected
     );
     // 平均法: 鉄骨単独 < 採用剛性 < 完全合成
-    assert!(beam.iy > si && beam.iy < i_comp);
-    // 弱軸は増大しない
-    assert!((beam.iz - model.sections[0].iz).abs() < 1e-9);
+    assert!(beam.iz > si && beam.iz < i_comp);
+    // 弱軸（要素座標系では iy）は増大しない
+    assert!((beam.iy - model.sections[0].iz).abs() < 1e-9);
 
     // 床厚 0(既定)では鉄骨単独のまま
     model.slab_thickness = 0.0;
     let beam0 = BeamElement::new(&elem, &model);
-    assert!((beam0.iy - si).abs() < 1e-9);
+    assert!((beam0.iz - si).abs() < 1e-9);
 }
 
 #[test]
@@ -1938,7 +1941,9 @@ fn test_beam_new_misc_wall_wing_augments_column_inplane_stiffness() {
     let e_i = -(d_col / 2.0 + lww / 2.0);
     let g = (aw * e_i) / (ac + aw);
     let self_i = 150.0 * lww.powi(3) / 12.0;
-    let expected_iz = col_sec.iz + ac * g * g + self_i + aw * (e_i - g).powi(2);
+    // 要素座標系では断面 iy（強軸）が elem.iz、断面 as_z が elem.as_y に入る
+    // （construct.rs のクロス変換）。面内合成のベースはその値。
+    let expected_iz = col_sec.iy + ac * g * g + self_i + aw * (e_i - g).powi(2);
 
     assert!(
         (column.a - (ac + aw)).abs() < 1e-6,
@@ -1953,21 +1958,21 @@ fn test_beam_new_misc_wall_wing_augments_column_inplane_stiffness() {
         expected_iz
     );
     assert!(
-        (column.as_y - (col_sec.as_y + aw / 1.2)).abs() < 1e-6,
+        (column.as_y - (col_sec.as_z + aw / 1.2)).abs() < 1e-6,
         "as_y={}",
         column.as_y
     );
     // 面外（iy・as_z）は袖壁算入の影響を受けない
-    assert!((column.iy - col_sec.iy).abs() < 1e-6, "iy={}", column.iy);
+    assert!((column.iy - col_sec.iz).abs() < 1e-6, "iy={}", column.iy);
     assert!(
-        (column.as_z - col_sec.as_z).abs() < 1e-6,
+        (column.as_z - col_sec.as_y).abs() < 1e-6,
         "as_z={}",
         column.as_z
     );
 }
 
-/// 同じ大開口壁の下辺梁（節点0-1）への腰壁算入。鉛直曲げ（iy・as_z）へ
-/// 平行軸の定理で合成され、耐震壁不成立のため上下大梁100倍は掛からない。
+/// 同じ大開口壁の下辺梁（節点0-1）への腰壁算入。鉛直曲げ（要素座標系では
+/// iz・as_y）へ平行軸の定理で合成され、耐震壁不成立のため上下大梁100倍は掛からない。
 #[test]
 fn test_beam_new_misc_wall_strip_augments_girder_iy_without_100x() {
     use squid_n_core::ids::{ElemId, MaterialId, SectionId};
@@ -2082,7 +2087,9 @@ fn test_beam_new_misc_wall_strip_augments_girder_iy_without_100x() {
     let e_i = d_beam / 2.0 + hw / 2.0;
     let g = (aw * e_i) / (ac + aw);
     let self_i = 150.0 * hw.powi(3) / 12.0;
-    let expected_iy = beam_sec.iy + ac * g * g + self_i + aw * (e_i - g).powi(2);
+    // 鉛直曲げは要素座標系では iz（ベースは断面 iy=強軸）、対のせん断は as_y
+    // （ベースは断面 as_z）に入る（construct.rs のクロス変換）。
+    let expected_iz = beam_sec.iy + ac * g * g + self_i + aw * (e_i - g).powi(2);
 
     assert!(
         (beam.a - (ac + aw)).abs() < 1e-6,
@@ -2091,29 +2098,29 @@ fn test_beam_new_misc_wall_strip_augments_girder_iy_without_100x() {
         ac + aw
     );
     assert!(
-        (beam.iy - expected_iy).abs() / expected_iy < 1e-9,
-        "iy={} expected={}",
-        beam.iy,
-        expected_iy
+        (beam.iz - expected_iz).abs() / expected_iz < 1e-9,
+        "iz={} expected={}",
+        beam.iz,
+        expected_iz
     );
     assert!(
-        (beam.as_z - (beam_sec.as_z + aw / 1.2)).abs() < 1e-6,
-        "as_z={}",
-        beam.as_z
-    );
-    // 耐震壁不成立のため上下大梁100倍は掛からない（合成値は元の iy の高々数倍）
-    assert!(
-        beam.iy < beam_sec.iy * 10.0,
-        "100倍が誤って適用されている可能性: iy={} base={}",
-        beam.iy,
-        beam_sec.iy
-    );
-    // 弱軸（iz・as_y）は腰壁算入の影響を受けない
-    assert!((beam.iz - beam_sec.iz).abs() < 1e-6, "iz={}", beam.iz);
-    assert!(
-        (beam.as_y - beam_sec.as_y).abs() < 1e-6,
+        (beam.as_y - (beam_sec.as_z + aw / 1.2)).abs() < 1e-6,
         "as_y={}",
         beam.as_y
+    );
+    // 耐震壁不成立のため上下大梁100倍は掛からない（合成値は元の強軸値の高々数倍）
+    assert!(
+        beam.iz < beam_sec.iy * 10.0,
+        "100倍が誤って適用されている可能性: iz={} base={}",
+        beam.iz,
+        beam_sec.iy
+    );
+    // 弱軸（要素座標系では iy・as_z）は腰壁算入の影響を受けない
+    assert!((beam.iy - beam_sec.iz).abs() < 1e-6, "iy={}", beam.iy);
+    assert!(
+        (beam.as_z - beam_sec.as_y).abs() < 1e-6,
+        "as_z={}",
+        beam.as_z
     );
 }
 
@@ -2244,22 +2251,22 @@ fn test_beam_new_seismic_wall_no_misc_wall_augmentation() {
 
     let column = BeamElement::new(&column_elem, &model);
     assert!(
-        (column.iz - col_sec.iz).abs() < 1e-6,
+        (column.iz - col_sec.iy).abs() < 1e-6,
         "耐震壁成立時は柱に袖壁算入されないはず: iz={}",
         column.iz
     );
     assert!((column.a - col_sec.area).abs() < 1e-6, "a={}", column.a);
     assert!(
-        (column.as_y - col_sec.as_y).abs() < 1e-6,
+        (column.as_y - col_sec.as_z).abs() < 1e-6,
         "as_y={}",
         column.as_y
     );
 
     let beam = BeamElement::new(&beam_elem, &model);
     assert!(
-        (beam.iy / beam_sec.iy - WALL_GIRDER_STIFF_FACTOR).abs() < 1e-9,
-        "耐震壁成立時は従来どおり上下大梁100倍のはず: iy={} base={}",
-        beam.iy,
+        (beam.iz / beam_sec.iy - WALL_GIRDER_STIFF_FACTOR).abs() < 1e-9,
+        "耐震壁成立時は従来どおり上下大梁100倍のはず: iz={} base={}",
+        beam.iz,
         beam_sec.iy
     );
     assert!(
@@ -2268,4 +2275,106 @@ fn test_beam_new_seismic_wall_no_misc_wall_augmentation() {
         beam.a,
         beam_sec.area
     );
+}
+
+/// 断面レイヤ→要素座標系のクロス変換の回帰テスト（軸名の取り違え防止）。
+///
+/// 断面レイヤは「iy=強軸（せい方向 D³ 系）・as_z=ウェブ」の規約だが、要素座標系は
+/// せい方向＝ローカル y のため、梁の鉛直たわみ（uy、Mz 面）の剛性は断面の強軸値
+/// iy・as_z で、水平たわみ（uz、My 面）は弱軸値 iz・as_y で組み立てられなければ
+/// ならない。クロス変換（construct.rs）を外すと本テストが失敗する。
+#[test]
+fn test_vertical_bending_stiffness_uses_section_strong_axis() {
+    use squid_n_core::ids::{MaterialId, SectionId};
+    use squid_n_core::model::ForceRegime;
+
+    let make_node = |id: u32, coord: [f64; 3]| Node {
+        id: NodeId(id),
+        coord,
+        restraint: Default::default(),
+        mass: None,
+        story: None,
+    };
+    // H-400x200 相当の非対称断面（iy=強軸 ≫ iz=弱軸、as_z=ウェブ、as_y=フランジ）
+    let sec = Section {
+        id: SectionId(0),
+        name: "H-400x200".into(),
+        area: 8_412.0,
+        iy: 2.37e8,
+        iz: 1.60e7,
+        j: 5.0e5,
+        depth: 400.0,
+        width: 200.0,
+        as_y: 5_200.0,
+        as_z: 3_200.0,
+        panel_thickness: None,
+        thickness: None,
+        shape: None,
+    };
+    let mat = Material {
+        concrete_class: Default::default(),
+        id: MaterialId(0),
+        name: "SN400".into(),
+        young: 205000.0,
+        poisson: 0.3,
+        density: 7.85e-9,
+        shear: None,
+        fc: None,
+        fy: Some(235.0),
+    };
+    let elem = ElementData {
+        id: ElemId(0),
+        kind: ElementKind::Beam,
+        nodes: smallvec::smallvec![NodeId(0), NodeId(1)],
+        section: Some(SectionId(0)),
+        material: Some(MaterialId(0)),
+        local_axis: LocalAxis {
+            ref_vector: [0.0, 0.0, 1.0],
+        },
+        end_cond: [EndCondition::Fixed, EndCondition::Fixed],
+        force_regime: ForceRegime::Auto,
+        rigid_zone: Default::default(),
+        plastic_zone: None,
+        spring: None,
+    };
+    let model = Model {
+        nodes: vec![
+            make_node(0, [0.0, 0.0, 0.0]),
+            make_node(1, [6000.0, 0.0, 0.0]),
+        ],
+        elements: vec![elem.clone()],
+        sections: vec![sec.clone()],
+        materials: vec![mat],
+        ..Default::default()
+    };
+
+    let beam = BeamElement::new(&elem, &model);
+    // 水平梁（ref=[0,0,1]）: ey=+Z（鉛直上向き）を確認
+    assert!((beam.axis.rot[1][2] - 1.0).abs() < 1e-12);
+
+    let k = beam.local_stiffness_raw();
+    let (e, g, l) = (beam.e, beam.g, beam.length);
+
+    // 鉛直たわみ（uy、DOF1）: 断面の強軸 iy とウェブ as_z が支配する
+    let phi_v = 12.0 * e * sec.iy / (g * sec.as_z * l * l);
+    let expected_v = 12.0 * e * sec.iy / ((1.0 + phi_v) * l.powi(3));
+    assert!(
+        (k.get(1, 1) - expected_v).abs() / expected_v < 1e-12,
+        "鉛直たわみ剛性が強軸値で組まれていない: k11={} expected={}",
+        k.get(1, 1),
+        expected_v
+    );
+
+    // 水平たわみ（uz、DOF2）: 断面の弱軸 iz とフランジ as_y が支配する
+    let phi_h = 12.0 * e * sec.iz / (g * sec.as_y * l * l);
+    let expected_h = 12.0 * e * sec.iz / ((1.0 + phi_h) * l.powi(3));
+    assert!(
+        (k.get(2, 2) - expected_h).abs() / expected_h < 1e-12,
+        "水平たわみ剛性が弱軸値で組まれていない: k22={} expected={}",
+        k.get(2, 2),
+        expected_h
+    );
+
+    // 鉛直曲げ剛性 > 水平曲げ剛性（強軸 ≫ 弱軸）であること
+    assert!(k.get(1, 1) > k.get(2, 2) * 5.0);
 }

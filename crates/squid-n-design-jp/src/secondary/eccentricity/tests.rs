@@ -184,9 +184,9 @@ fn test_story_eccentricity_symmetric_zero() {
     );
 }
 
-/// テスト2: 右側柱 iz を 3 倍 → 剛心 x ≈ 4500、偏心距離 ex ≈ 1500。
-/// 軸整合フレーム（柱軸=Z）では I_globalY = iz なので Dy ∝ iz。
-/// 梁は全柱で対称なので a 補正は全柱一致 → Dy 比 = iz 比。
+/// テスト2: 右側柱 iy を 3 倍 → 剛心 x ≈ 4500、偏心距離 ex ≈ 1500。
+/// 軸整合フレーム（柱軸=Z・ref=[0,1,0]）では、クロス変換後 I_globalY = sec.iy
+/// なので Dy ∝ iy。梁は全柱で対称なので a 補正は全柱一致 → Dy 比 = iy 比。
 /// Xs = (1·0 + 1·0 + 3·6000 + 3·6000)/(1+1+3+3) = 4500。重心 = 3000 → ex=1500。
 #[test]
 fn test_story_eccentricity_biased_rigidity() {

@@ -1084,10 +1084,10 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
 
     // --- 応力図（N/Q/M）: 部材ローカルに沿って描画 ---
     if matches!(mode, ViewMode::N | ViewMode::Q | ViewMode::M) {
-        draw_force_diagram(ui, &painter, app, mode, &pts, &cam, center);
+        draw_force_diagram(&painter, app, mode, &coords3, center3, &cam, scale, center);
     }
     if mode == ViewMode::Cmq {
-        draw_cmq_diagram(&painter, app, &pts);
+        draw_cmq_diagram(&painter, app, &coords3, center3, &cam, scale, center);
     }
 
     // 選択ハイライト
@@ -1147,15 +1147,59 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
     app.camera = cam;
 }
 
+/// 応力図・CMQ 図のオフセット方向（要素ローカル y 軸）をワールド座標で返す。
+///
+/// N/Qy/Mz はローカル x-y 平面（曲げ平面）の成分のため、図はローカル y 方向へ
+/// 張り出す。解析と同じ局所座標系（[`LocalFrame`]: ex=材軸, ey=ref_vector 直交化）
+/// を使うことで、ビューを回転しても図が要素座標系に固定される。
+fn diagram_offset_dir(p_i: [f64; 3], p_j: [f64; 3], ref_vector: [f64; 3]) -> [f64; 3] {
+    squid_n_element::transform::LocalFrame::from_nodes(p_i, p_j, ref_vector).rot[1]
+}
+
+/// 部材両端間のワールド距離。ゼロ長部材（材軸が定まらない）の除外判定に使う。
+fn member_len3(p_i: [f64; 3], p_j: [f64; 3]) -> f64 {
+    ((p_j[0] - p_i[0]).powi(2) + (p_j[1] - p_i[1]).powi(2) + (p_j[2] - p_i[2]).powi(2)).sqrt()
+}
+
+/// 3D 位置 `base3` から `dir3` 方向へ `off_world` だけ張り出した点を投影する。
+fn project_offset(
+    base3: [f64; 3],
+    dir3: [f64; 3],
+    off_world: f64,
+    center3: [f64; 3],
+    cam: &CameraState,
+    scale: f32,
+    screen_center: [f32; 2],
+) -> egui::Pos2 {
+    let p = project(
+        [
+            base3[0] + dir3[0] * off_world,
+            base3[1] + dir3[1] * off_world,
+            base3[2] + dir3[2] * off_world,
+        ],
+        center3,
+        cam,
+        scale,
+        screen_center,
+    );
+    egui::pos2(p[0], p[1])
+}
+
 /// 部材ローカルに沿って N/Q/M 図を描く。
+///
+/// 図は要素ローカル y 軸方向（曲げ平面内）へワールド空間で張り出してから投影する。
+/// スクリーン上の部材線の法線ではなくワールドの要素軸を使うため、ビューを回転
+/// しても図の張り出し面は要素座標系に追従する（曲げ平面を真横から見ると線に潰れる）。
+#[allow(clippy::too_many_arguments)]
 fn draw_force_diagram(
-    _ui: &mut egui::Ui,
     painter: &egui::Painter,
     app: &App,
     mode: ViewMode,
-    pts: &[[f32; 2]],
-    _cam: &CameraState,
-    _center: [f32; 2],
+    coords3: &[[f64; 3]],
+    center3: [f64; 3],
+    cam: &CameraState,
+    scale: f32,
+    screen_center: [f32; 2],
 ) {
     let force_idx = match mode {
         ViewMode::N => 0, // N
@@ -1181,7 +1225,8 @@ fn draw_force_diagram(
     if max_abs < 1e-12 {
         return;
     }
-    let diagram_scale = 60.0 / max_abs as f32; // 最大値で60px
+    // 最大値で 60px 相当のワールド長（一様スケール正射影なので px/scale=ワールド長）
+    let amp_world = 60.0 / max_abs / scale as f64;
 
     for (elem_id, mf) in &results.member_forces {
         let elem = app.model.elements.iter().find(|e| e.id == *elem_id);
@@ -1191,27 +1236,42 @@ fn draw_force_diagram(
         }
         let n0 = elem.nodes[0].index();
         let n1 = elem.nodes[1].index();
-        if n0 >= pts.len() || n1 >= pts.len() {
+        if n0 >= coords3.len() || n1 >= coords3.len() {
             continue;
         }
-        let p0 = egui::pos2(pts[n0][0], pts[n0][1]);
-        let p1 = egui::pos2(pts[n1][0], pts[n1][1]);
-        let dir = [p1.x - p0.x, p1.y - p0.y];
-        let len = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
-        if len < 1e-3 {
-            continue;
+        let p_i = coords3[n0];
+        let p_j = coords3[n1];
+        if member_len3(p_i, p_j) < 1e-9 {
+            continue; // ゼロ長部材（同一節点間）は材軸が定まらず図を描けない
         }
-        let unit = [dir[0] / len, dir[1] / len];
-        let normal = [-unit[1], unit[0]]; // 左90度
+        let ey = diagram_offset_dir(p_i, p_j, elem.local_axis.ref_vector);
+        let p0 = {
+            let p = project(p_i, center3, cam, scale, screen_center);
+            egui::pos2(p[0], p[1])
+        };
+        let p1 = {
+            let p = project(p_j, center3, cam, scale, screen_center);
+            egui::pos2(p[0], p[1])
+        };
 
-        // 評価位置の内力をプロット
+        // 評価位置の内力をローカル y 方向（負側=梁下側）へプロット
         let mut diagram_pts: Vec<egui::Pos2> = Vec::new();
         for (xi, forces) in &mf.at {
             let val = forces[force_idx];
-            let x = p0.x + dir[0] * *xi as f32;
-            let y = p0.y + dir[1] * *xi as f32;
-            let offset = val as f32 * diagram_scale;
-            diagram_pts.push(egui::pos2(x + normal[0] * offset, y + normal[1] * offset));
+            let base3 = [
+                p_i[0] + (p_j[0] - p_i[0]) * xi,
+                p_i[1] + (p_j[1] - p_i[1]) * xi,
+                p_i[2] + (p_j[2] - p_i[2]) * xi,
+            ];
+            diagram_pts.push(project_offset(
+                base3,
+                ey,
+                -val * amp_world,
+                center3,
+                cam,
+                scale,
+                screen_center,
+            ));
         }
         if diagram_pts.len() >= 2 {
             // 図形（折れ線→ポリゴン）
@@ -1241,7 +1301,20 @@ fn draw_force_diagram(
 }
 
 /// 部材ローカルに沿って CMQ 図（両端の固定端モーメント C とせん断 Q）を描く。
-fn draw_cmq_diagram(painter: &egui::Painter, app: &App, pts: &[[f32; 2]]) {
+///
+/// N/Q/M 図と同様、張り出し方向は要素ローカル y 軸（曲げ平面内）をワールド空間で
+/// とってから投影する。CMQ は鉛直床荷重による強軸曲げのため、水平梁では鉛直面内の
+/// 図となり、ビューを回転しても要素座標系に固定される。
+#[allow(clippy::too_many_arguments)]
+fn draw_cmq_diagram(
+    painter: &egui::Painter,
+    app: &App,
+    coords3: &[[f64; 3]],
+    center3: [f64; 3],
+    cam: &CameraState,
+    scale: f32,
+    screen_center: [f32; 2],
+) {
     if app.beam_loads.is_empty() {
         // スラブ自体が無いのか、スラブはあるが床荷重（強度）が 0 なのかを区別して案内する。
         let msg = if app.model.slabs.is_empty() {
@@ -1275,45 +1348,74 @@ fn draw_cmq_diagram(painter: &egui::Painter, app: &App, pts: &[[f32; 2]]) {
     if max_c < 1e-12 && max_q < 1e-12 {
         return;
     }
-    let c_scale = 60.0 / max_c.max(1e-12) as f32;
-    let q_scale = 60.0 / max_q.max(1e-12) as f32;
+    // 最大値で 60px 相当のワールド長（一様スケール正射影なので px/scale=ワールド長）
+    let c_amp = 60.0 / max_c.max(1e-12) / scale as f64;
+    let q_amp = 60.0 / max_q.max(1e-12) / scale as f64;
 
     for bl in &app.beam_loads {
-        // 描画スパンの両端節点: 実部材に解決済みなら部材の両端、未解決の節点対
-        // （二次部材（小梁）上の辺・大梁の中間区間）は節点対そのものに沿って描く。
+        // 描画スパンの両端節点: 実部材に解決済みなら部材の両端とその局所座標系、
+        // 未解決の節点対（二次部材（小梁）上の辺・大梁の中間区間）は節点対そのものに
+        // 沿って描き、既定の参照ベクトル（水平材=鉛直上基準、鉛直材=X 基準）を使う。
         let endpoints = match app.model.elements.iter().find(|e| e.id == bl.elem) {
-            Some(elem) if elem.nodes.len() >= 2 => {
-                Some((elem.nodes[0].index(), elem.nodes[1].index()))
-            }
+            Some(elem) if elem.nodes.len() >= 2 => Some((
+                elem.nodes[0].index(),
+                elem.nodes[1].index(),
+                Some(elem.local_axis.ref_vector),
+            )),
             _ => match bl.target {
-                squid_n_load::floor::LoadTarget::Span([a, b]) => Some((a.index(), b.index())),
+                squid_n_load::floor::LoadTarget::Span([a, b]) => Some((a.index(), b.index(), None)),
                 _ => None,
             },
         };
-        let Some((n0, n1)) = endpoints else { continue };
-        if n0 >= pts.len() || n1 >= pts.len() {
+        let Some((n0, n1, ref_vec)) = endpoints else {
+            continue;
+        };
+        if n0 >= coords3.len() || n1 >= coords3.len() {
             continue;
         }
-        let p0 = egui::pos2(pts[n0][0], pts[n0][1]);
-        let p1 = egui::pos2(pts[n1][0], pts[n1][1]);
-        let dir = [p1.x - p0.x, p1.y - p0.y];
-        let len = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
-        if len < 1e-3 {
-            continue;
+        let p_i = coords3[n0];
+        let p_j = coords3[n1];
+        if member_len3(p_i, p_j) < 1e-9 {
+            continue; // ゼロ長スパン（同一節点間）は材軸が定まらず図を描けない
         }
-        let unit = [dir[0] / len, dir[1] / len];
-        let normal = [-unit[1], unit[0]];
+        let ref_vec = ref_vec.unwrap_or_else(|| {
+            let dxy = ((p_j[0] - p_i[0]).powi(2) + (p_j[1] - p_i[1]).powi(2)).sqrt();
+            if dxy < 1.0 {
+                [1.0, 0.0, 0.0]
+            } else {
+                [0.0, 0.0, 1.0]
+            }
+        });
+        let ey = diagram_offset_dir(p_i, p_j, ref_vec);
+        let p0 = {
+            let p = project(p_i, center3, cam, scale, screen_center);
+            egui::pos2(p[0], p[1])
+        };
+        let p1 = {
+            let p = project(p_j, center3, cam, scale, screen_center);
+            egui::pos2(p[0], p[1])
+        };
 
-        // C 図（モーメント）: 両端の c_i, c_j を結ぶ折れ線ポリゴン
+        // C 図（モーメント）: 両端の c_i, c_j を結ぶ折れ線ポリゴン（-ey 側=梁下側）
         let c_poly = vec![
             p0,
-            egui::pos2(
-                p0.x + normal[0] * bl.cmq.c_i as f32 * c_scale,
-                p0.y + normal[1] * bl.cmq.c_i as f32 * c_scale,
+            project_offset(
+                p_i,
+                ey,
+                -bl.cmq.c_i * c_amp,
+                center3,
+                cam,
+                scale,
+                screen_center,
             ),
-            egui::pos2(
-                p1.x + normal[0] * bl.cmq.c_j as f32 * c_scale,
-                p1.y + normal[1] * bl.cmq.c_j as f32 * c_scale,
+            project_offset(
+                p_j,
+                ey,
+                -bl.cmq.c_j * c_amp,
+                center3,
+                cam,
+                scale,
+                screen_center,
             ),
             p1,
         ];
@@ -1324,16 +1426,26 @@ fn draw_cmq_diagram(painter: &egui::Painter, app: &App, pts: &[[f32; 2]]) {
             egui::Stroke::new(1.5_f32, theme::DATA_BLUE),
         ));
 
-        // Q 図（せん断）: 両端の q_i, q_j を結ぶ折れ線ポリゴン（反対側に描画）
+        // Q 図（せん断）: 両端の q_i, q_j を結ぶ折れ線ポリゴン（反対側 +ey 側に描画）
         let q_poly = vec![
             p0,
-            egui::pos2(
-                p0.x - normal[0] * bl.cmq.q_i as f32 * q_scale,
-                p0.y - normal[1] * bl.cmq.q_i as f32 * q_scale,
+            project_offset(
+                p_i,
+                ey,
+                bl.cmq.q_i * q_amp,
+                center3,
+                cam,
+                scale,
+                screen_center,
             ),
-            egui::pos2(
-                p1.x - normal[0] * bl.cmq.q_j as f32 * q_scale,
-                p1.y - normal[1] * bl.cmq.q_j as f32 * q_scale,
+            project_offset(
+                p_j,
+                ey,
+                bl.cmq.q_j * q_amp,
+                center3,
+                cam,
+                scale,
+                screen_center,
             ),
             p1,
         ];

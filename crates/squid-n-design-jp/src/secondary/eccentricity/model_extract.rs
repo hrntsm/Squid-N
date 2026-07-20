@@ -128,8 +128,10 @@ pub fn column_stiffnesses(model: &Model, story: StoryId) -> Vec<ColumnStiffness>
 
         // 方向別有効断面二次モーメント（局所→全体の射影）。
         // 全体 X 方向変位に抵抗: 局所 y 方向成分 iz, 局所 z 方向成分 iy。
-        let iy = sec.iy;
-        let iz = sec.iz;
+        // 断面レイヤの iy=強軸（せい方向 D³ 系）は、要素座標系では z 軸まわり
+        // （たわみ y 方向）に対応するためクロスして用いる（beam/construct.rs と同一規約）。
+        let iy = sec.iz;
+        let iz = sec.iy;
         let i_global_x = iz * ey[0] * ey[0] + iy * ez[0] * ez[0];
         let i_global_y = iz * ey[1] * ey[1] + iy * ez[1] * ez[1];
 
@@ -165,12 +167,12 @@ pub fn column_stiffnesses(model: &Model, story: StoryId) -> Vec<ColumnStiffness>
                 if bex[2].abs() >= 0.707 {
                     continue;
                 }
-                // 梁の断面二次モーメント（強軸 iz）と梁剛比。
-                let beam_iz = match other.section {
-                    Some(s) => model.sections[s.index()].iz,
+                // 梁の断面二次モーメント（強軸＝断面レイヤの iy）と梁剛比。
+                let beam_i_strong = match other.section {
+                    Some(s) => model.sections[s.index()].iy,
                     None => continue,
                 };
-                let kb = beam_iz / bl;
+                let kb = beam_i_strong / bl;
                 // X方向に効く梁: 梁軸 bex[0].abs() > 0.707
                 if bex[0].abs() > 0.707 {
                     skbx += kb;

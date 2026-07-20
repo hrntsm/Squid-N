@@ -18,8 +18,10 @@ fn make_test_beam_element(as_val: f64) -> crate::beam::BeamElement {
         g: 78846.15,
         a: 20000.0,
         a_mass: 20000.0,
-        iy: 66666666.66666667,
-        iz: 16666666.66666667,
+        // 要素座標系のフィールド値: せい 200（ローカル y 方向）× 幅 100 の矩形。
+        // iz（Mz 面、∫y²dA）=強軸 100·200³/12、iy（My 面、∫z²dA）=弱軸 200·100³/12。
+        iy: 16666666.66666667,
+        iz: 66666666.66666667,
         j: 0.0,
         as_y: as_val,
         as_z: as_val,
@@ -247,7 +249,9 @@ fn test_fiber_steel_yields_with_fy() {
         model: &Model::default(),
     };
     // 端部 ry に十分大きな逆対称回転を与え、曲げで降伏させる。
-    let big = 0.1;
+    // My 面の縁距離は幅/2=50mm（ファイバ座標は要素座標系: y=せい・z=幅）のため、
+    // 降伏後モーメントが弾性値の 1/2 を明確に下回るだけの曲率倍率を確保する。
+    let big = 0.2;
     let du = LocalVec {
         data: smallvec::smallvec![0.0, 0.0, 0.0, 0.0, big, 0.0, 0.0, 0.0, 0.0, 0.0, -big, 0.0],
     };
@@ -558,7 +562,9 @@ fn test_yield_progression() {
                 density: 0.0,
                 shear: Some(0.0),
                 fc: None,
-                fy: None,
+                // fy 未設定だと Bilinear の降伏点が 1e20 となり降伏しない
+                // （テストが恒等比較になってしまう）ため明示する。
+                fy: Some(235.0),
             }],
             ..Default::default()
         };
@@ -571,7 +577,9 @@ fn test_yield_progression() {
     let state = ElemState::default();
 
     let eps_y = 235.0 / 205000.0;
-    let z_max = 100.0;
+    // My 面（κy）の縁距離はファイバ座標の |z| 最大 = 幅/2 = 50mm
+    // （ファイバ座標は要素座標系: y=せい・z=幅）。
+    let z_max = 50.0;
     let ky_y = eps_y / z_max;
     let ky_final = ky_y * 3.0;
 
@@ -992,6 +1000,31 @@ fn test_plastic_zone_elastic_stiffness_close_to_full_fiber() {
     for (i, j) in [(1usize, 1usize), (2, 2), (4, 4), (5, 5), (1, 5), (2, 4)] {
         assert_relative_eq!(k_pz.get(i, j), k_full.get(i, j), max_relative = 5e-2);
     }
+}
+
+/// 塑性化域考慮モデルの中央弾性部 `k_mid` にも断面→要素座標系のクロス変換
+/// （elem EIz←sec.iy）が効いていることの回帰テスト。
+/// B マトリクスの (uy,rz)=Mz 面と (uz,ry)=My 面の係数は大きさが同一のため、
+/// 積分方式に依らず k_mid(1,1)/k_mid(2,2) = EIz_elem/EIy_elem = sec.iy/sec.iz
+/// （強軸/弱軸）が厳密に成り立つ。全長ファイバー積分との相対比較
+/// （上のテスト）と異なり、断面値から独立に期待比を定めるため、
+/// グリッド回転とクロス変換が同時に欠落しても検出できる。
+#[test]
+fn test_plastic_zone_k_mid_strong_axis_in_mz_plane() {
+    let model = build_test_model(Some(0.0));
+    let pz = make_plastic_zone_fiber(300.0, None);
+    let k_mid = pz.k_mid.as_ref().expect("plastic zone model has k_mid");
+    let sec = &model.sections[0];
+    let ratio = k_mid.get(1, 1) / k_mid.get(2, 2);
+    let expected = sec.iy / sec.iz; // 強軸（Mz 面）/ 弱軸（My 面）
+    assert!(
+        (ratio - expected).abs() / expected < 1e-12,
+        "k_mid(1,1)/k_mid(2,2)={} expected sec.iy/sec.iz={}",
+        ratio,
+        expected
+    );
+    // 鉛直曲げ（Mz 面）の方が剛であること（せい 200 > 幅 100 の断面）
+    assert!(k_mid.get(1, 1) > k_mid.get(2, 2));
 }
 
 #[test]
