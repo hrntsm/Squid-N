@@ -5,6 +5,8 @@ mod viewcube;
 use squid_n_core::dof::{Dof, Dof6Mask};
 use squid_n_core::ids::SectionId;
 
+mod solid;
+
 /// 3D ビュー上での支持条件の分類。`Dof6Mask` のビットパターンを意味的にまとめる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SupportKind {
@@ -424,6 +426,9 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
         ui.selectable_value(&mut mode, ViewMode::M, "M図");
         ui.selectable_value(&mut mode, ViewMode::Cmq, "CMQ図");
         ui.separator();
+        // 断面表示: 部材を断面形状の押し出しソリッドで立体表示（全モードと併用可）
+        ui.toggle_value(&mut app.show_sections, "断面表示");
+        ui.separator();
         // §3-2 の操作規約をヒント表示（左ドラッグ=回転／スクロール=ズーム）
         ui.add_enabled(
             false,
@@ -777,7 +782,9 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
         0.0
     };
 
-    let pts: Vec<[f32; 2]> = app
+    // 表示用の節点 3D 座標（変形図・モード形では変位を加味）。
+    // 断面ソリッド描画でも 3D 座標が要るため、投影前の座標を保持する。
+    let coords3: Vec<[f64; 3]> = app
         .model
         .nodes
         .iter()
@@ -789,8 +796,12 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
                 p[1] += d[i][1] * deform_scale_actual;
                 p[2] += d[i][2] * deform_scale_actual;
             }
-            project(p, center3, &cam, scale, center)
+            p
         })
+        .collect();
+    let pts: Vec<[f32; 2]> = coords3
+        .iter()
+        .map(|&p| project(p, center3, &cam, scale, center))
         .collect();
 
     // --- クリック処理（ViewCube 上のクリックはスナップ済みのため除外） ---
@@ -953,6 +964,21 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
         }
     }
 
+    // --- スラブ・小梁 ---
+    // 荷重分配オブジェクト（解析部材ではない）であることが分かるよう、
+    // 構造部材（実線・青/グレー系）と異なる暖色半透明フィル＋破線のフォーマットで描く。
+    // 部材線・断面ソリッドより先に描き、架構が床の上に重なるようにする。
+    draw_slabs_and_joists(&painter, app, &pts);
+
+    // --- 断面ソリッド ---
+    // 節点・部材線より先に描き、線・シンボル類は上に重ねる（材軸が見えるように）。
+    let mut solids_skipped = 0usize;
+    if app.show_sections {
+        solids_skipped = solid::draw_section_solids(
+            &painter, &app.model, &coords3, center3, &cam, scale, center,
+        );
+    }
+
     // 節点（梁/壁作成モードで選択中の節点は強調表示）
     for (i, &p) in pts.iter().enumerate() {
         let node_id = app.model.nodes[i].id;
@@ -976,6 +1002,12 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
     } else {
         // 通常の部材 = 沈めたニュートラル（gray-700）
         theme::GRAY_700
+    };
+    // 断面表示中は中心線を細く淡くし、ソリッドの上に材軸として薄く重ねる
+    let line_stroke = if app.show_sections {
+        egui::Stroke::new(1.0_f32, theme::translucent(line_color, 110))
+    } else {
+        egui::Stroke::new(2.0_f32, line_color)
     };
     for elem in &app.model.elements {
         // 壁（面要素）は半透明ポリゴンで描画
@@ -1008,9 +1040,23 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
                     egui::pos2(pts[n0][0], pts[n0][1]),
                     egui::pos2(pts[n1][0], pts[n1][1]),
                 ],
-                egui::Stroke::new(2.0_f32, line_color),
+                line_stroke,
             );
         }
+    }
+
+    // 断面を描けなかった線材（断面未割当・形状情報なし）があれば右上に注記
+    if app.show_sections && solids_skipped > 0 {
+        painter.text(
+            egui::pos2(
+                painter.clip_rect().max.x - 10.0,
+                painter.clip_rect().min.y + 10.0,
+            ),
+            egui::Align2::RIGHT_TOP,
+            format!("断面未定義の部材 {} 本は線のみ表示", solids_skipped),
+            egui::FontId::proportional(11.0),
+            theme::GRAY_600,
+        );
     }
 
     // --- 応力図（N/Q/M）: 部材ローカルに沿って描画 ---
@@ -1276,6 +1322,68 @@ fn draw_cmq_diagram(painter: &egui::Painter, app: &App, pts: &[[f32; 2]]) {
         egui::FontId::proportional(14.0),
         theme::GRAY_700,
     );
+}
+
+/// スラブ（床）と小梁を描画する。
+///
+/// スラブは解析部材ではなく荷重分配オブジェクトのため、構造部材（実線・青/グレー系）と
+/// 一目で区別できるフォーマットで描く:
+/// - スラブ面: 暖色（BEST_YELLOW）の淡い半透明フィル＋破線の輪郭
+/// - 小梁（`JoistLine`）: `support` 節点間の破線。実部材化された小梁は部材線
+///   （実線）が上から重なるため、破線だけの線＝仮想小梁（荷重分配上の存在）と判別できる
+///
+/// 節点座標は投影済み `pts` を使うため、変形図・モード形では変位に追従する。
+/// 節点削除等で陳腐化した参照（範囲外 id）を含むスラブ・小梁は描かない。
+fn draw_slabs_and_joists(painter: &egui::Painter, app: &App, pts: &[[f32; 2]]) {
+    /// 破線パターン（描画長 / 間隔, px）
+    const DASH: f32 = 6.0;
+    const GAP: f32 = 4.0;
+
+    for slab in &app.model.slabs {
+        let poly: Vec<egui::Pos2> = slab
+            .boundary
+            .iter()
+            .filter_map(|n| {
+                let idx = n.index();
+                (idx < pts.len()).then(|| egui::pos2(pts[idx][0], pts[idx][1]))
+            })
+            .collect();
+        if poly.len() == slab.boundary.len() && poly.len() >= 3 {
+            // 面: 淡い半透明の暖色フィル（壁の青と弁別）
+            painter.add(egui::Shape::convex_polygon(
+                poly.clone(),
+                theme::translucent(theme::BEST_YELLOW, 28),
+                egui::Stroke::NONE,
+            ));
+            // 輪郭: 破線（実部材の実線と弁別）
+            let mut closed = poly.clone();
+            closed.push(poly[0]);
+            painter.extend(egui::Shape::dashed_line(
+                &closed,
+                egui::Stroke::new(1.5_f32, theme::translucent(theme::BEST_YELLOW, 220)),
+                DASH,
+                GAP,
+            ));
+        }
+
+        // 小梁: support 節点間の破線（ニュートラル色。スラブ輪郭の暖色とも弁別）
+        for joist in &slab.joists {
+            let i0 = joist.support[0].index();
+            let i1 = joist.support[1].index();
+            if i0 >= pts.len() || i1 >= pts.len() {
+                continue;
+            }
+            painter.extend(egui::Shape::dashed_line(
+                &[
+                    egui::pos2(pts[i0][0], pts[i0][1]),
+                    egui::pos2(pts[i1][0], pts[i1][1]),
+                ],
+                egui::Stroke::new(1.5_f32, theme::GRAY_600),
+                DASH,
+                GAP,
+            ));
+        }
+    }
 }
 
 /// 壁の頂点を自己交差しない多角形になるよう並べ替える。

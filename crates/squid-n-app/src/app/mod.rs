@@ -414,6 +414,9 @@ pub struct App {
     /// ビューアのカメラ状態
     #[cfg(feature = "gui")]
     pub camera: crate::viewer::CameraState,
+    /// ビューアの断面表示（部材を断面形状の押し出しソリッドで立体表示する）
+    #[cfg(feature = "gui")]
+    pub show_sections: bool,
     /// 床荷重分配の CMQ 結果（P2 §5.1）。描画用。
     pub beam_loads: Vec<squid_n_load::floor::BeamLoad>,
     /// 時刻歴応答データ（描画用）
@@ -551,6 +554,8 @@ impl Default for App {
             view_mode_idx: 0,
             #[cfg(feature = "gui")]
             camera: crate::viewer::CameraState::default(),
+            #[cfg(feature = "gui")]
+            show_sections: false,
             beam_loads: Vec::new(),
             #[cfg(feature = "gui")]
             time_history_data: crate::time_history_view::TimeHistoryData::default(),
