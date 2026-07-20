@@ -23,6 +23,11 @@ pub struct ShellElement {
     pub frame: ShellFrame,
     pub drilling_factor: f64,
     pub membrane_active: bool,
+    /// 確定変位（4 節点 24 自由度、グローバル系）。commit_state で trial から確定。
+    pub committed_disp: [f64; 24],
+    /// トライアル変位（グローバル系）。Newton 反復中も蓄積され、
+    /// internal_force はこちらを参照する（beam/behavior.rs と同じトライアル追従規約）。
+    pub trial_disp: [f64; 24],
 }
 
 impl ShellElement {
@@ -73,6 +78,8 @@ impl ShellElement {
             frame,
             drilling_factor: DEFAULT_DRILLING_FACTOR,
             membrane_active,
+            committed_disp: [0.0; 24],
+            trial_disp: [0.0; 24],
         }
     }
 

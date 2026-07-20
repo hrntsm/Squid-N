@@ -38,6 +38,11 @@ pub struct WallPanelElement {
     a_mat: Vec<f64>,
     /// 質量算定用の壁板総質量 [質量単位]
     mass_total: f64,
+    /// 確定変位（四隅 24 自由度、グローバル系）。commit_state で trial から確定。
+    committed_disp: [f64; 24],
+    /// トライアル変位（四隅 24 自由度、グローバル系）。Newton 反復中も蓄積され、
+    /// internal_force はこちらを参照する（beam/behavior.rs と同じトライアル追従規約）。
+    trial_disp: [f64; 24],
 }
 
 impl WallPanelElement {
@@ -234,6 +239,8 @@ impl WallPanelElement {
             column,
             a_mat,
             mass_total: mat.density * t * lw * h,
+            committed_disp: [0.0; 24],
+            trial_disp: [0.0; 24],
         })
     }
 
@@ -301,9 +308,68 @@ impl ElementBehavior for WallPanelElement {
     }
 
     fn internal_force(&self, _state: &ElemState, _ctx: &Ctx) -> LocalVec {
-        LocalVec {
+        // 線形弾性: f = K24 · u（トライアル追従。beam/behavior.rs と同じ規約）。
+        // 従来は恒常的にゼロを返しており、非線形解析（プッシュオーバー・
+        // 非線形時刻歴）で耐震壁が復元力を全く負担していなかった。
+        let k = self.stiffness_24();
+        let mut f = LocalVec {
             data: smallvec::smallvec![0.0; 24],
+        };
+        for i in 0..24 {
+            let mut s = 0.0;
+            for j in 0..24 {
+                s += k.get(i, j) * self.trial_disp[j];
+            }
+            f.data[i] = s;
         }
+        f
+    }
+
+    fn update_state(&mut self, du: &LocalVec, commit: bool, _ctx: &Ctx) {
+        for i in 0..24.min(du.data.len()) {
+            self.trial_disp[i] += du.data[i];
+        }
+        if commit {
+            self.committed_disp = self.trial_disp;
+        }
+    }
+
+    fn commit_state(&mut self) {
+        self.committed_disp = self.trial_disp;
+    }
+
+    fn revert_state(&mut self) {
+        self.trial_disp = self.committed_disp;
+    }
+
+    fn snapshot_state(&self) -> Box<dyn std::any::Any> {
+        Box::new((self.committed_disp, self.trial_disp))
+    }
+
+    fn restore_state(&mut self, state: &dyn std::any::Any) {
+        if let Some((committed, trial)) = state.downcast_ref::<([f64; 24], [f64; 24])>() {
+            self.committed_disp = *committed;
+            self.trial_disp = *trial;
+        }
+    }
+
+    fn serialize_checkpoint(&self) -> Vec<u8> {
+        bincode::serialize(&(self.committed_disp, self.trial_disp)).expect("serialize checkpoint")
+    }
+
+    fn deserialize_checkpoint(
+        &mut self,
+        data: &[u8],
+    ) -> Result<(), crate::behavior::CheckpointError> {
+        // 旧チェックポイント（変位未収録・空バイト列）は「状態なし」として許容する。
+        if data.is_empty() {
+            return Ok(());
+        }
+        let (committed, trial): ([f64; 24], [f64; 24]) = bincode::deserialize(data)
+            .map_err(|e| crate::behavior::CheckpointError::Decode(e.to_string()))?;
+        self.committed_disp = committed;
+        self.trial_disp = trial;
+        Ok(())
     }
 
     fn mass_matrix(&self, _opt: MassOption) -> LocalMat {
@@ -628,5 +694,60 @@ mod tests {
         // 2 節点しか無い場合は None（従来の暫定等価梁へ）
         data.nodes = smallvec::smallvec![NodeId(0), NodeId(2)];
         assert!(WallPanelElement::try_new(&data, &model).is_none());
+    }
+
+    /// トライアル追従の回帰テスト: update_state(du, commit=false) が internal_force に
+    /// 反映され（内力 = K24·u と厳密に一致）、commit / revert / snapshot / restore が
+    /// beam/behavior.rs と同じ規律で機能すること。従来は internal_force が恒常的に
+    /// ゼロを返しており、非線形解析で耐震壁が復元力を負担していなかった。
+    ///
+    /// 本テストの K·u 比較は「internal_force と tangent_stiffness が将来ズレない」
+    /// ことの回帰ガードであり、K24 の値そのものの正しさは独立の解析解と照合する
+    /// `test_wall_panel_inplane_shear_matches_column`（12EI/((1+φ)h³)）が担保する
+    /// （両者を合わせて非循環な検証となる）。
+    #[test]
+    fn test_wall_panel_trial_displacement_tracking() {
+        use crate::behavior::{Ctx, ElemState, ElementBehavior, LocalVec};
+        let (model, data) = make_wall_model();
+        let mut wall = WallPanelElement::try_new(&data, &model).unwrap();
+        let ctx = Ctx { model: &model };
+        let state = ElemState::default();
+
+        // 上辺 2 節点へ面内水平変位（両端固定柱のせん断変形モード）
+        let mut du = LocalVec {
+            data: smallvec::smallvec![0.0; 24],
+        };
+        du.data[2 * 6] = 1.0;
+        du.data[3 * 6] = 1.0;
+        let snap = wall.snapshot_state();
+        wall.update_state(&du, false, &ctx);
+
+        // commit 前でも内力へ反映され、K24·u と厳密に一致する
+        let f = wall.internal_force(&state, &ctx);
+        let k = wall.stiffness_24();
+        for i in 0..24 {
+            let expected: f64 = (0..24).map(|j| k.get(i, j) * du.data[j]).sum();
+            assert!(
+                (f.data[i] - expected).abs() <= 1e-9 * expected.abs().max(1.0),
+                "内力が K·u と不一致: i={i} f={} expected={expected}",
+                f.data[i]
+            );
+        }
+        // 上辺の水平力は非零（壁がせん断復元力を負担する）
+        assert!(f.data[2 * 6].abs() > 1.0, "壁の復元力が生じていない");
+
+        // commit → さらに反復 → revert で確定値へ戻る
+        wall.commit_state();
+        wall.update_state(&du, false, &ctx);
+        wall.revert_state();
+        let f2 = wall.internal_force(&state, &ctx);
+        for i in 0..24 {
+            assert!((f2.data[i] - f.data[i]).abs() < 1e-9);
+        }
+
+        // restore_state でスナップショット時点（初期状態）へ完全ロールバック
+        wall.restore_state(&*snap);
+        let f0 = wall.internal_force(&state, &ctx);
+        assert!(f0.data.iter().all(|v| v.abs() < 1e-12));
     }
 }

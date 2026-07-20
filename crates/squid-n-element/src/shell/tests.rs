@@ -18,6 +18,8 @@ fn make_flat_shell(t: f64) -> ShellElement {
         frame,
         drilling_factor: DEFAULT_DRILLING_FACTOR,
         membrane_active: true,
+        committed_disp: [0.0; 24],
+        trial_disp: [0.0; 24],
     }
 }
 
@@ -369,6 +371,8 @@ fn test_patch_membrane_constant_stress() {
         frame,
         drilling_factor: DEFAULT_DRILLING_FACTOR,
         membrane_active: true,
+        committed_disp: [0.0; 24],
+        trial_disp: [0.0; 24],
     };
 
     // Interior point at distorted panel center (45, 55)
@@ -436,6 +440,8 @@ fn make_shell_on(coords4: [[f64; 3]; 4], nids: [usize; 4]) -> ShellElement {
         frame: ShellFrame::from_nodes(coords4),
         drilling_factor: DEFAULT_DRILLING_FACTOR,
         membrane_active: true,
+        committed_disp: [0.0; 24],
+        trial_disp: [0.0; 24],
     }
 }
 
@@ -640,5 +646,63 @@ fn test_patch_bending_distorted() {
         "曲げパッチ Ry={} exp {}",
         u[4 * 6 + 4],
         exact[2]
+    );
+}
+
+/// トライアル追従の回帰テスト: update_state(du, commit=false) が internal_force に
+/// 反映され（内力 = 接線剛性·u と厳密に一致）、剛体並進では内力ゼロとなること。
+/// 従来は internal_force が恒常的にゼロを返しており、非線形解析でシェルが
+/// 復元力を負担していなかった。
+///
+/// K·u 比較は「internal_force と tangent_stiffness が将来ズレない」ことの
+/// 回帰ガードであり、K の値そのものの正しさは本ファイルのパッチテスト群
+/// （膜・曲げの解析解照合）が担保する（両者を合わせて非循環な検証となる）。
+#[test]
+fn test_shell_trial_displacement_tracking() {
+    use crate::behavior::{Ctx, ElemState, ElementBehavior, LocalVec};
+    use squid_n_core::model::Model;
+    let mut shell = make_flat_shell(10.0);
+    let model = Model::default();
+    let ctx = Ctx { model: &model };
+    let state = ElemState::default();
+
+    // 面内せん断的な非剛体変位（節点2・3 のみ x 方向）
+    let mut du = LocalVec {
+        data: smallvec::smallvec![0.0; 24],
+    };
+    du.data[2 * 6] = 1.0;
+    du.data[3 * 6] = 1.0;
+    shell.update_state(&du, false, &ctx);
+
+    // commit 前でも内力へ反映され、接線剛性·u と厳密に一致する
+    let f = shell.internal_force(&state, &ctx);
+    let k = shell.tangent_stiffness(&state, &ctx);
+    for i in 0..24 {
+        let expected: f64 = (0..24).map(|j| k.get(i, j) * du.data[j]).sum();
+        assert!(
+            (f.data[i] - expected).abs() <= 1e-9 * expected.abs().max(1.0),
+            "内力が K·u と不一致: i={i} f={} expected={expected}",
+            f.data[i]
+        );
+    }
+    assert!(
+        f.data.iter().any(|v| v.abs() > 1e-6),
+        "非剛体変位で内力が生じない"
+    );
+
+    // 剛体並進（全節点同一変位）では内力ゼロ
+    shell.revert_state(); // trial を committed（=0）へ戻す
+    let mut du_rigid = LocalVec {
+        data: smallvec::smallvec![0.0; 24],
+    };
+    for n in 0..4 {
+        du_rigid.data[n * 6] = 1.0;
+    }
+    shell.update_state(&du_rigid, false, &ctx);
+    let f_rigid = shell.internal_force(&state, &ctx);
+    assert!(
+        f_rigid.data.iter().all(|v| v.abs() < 1e-6),
+        "剛体並進で内力が生じた: {:?}",
+        f_rigid.data
     );
 }

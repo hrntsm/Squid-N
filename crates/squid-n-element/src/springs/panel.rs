@@ -17,6 +17,12 @@ pub struct PanelZone {
     pub kind: PanelStiffnessModel,
     pub center_node: NodeId,
     pub connected_nodes: Vec<NodeId>,
+    /// 確定変位（n_dof 個、グローバル系）。commit_state で trial から確定。
+    /// 空 Vec は「変位ゼロ」を意味する（update_state 時に n_dof 長へ遅延初期化）。
+    pub committed_disp: Vec<f64>,
+    /// トライアル変位（グローバル系）。Newton 反復中も蓄積され、
+    /// internal_force はこちらを参照する（beam/behavior.rs と同じトライアル追従規約）。
+    pub trial_disp: Vec<f64>,
 }
 
 pub struct PanelConnection {
@@ -103,6 +109,8 @@ impl PanelZone {
             kind: PanelStiffnessModel::RigidZoneApprox,
             center_node: center,
             connected_nodes: connected,
+            committed_disp: Vec::new(),
+            trial_disp: Vec::new(),
         }
     }
 
@@ -171,10 +179,76 @@ impl ElementBehavior for PanelZone {
         }
     }
 
-    fn internal_force(&self, _state: &ElemState, _ctx: &Ctx) -> LocalVec {
-        LocalVec {
-            data: SmallVec::from_elem(0.0, self.n_dof()),
+    fn internal_force(&self, state: &ElemState, ctx: &Ctx) -> LocalVec {
+        // 線形弾性: f = K · u（トライアル追従。beam/behavior.rs と同じ規約）。
+        // RigidZoneApprox は剛性ゼロのため従来どおり内力ゼロとなる。
+        let n = self.n_dof();
+        let mut f = LocalVec {
+            data: SmallVec::from_elem(0.0, n),
+        };
+        if self.trial_disp.is_empty() {
+            return f;
         }
+        let k = self.tangent_stiffness(state, ctx);
+        for i in 0..n {
+            let mut s = 0.0;
+            for (j, &uj) in self.trial_disp.iter().enumerate().take(n) {
+                s += k.get(i, j) * uj;
+            }
+            f.data[i] = s;
+        }
+        f
+    }
+
+    fn update_state(&mut self, du: &LocalVec, commit: bool, _ctx: &Ctx) {
+        let n = self.n_dof();
+        if self.trial_disp.len() < n {
+            self.trial_disp.resize(n, 0.0);
+        }
+        for (t, &d) in self.trial_disp.iter_mut().zip(du.data.iter()) {
+            *t += d;
+        }
+        if commit {
+            self.committed_disp = self.trial_disp.clone();
+        }
+    }
+
+    fn commit_state(&mut self) {
+        self.committed_disp = self.trial_disp.clone();
+    }
+
+    fn revert_state(&mut self) {
+        self.trial_disp = self.committed_disp.clone();
+    }
+
+    fn snapshot_state(&self) -> Box<dyn std::any::Any> {
+        Box::new((self.committed_disp.clone(), self.trial_disp.clone()))
+    }
+
+    fn restore_state(&mut self, state: &dyn std::any::Any) {
+        if let Some((committed, trial)) = state.downcast_ref::<(Vec<f64>, Vec<f64>)>() {
+            self.committed_disp = committed.clone();
+            self.trial_disp = trial.clone();
+        }
+    }
+
+    fn serialize_checkpoint(&self) -> Vec<u8> {
+        bincode::serialize(&(&self.committed_disp, &self.trial_disp)).expect("serialize checkpoint")
+    }
+
+    fn deserialize_checkpoint(
+        &mut self,
+        data: &[u8],
+    ) -> Result<(), crate::behavior::CheckpointError> {
+        // 旧チェックポイント（変位未収録・空バイト列）は「状態なし」として許容する。
+        if data.is_empty() {
+            return Ok(());
+        }
+        let (committed, trial): (Vec<f64>, Vec<f64>) = bincode::deserialize(data)
+            .map_err(|e| crate::behavior::CheckpointError::Decode(e.to_string()))?;
+        self.committed_disp = committed;
+        self.trial_disp = trial;
+        Ok(())
     }
 
     fn mass_matrix(&self, _opt: MassOption) -> LocalMat {
@@ -203,6 +277,8 @@ mod tests {
             kind: PanelStiffnessModel::RigidZoneApprox,
             center_node: NodeId(0),
             connected_nodes: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
+            committed_disp: Vec::new(),
+            trial_disp: Vec::new(),
         };
 
         // 節点モーメント釣り合い: ml_b + mr_b = ml_c + mu_c
@@ -366,6 +442,8 @@ mod tests {
             kind: PanelStiffnessModel::RigidZoneApprox,
             center_node: NodeId(0),
             connected_nodes: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
+            committed_disp: Vec::new(),
+            trial_disp: Vec::new(),
         };
         let conn = PanelConnection {
             ml_b: 218.182,
@@ -425,6 +503,8 @@ mod tests {
             kind: PanelStiffnessModel::RigidZoneApprox,
             center_node: NodeId(0),
             connected_nodes: vec![NodeId(1), NodeId(2), NodeId(3)],
+            committed_disp: Vec::new(),
+            trial_disp: Vec::new(),
         };
         let conn = PanelConnection {
             ml_b: 400.0,
@@ -462,6 +542,8 @@ mod tests {
             kind: PanelStiffnessModel::RigidZoneApprox,
             center_node: NodeId(0),
             connected_nodes: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
+            committed_disp: Vec::new(),
+            trial_disp: Vec::new(),
         };
         let model = squid_n_core::model::Model::default();
         let k = pz.tangent_stiffness(&ElemState {}, &Ctx { model: &model });
@@ -481,6 +563,8 @@ mod tests {
             kind: PanelStiffnessModel::ElasticShearPanel,
             center_node: NodeId(0),
             connected_nodes: vec![NodeId(1)],
+            committed_disp: Vec::new(),
+            trial_disp: Vec::new(),
         };
         let model = squid_n_core::model::Model::default();
         let k = pz.tangent_stiffness(&ElemState {}, &Ctx { model: &model });
@@ -502,6 +586,8 @@ mod tests {
             kind: PanelStiffnessModel::RigidZoneApprox,
             center_node: NodeId(0),
             connected_nodes: vec![NodeId(1), NodeId(2)],
+            committed_disp: Vec::new(),
+            trial_disp: Vec::new(),
         };
         // L型: 右梁(mr_b, bqr, bnr)と上柱(mu_c, cqu)が欠落 → すべて0
         // 節点モーメント釣り合い条件: ml_b + 0 = ml_c + 0 → ml_b = ml_c
@@ -548,6 +634,8 @@ mod tests {
             kind: PanelStiffnessModel::RigidZoneApprox,
             center_node: NodeId(0),
             connected_nodes: vec![NodeId(1), NodeId(2), NodeId(3)],
+            committed_disp: Vec::new(),
+            trial_disp: Vec::new(),
         };
         // ト型: 下柱(ml_c, cql)が欠落 → 0
         // 釣り合い条件: ml_b + mr_b = 0 + mu_c
@@ -589,6 +677,8 @@ mod tests {
             kind: PanelStiffnessModel::RigidZoneApprox,
             center_node: NodeId(0),
             connected_nodes: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
+            committed_disp: Vec::new(),
+            trial_disp: Vec::new(),
         };
         // 左右対称 + 上下対称 → 釣り合い成立
         let conn = PanelConnection {
@@ -613,5 +703,51 @@ mod tests {
             lhs,
             rhs
         );
+    }
+
+    /// トライアル追従の回帰テスト: ElasticShearPanel は update_state(du, false) の
+    /// 変位が internal_force（= K·u）へ反映され、RigidZoneApprox（剛性ゼロ）は
+    /// 変位を与えても内力ゼロのままであること。
+    #[test]
+    fn test_panel_zone_trial_displacement_tracking() {
+        use crate::behavior::{Ctx, ElemState, ElementBehavior, LocalVec};
+        use squid_n_core::model::Model;
+        let model = Model::default();
+        let ctx = Ctx { model: &model };
+        let state = ElemState::default();
+
+        let make = |kind: PanelStiffnessModel| PanelZone {
+            dc: 500.0,
+            db: 800.0,
+            tp: 19.0,
+            g: 80_000.0,
+            kind,
+            center_node: NodeId(0),
+            connected_nodes: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
+            committed_disp: Vec::new(),
+            trial_disp: Vec::new(),
+        };
+
+        // ElasticShearPanel: DOF0 に単位変位 → f[0] = kp = G·tp·dc
+        let mut pz = make(PanelStiffnessModel::ElasticShearPanel);
+        let n = pz.n_dof();
+        let mut du = LocalVec {
+            data: smallvec::SmallVec::from_elem(0.0, n),
+        };
+        du.data[0] = 1.0;
+        pz.update_state(&du, false, &ctx);
+        let f = pz.internal_force(&state, &ctx);
+        let kp = 80_000.0 * 19.0 * 500.0;
+        assert!(
+            (f.data[0] - kp).abs() / kp < 1e-12,
+            "f0={} expected kp={kp}",
+            f.data[0]
+        );
+
+        // RigidZoneApprox: 剛性ゼロ → 変位を与えても内力ゼロ
+        let mut pz_rigid = make(PanelStiffnessModel::RigidZoneApprox);
+        pz_rigid.update_state(&du, false, &ctx);
+        let f_rigid = pz_rigid.internal_force(&state, &ctx);
+        assert!(f_rigid.data.iter().all(|v| v.abs() < 1e-12));
     }
 }
