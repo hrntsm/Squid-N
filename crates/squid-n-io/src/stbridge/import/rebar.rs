@@ -149,16 +149,19 @@ pub(super) fn parse_rebar(a: &HashMap<String, String>) -> RcRebar {
         },
         cover: f(&["cover", "kaburi"]),
         shear: ShearBar {
-            dia: dia(&["dia_band", "D_band", "dia_stirrup", "dia_hoop"]),
+            // 柱は帯筋 `D_band`、梁はあばら筋 `D_stirrup`（実 ST-Bridge 標準名）。
+            dia: dia(&["D_band", "D_stirrup", "dia_band", "dia_stirrup", "dia_hoop"]),
             pitch: f(&["pitch_band", "pitch_stirrup", "pitch_hoop"]),
             legs: u(&[
-                "count_band",
                 "N_band_direction_X",
+                "N_stirrup",
+                "count_band",
                 "count_stirrup",
                 "count_hoop",
             ]),
             grade: a
                 .get("strength_band")
+                .or_else(|| a.get("strength_stirrup"))
                 .or_else(|| a.get("strength_bar_band"))
                 .or_else(|| a.get("strength_main_band"))
                 .cloned(),

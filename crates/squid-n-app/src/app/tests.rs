@@ -976,7 +976,7 @@ fn test_export_and_import_stbridge_roundtrip() {
     let mut app = App::default();
     app.load_model(crate::sample::portal_frame());
     let original = app.model.clone();
-    app.export_stbridge_to(path.clone(), squid_n_io::stbridge::SectionExportMode::Raw);
+    app.export_stbridge_to(path.clone());
     assert!(app.last_error.is_none(), "{:?}", app.last_error);
 
     let mut app2 = App::default();
@@ -986,18 +986,17 @@ fn test_export_and_import_stbridge_roundtrip() {
     // ST-Bridge プロジェクト(.scz)とは別物なので project_path は更新されない。
     assert!(app2.project_path.is_none());
 
-    // サブセットのため完全一致(eq_ignoring_dofmap)は求めない
-    // （拘束条件・部材荷重は ST-Bridge の対象外で失われる）が、
-    // 節点数・部材数はまず一致するはず。
+    // 標準 ST-Bridge は幾何サブセットのため完全一致は求めない（拘束・荷重・材料の
+    // E/ν は対象外）が、節点数・部材数・座標・接続関係は保たれる。
     assert_eq!(app2.model.nodes.len(), original.nodes.len());
     assert_eq!(app2.model.elements.len(), original.elements.len());
-
-    // 座標・部材の接続関係（節点参照・断面・材料・部材軸）はこの門型ラーメンでは
-    // 完全にビット一致する（列/梁の判定に依らず節点順序が保たれるケース）。
     for (a, b) in app2.model.nodes.iter().zip(original.nodes.iter()) {
         assert_eq!(a.coord, b.coord);
     }
-    assert_eq!(app2.model.elements, original.elements);
+    for (a, b) in app2.model.elements.iter().zip(original.elements.iter()) {
+        assert_eq!(a.kind, b.kind, "要素種別が保たれる");
+        assert_eq!(a.nodes, b.nodes, "節点接続が保たれる");
+    }
 
     std::fs::remove_file(&path).ok();
 }
@@ -1010,15 +1009,12 @@ fn test_export_stbridge_standard_mode_writes_steel_library() {
 
     let mut app = App::default();
     app.load_model(crate::sample::portal_frame());
-    app.export_stbridge_to(
-        path.clone(),
-        squid_n_io::stbridge::SectionExportMode::Standard,
-    );
+    app.export_stbridge_to(path.clone());
     assert!(app.last_error.is_none(), "{:?}", app.last_error);
 
     let xml = std::fs::read_to_string(&path).unwrap();
-    // 門型ラーメンのサンプルは鋼 H 断面（柱・梁）を持つため、標準モードでは
-    // 標準断面要素と形鋼ライブラリが書き出される。
+    // 門型ラーメンのサンプルは鋼 H 断面（柱・梁）を持つため、標準断面要素と
+    // 形鋼ライブラリが書き出される。
     assert!(xml.contains("<StbSecColumn_S "), "鋼柱は StbSecColumn_S");
     assert!(xml.contains("<StbSecBeam_S "), "鋼梁は StbSecBeam_S");
     assert!(xml.contains("<StbSecSteel>"), "形鋼ライブラリを出す");
@@ -1041,10 +1037,7 @@ fn test_stbridge_standard_mode_roundtrip_through_app() {
     let mut app = App::default();
     app.load_model(crate::sample::portal_frame());
     let n_sections = app.model.sections.len();
-    app.export_stbridge_to(
-        path.clone(),
-        squid_n_io::stbridge::SectionExportMode::Standard,
-    );
+    app.export_stbridge_to(path.clone());
     assert!(app.last_error.is_none(), "{:?}", app.last_error);
 
     let mut app2 = App::default();

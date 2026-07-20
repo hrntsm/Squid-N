@@ -1,39 +1,41 @@
-//! ST-Bridge 標準フォーマットに沿った断面書き出し（[`SectionExportMode::Standard`]）。
-//!
-//! 既定の [`StbSecRaw`](super::export) は内部物性を直接持つ独自要素で往復に強い一方、
-//! BIM や他社ソフトは ST-Bridge 標準の断面要素（`StbSecColumn_S` 等）＋形鋼ライブラリ
-//! （`StbSecSteel`）を期待することがある。本モジュールは `Section.shape`
-//! （[`SectionShape`]）から標準要素を生成する。
+//! ST-Bridge 標準スキーマに沿った断面書き出し。`Section.shape`（[`SectionShape`]）から
+//! 標準の断面要素（`StbSecColumn_S` 等）＋形鋼ライブラリ（`StbSecSteel`）を生成する。
+//! 材料は ST-Bridge の慣習どおり断面へグレード名で付す（鋼 `strength_main`、RC/SRC/CFT の
+//! コンクリート `strength_concrete`）。
 //!
 //! # 対応形状
 //! - 鋼: H形鋼／角形鋼管／鋼管／山形鋼／溝形鋼／T形鋼（`StbSecSteel` 参照）。
 //! - RC: 矩形・円形（幾何＋配筋。配筋は `StbSecBarArrangement*` として書き出す）。
-//! - CFT: 角形・円形（充填鋼管を `StbSecColumn_CFT`＋`StbSecSteel` 参照で。柱のみ。梁は Raw）。
+//! - CFT: 角形・円形（充填鋼管を `StbSecColumn_CFT`＋`StbSecSteel` 参照で。柱のみ）。
 //! - SRC: 矩形（`StbSecColumn_SRC`/`StbSecBeam_SRC`。コンクリート図形＋内蔵鉄骨＋配筋＋鋼種）。
-//! - 上記以外（耐震壁・形状未定義）は `StbSecRaw` へフォールバックする。
+//! - 上記以外（耐震壁・形状未定義・CFT 梁・RC 円形梁）は、標準 ST-Bridge に対応要素が無いため
+//!   物性直持ちの拡張要素 `StbSecRaw` へフォールバックする（他ソフトは解釈できないが
+//!   参照部材の断面リンクは保つ。完全一致の保存は `.scz`）。
 //!
 //! # 柱／梁の型分けと id 再割当て
 //! ST-Bridge では断面が柱用（`StbSecColumn_*`）と梁用（`StbSecBeam_*`）に型分けされ、
 //! 部材はその断面 id を参照する。内部モデルは 1 断面を柱・梁で共有し得るため、
 //! 共有断面は柱用・梁用の 2 要素へ分割し、梁用へ新しい id を割り当てる。
 //! 呼び出し側（[`super::export`]）は返り値の id マップで部材の `id_section` を張り替える。
-//!
-//! # 往復について
-//! `import_stbridge` は本モードで書き出した標準断面要素（`StbSecColumn_S`/`StbSecColumn_RC`
-//! 等）と配筋（`StbSecBarArrangement*`）を解釈して読み戻せる。ただし ST-Bridge に円形梁の
-//! 図形が無いため、**円形（`RcCircle`）を梁として使う断面は `StbSecRaw` にフォールバックし、
-//! 形状・配筋は往復しない**（物性のみ残る）。Squid-N 固有属性まで含む完全一致の往復が
-//! 要る場合は [`SectionExportMode::Raw`] を使う。
+//! id は ST-Bridge の `positiveInteger`（1 始まり）に合わせ、内部 0 始まり id に +1 する。
 
 use super::export::{esc, fmt as num};
 use squid_n_core::model::{ElementKind, Model, Section};
 use squid_n_core::section_shape::{RcRebar, SectionShape};
 use std::collections::HashMap;
 
+/// ST-Bridge の断面 id は `positiveInteger`（1 以上）。内部 0 始まり id に +1 する。
+/// 部材側の断面参照（`export::sec_ref`）も同じく +1 するため一貫する。
+fn sid(id: u32) -> u32 {
+    id + 1
+}
+
 /// 標準モードで生成した断面ブロックと、部材参照の張り替え用 id マップ。
 pub(super) struct StandardSections {
-    /// `<StbSections>` の中身（断面要素群 ＋ 末尾の `<StbSecSteel>` ライブラリ）。
+    /// 断面要素群（柱・梁・ブレース。`StbSections` のスキーマ順に整列済み。形鋼ライブラリは含まない）。
     pub sections_xml: String,
+    /// 形鋼ライブラリ `<StbSecSteel>`（スキーマ順ではスラブ・壁断面の後に置く）。
+    pub steel_lib: String,
     /// 内部断面 id → 柱部材が参照すべき ST-Bridge 断面 id。
     pub col_map: HashMap<u32, u32>,
     /// 内部断面 id → 梁部材が参照すべき ST-Bridge 断面 id。
@@ -45,17 +47,24 @@ pub(super) struct StandardSections {
 fn section_roles(model: &Model) -> HashMap<u32, (bool, bool)> {
     let mut roles: HashMap<u32, (bool, bool)> = HashMap::new();
     for e in &model.elements {
-        if e.kind != ElementKind::Beam || e.nodes.len() != 2 {
+        if e.nodes.len() != 2 {
             continue;
         }
+        // 梁は幾何で柱/梁を判定、ブレースは梁役割（水平材の断面型）として扱う。
+        let is_col = match e.kind {
+            ElementKind::Beam => {
+                let n0 = &model.nodes[e.nodes[0].index()];
+                let n1 = &model.nodes[e.nodes[1].index()];
+                let dz = (n1.coord[2] - n0.coord[2]).abs();
+                let dx = n1.coord[0] - n0.coord[0];
+                let dy = n1.coord[1] - n0.coord[1];
+                let len = (dx * dx + dy * dy + dz * dz).sqrt();
+                len > 1e-12 && dz / len > 0.707
+            }
+            ElementKind::Brace { .. } => false,
+            _ => continue,
+        };
         let Some(sec) = e.section else { continue };
-        let n0 = &model.nodes[e.nodes[0].index()];
-        let n1 = &model.nodes[e.nodes[1].index()];
-        let dz = (n1.coord[2] - n0.coord[2]).abs();
-        let dx = n1.coord[0] - n0.coord[0];
-        let dy = n1.coord[1] - n0.coord[1];
-        let len = (dx * dx + dy * dy + dz * dz).sqrt();
-        let is_col = len > 1e-12 && dz / len > 0.707;
         let ent = roles.entry(sec.0).or_insert((false, false));
         if is_col {
             ent.0 = true;
@@ -80,9 +89,22 @@ struct RoleMaterial {
 fn section_materials(model: &Model) -> HashMap<u32, RoleMaterial> {
     let mut map: HashMap<u32, RoleMaterial> = HashMap::new();
     for e in &model.elements {
-        if e.kind != ElementKind::Beam || e.nodes.len() != 2 {
+        if e.nodes.len() != 2 {
             continue;
         }
+        let is_col = match e.kind {
+            ElementKind::Beam => {
+                let n0 = &model.nodes[e.nodes[0].index()];
+                let n1 = &model.nodes[e.nodes[1].index()];
+                let dz = (n1.coord[2] - n0.coord[2]).abs();
+                let dx = n1.coord[0] - n0.coord[0];
+                let dy = n1.coord[1] - n0.coord[1];
+                let len = (dx * dx + dy * dy + dz * dz).sqrt();
+                len > 1e-12 && dz / len > 0.707
+            }
+            ElementKind::Brace { .. } => false,
+            _ => continue,
+        };
         let Some(sec) = e.section else { continue };
         let Some(mid) = e.material else { continue };
         let name = model
@@ -90,13 +112,6 @@ fn section_materials(model: &Model) -> HashMap<u32, RoleMaterial> {
             .get(mid.index())
             .map(|mat| mat.name.clone())
             .unwrap_or_default();
-        let n0 = &model.nodes[e.nodes[0].index()];
-        let n1 = &model.nodes[e.nodes[1].index()];
-        let dz = (n1.coord[2] - n0.coord[2]).abs();
-        let dx = n1.coord[0] - n0.coord[0];
-        let dy = n1.coord[1] - n0.coord[1];
-        let len = (dx * dx + dy * dy + dz * dz).sqrt();
-        let is_col = len > 1e-12 && dz / len > 0.707;
         let ent = map.entry(sec.0).or_default();
         let slot = if is_col { &mut ent.col } else { &mut ent.beam };
         if slot.is_none() {
@@ -123,8 +138,12 @@ impl SteelLibrary {
         if self.entries.is_empty() {
             return String::new();
         }
+        // StbSecSteel の子要素はスキーマ順（H → BOX → Pipe → T → C → L → LipC →
+        // FlatBar → RoundBar）に並べる必要がある。同順位内は挿入順を保つ（安定ソート）。
+        let mut ordered: Vec<&String> = self.entries.iter().collect();
+        ordered.sort_by_key(|e| steel_rank(e));
         let mut s = String::from("      <StbSecSteel>\n");
-        for e in &self.entries {
+        for e in ordered {
             s.push_str("        ");
             s.push_str(e);
             s.push('\n');
@@ -132,6 +151,29 @@ impl SteelLibrary {
         s.push_str("      </StbSecSteel>\n");
         s
     }
+}
+
+/// 形鋼ライブラリ要素の `StbSecSteel` スキーマ順の順位（要素名の接頭辞で判定）。
+fn steel_rank(entry: &str) -> u8 {
+    let tag_rank = [
+        ("<StbSecRoll-H", 0u8),
+        ("<StbSecBuild-H", 1),
+        ("<StbSecRoll-BOX", 2),
+        ("<StbSecBuild-BOX", 3),
+        ("<StbSecPipe", 4),
+        ("<StbSecRoll-T", 5),
+        ("<StbSecRoll-C", 6),
+        ("<StbSecRoll-L", 7),
+        ("<StbSecLipC", 8),
+        ("<StbSecFlatBar", 9),
+        ("<StbSecRoundBar", 10),
+    ];
+    for (tag, rank) in tag_rank {
+        if entry.starts_with(tag) {
+            return rank;
+        }
+    }
+    99
 }
 
 /// H 形鋼の形鋼図形名と `StbSecSteel` エントリ（鋼断面・SRC 内蔵鉄骨で共用）。
@@ -143,12 +185,15 @@ fn h_figure(height: f64, width: f64, web_thick: f64, flange_thick: f64) -> (Stri
         num(web_thick),
         num(flange_thick)
     );
+    // r（フィレット半径）は内部モデルに無いが、スキーマ上 length>0 が必須。取り込みでは
+    // 無視される（A/B/t1/t2 のみ使用）ため、フランジ厚を便宜値として与える。
     let body = format!(
-        "<StbSecRoll-H name=\"{}\" type=\"H\" A=\"{}\" B=\"{}\" t1=\"{}\" t2=\"{}\" r=\"0\"/>",
+        "<StbSecRoll-H name=\"{}\" type=\"H\" A=\"{}\" B=\"{}\" t1=\"{}\" t2=\"{}\" r=\"{}\"/>",
         esc(&name),
         num(height),
         num(width),
         num(web_thick),
+        num(flange_thick),
         num(flange_thick)
     );
     (name, body)
@@ -157,11 +202,14 @@ fn h_figure(height: f64, width: f64, web_thick: f64, flange_thick: f64) -> (Stri
 /// 角形鋼管の形鋼図形名と `StbSecSteel` エントリ（鋼断面・CFT 角形で共用）。
 fn box_figure(height: f64, width: f64, thick: f64) -> (String, String) {
     let name = format!("BOX-{}x{}x{}", num(height), num(width), num(thick));
+    // type は BCP/BCR/STKR/ELSE のいずれか（種別を内部で持たないため ELSE）。r（角部半径）は
+    // length>0 が必須で取り込みでは無視されるため、板厚を便宜値として与える。
     let body = format!(
-        "<StbSecRoll-BOX name=\"{}\" type=\"BOX\" A=\"{}\" B=\"{}\" t=\"{}\" r=\"0\"/>",
+        "<StbSecRoll-BOX name=\"{}\" type=\"ELSE\" A=\"{}\" B=\"{}\" t=\"{}\" r=\"{}\"/>",
         esc(&name),
         num(height),
         num(width),
+        num(thick),
         num(thick)
     );
     (name, body)
@@ -336,6 +384,7 @@ fn steel_figure(shape: &SectionShape) -> Option<(String, String)> {
 
 /// 鋼柱断面 `StbSecColumn_S`。`strength` は形鋼参照へ付す `strength_main` 属性（空可）。
 fn steel_column(id: u32, sec: &Section, figure: &str, strength: &str) -> String {
+    let id = sid(id);
     format!(
         "      <StbSecColumn_S id=\"{}\" name=\"{}\" kind_column=\"COLUMN\">\n\
          \x20       <StbSecSteelFigureColumn_S>\n\
@@ -351,6 +400,7 @@ fn steel_column(id: u32, sec: &Section, figure: &str, strength: &str) -> String 
 
 /// 鋼梁断面 `StbSecBeam_S`。
 fn steel_beam(id: u32, sec: &Section, figure: &str, strength: &str) -> String {
+    let id = sid(id);
     format!(
         "      <StbSecBeam_S id=\"{}\" name=\"{}\" kind_beam=\"GIRDER\">\n\
          \x20       <StbSecSteelFigureBeam_S>\n\
@@ -391,32 +441,68 @@ fn rc_beam_figure(shape: &SectionShape) -> Option<String> {
     }
 }
 
-/// 配筋（[`RcRebar`]）を配筋要素の属性文字列へ整形する。
-/// `X`/`Y` は内部モデルの `main_x`（せい方向）/`main_y`（幅方向）主筋セットに対応する
-/// ラベルであり、ST-Bridge の平面軸（`width_X`/`width_Y`）とは別概念（Squid 往復用）。
-/// 方向別に本数・径・段数を、帯筋（せん断補強筋）に径・ピッチ・組数・材質を、加えてかぶりを持つ。
-/// 併せて、他社リーダ向けに実 ST-Bridge 風の名前（`N_main_X_1st`/`D_main`/`D_band` 等）も併記する。
-fn rebar_attrs(r: &RcRebar) -> String {
-    let mut s = format!(
-        "count_main_X=\"{cx}\" count_main_Y=\"{cy}\" count_main_layers_X=\"{lx}\" count_main_layers_Y=\"{ly}\" \
-         dia_main_X=\"{dx}\" dia_main_Y=\"{dy}\" dia_main=\"{dx}\" \
-         dia_band=\"{db}\" pitch_band=\"{pb}\" count_band=\"{nb}\" cover=\"{cv}\" \
-         N_main_X_1st=\"{cx}\" N_main_Y_1st=\"{cy}\" D_main=\"{dx}\" D_band=\"{db}\"",
-        cx = r.main_x.count,
-        cy = r.main_y.count,
-        lx = r.main_x.layers,
-        ly = r.main_y.layers,
-        dx = num(r.main_x.dia),
-        dy = num(r.main_y.dia),
-        db = num(r.shear.dia),
-        pb = num(r.shear.pitch),
-        nb = r.shear.legs,
-        cv = num(r.cover),
-    );
-    if let Some(g) = &r.shear.grade {
-        s.push_str(&format!(" strength_band=\"{}\"", esc(g)));
+/// 配筋（[`RcRebar`]）を配筋子要素（`*_Same`）の属性文字列へ整形する（標準名のみ）。
+/// かぶりは配置コンテナ側に付くため、ここには含めない。
+/// - 柱（`is_beam=false`）: `D_main`・`N_main_X_1st`・`N_main_Y_1st`・帯筋 `D_band`・
+///   `pitch_band`・`N_band_direction_X`/`_Y`・`strength_band`。
+/// - 梁（`is_beam=true`）: `D_main`・`N_main_top_1st`・`N_main_bottom_1st`・あばら筋
+///   `D_stirrup`・`pitch_stirrup`・`N_stirrup`・`strength_stirrup`。
+fn rebar_attrs(r: &RcRebar, is_beam: bool) -> String {
+    if is_beam {
+        let mut s = format!(
+            "D_main=\"{dm}\" N_main_top_1st=\"{nt}\" N_main_bottom_1st=\"{nb}\" \
+             D_stirrup=\"{ds}\" pitch_stirrup=\"{ps}\" N_stirrup=\"{ns}\"",
+            dm = num(r.main_x.dia),
+            nt = r.main_x.count,
+            nb = r.main_y.count,
+            ds = num(r.shear.dia),
+            ps = num(r.shear.pitch),
+            ns = r.shear.legs,
+        );
+        if let Some(g) = &r.shear.grade {
+            s.push_str(&format!(" strength_stirrup=\"{}\"", esc(g)));
+        }
+        s
+    } else {
+        let mut s = format!(
+            "D_main=\"{dm}\" N_main_X_1st=\"{nx}\" N_main_Y_1st=\"{ny}\" \
+             D_band=\"{db}\" pitch_band=\"{pb}\" N_band_direction_X=\"{nb}\" N_band_direction_Y=\"{nb}\"",
+            dm = num(r.main_x.dia),
+            nx = r.main_x.count,
+            ny = r.main_y.count,
+            db = num(r.shear.dia),
+            pb = num(r.shear.pitch),
+            nb = r.shear.legs,
+        );
+        if let Some(g) = &r.shear.grade {
+            s.push_str(&format!(" strength_band=\"{}\"", esc(g)));
+        }
+        s
     }
-    s
+}
+
+/// 梁配筋コンテナのかぶり属性（`cover>0` のときのみ。ST-Bridge の length は >0 必須なので
+/// かぶり 0＝未指定は属性ごと省く）。
+fn cover_attr_beam(cover: f64) -> String {
+    if cover > 0.0 {
+        let cv = num(cover);
+        format!(" depth_cover_top=\"{cv}\" depth_cover_bottom=\"{cv}\"")
+    } else {
+        String::new()
+    }
+}
+
+/// 柱配筋コンテナのかぶり属性（`cover>0` のときのみ）。
+fn cover_attr_column(cover: f64) -> String {
+    if cover > 0.0 {
+        let cv = num(cover);
+        format!(
+            " depth_cover_start_X=\"{cv}\" depth_cover_end_X=\"{cv}\" \
+             depth_cover_start_Y=\"{cv}\" depth_cover_end_Y=\"{cv}\""
+        )
+    } else {
+        String::new()
+    }
 }
 
 /// RC 柱断面の配筋 `StbSecBarArrangementColumn_RC`（矩形/円形）。配筋の無い形状は空文字。
@@ -427,11 +513,12 @@ fn rebar_arrangement_column(shape: &SectionShape) -> String {
         _ => return String::new(),
     };
     format!(
-        "        <StbSecBarArrangementColumn_RC>\n\
+        "        <StbSecBarArrangementColumn_RC{}>\n\
          \x20         <{} {}/>\n\
          \x20       </StbSecBarArrangementColumn_RC>\n",
+        cover_attr_column(r.cover),
         child,
-        rebar_attrs(r)
+        rebar_attrs(r, false)
     )
 }
 
@@ -442,14 +529,16 @@ fn rebar_arrangement_beam(shape: &SectionShape) -> String {
         _ => return String::new(),
     };
     format!(
-        "        <StbSecBarArrangementBeam_RC>\n\
+        "        <StbSecBarArrangementBeam_RC{}>\n\
          \x20         <StbSecBarBeam_RC_Same {}/>\n\
          \x20       </StbSecBarArrangementBeam_RC>\n",
-        rebar_attrs(r)
+        cover_attr_beam(r.cover),
+        rebar_attrs(r, true)
     )
 }
 
-/// RC 柱断面 `StbSecColumn_RC`（図形＋配筋）。`id_mat` は要素へ付す `id_material` 属性（空可）。
+/// RC 柱断面 `StbSecColumn_RC`（図形＋配筋）。`mat` は要素へ付す `strength_concrete`
+/// グレード名属性（空可）。
 fn rc_column(
     id: u32,
     sec: &Section,
@@ -457,6 +546,7 @@ fn rc_column(
     figure_body: &str,
     id_mat: &str,
 ) -> String {
+    let id = sid(id);
     format!(
         "      <StbSecColumn_RC id=\"{}\" name=\"{}\"{}>\n\
          \x20       <StbSecFigureColumn_RC>\n\
@@ -480,6 +570,7 @@ fn rc_beam(
     figure_body: &str,
     id_mat: &str,
 ) -> String {
+    let id = sid(id);
     format!(
         "      <StbSecBeam_RC id=\"{}\" name=\"{}\"{}>\n\
          \x20       <StbSecFigureBeam_RC>\n\
@@ -514,6 +605,7 @@ fn cft_figure(shape: &SectionShape, steel: &mut SteelLibrary) -> Option<String> 
 /// CFT 柱断面 `StbSecColumn_CFT`（充填鋼管の形鋼参照）。`id_mat` は充填コンクリートの
 /// `id_material` 属性（空可）。
 fn cft_column(id: u32, sec: &Section, figure: &str, id_mat: &str) -> String {
+    let id = sid(id);
     format!(
         "      <StbSecColumn_CFT id=\"{}\" name=\"{}\"{}>\n\
          \x20       <StbSecSteelFigureColumn_CFT>\n\
@@ -600,6 +692,7 @@ fn src_section(
     } else {
         "StbSecSteelColumn_SRC_Same"
     };
+    let id = sid(id);
     format!(
         "      <{elem} id=\"{id}\" name=\"{name}\"{id_mat} strength_steel=\"{grade}\">\n\
          \x20       <{fig_wrap}>\n\
@@ -642,19 +735,29 @@ fn rebar_arrangement_generic(shape: &SectionShape, is_beam: bool, kind: &str) ->
             format!("StbSecBarColumn_{kind}_RectSame"),
         )
     };
+    // かぶりは配置コンテナへ（梁は top/bottom、柱は start_X/end_X/start_Y/end_Y。0 は省く）。
+    let cover_attr = if is_beam {
+        cover_attr_beam(r.cover)
+    } else {
+        cover_attr_column(r.cover)
+    };
     format!(
-        "        <{}>\n\
+        "        <{}{}>\n\
          \x20         <{} {}/>\n\
          \x20       </{}>\n",
         wrap,
+        cover_attr,
         child,
-        rebar_attrs(r),
+        rebar_attrs(r, is_beam),
         wrap
     )
 }
 
-/// `StbSecRaw` フォールバック（既定モードと同一形式）。
+/// 標準 ST-Bridge で表現できない断面（形状未定義・CFT 梁・RC 円形梁など）の
+/// 最終フォールバック。ST-Bridge に汎用物性断面が無いため、物性直持ちの拡張要素
+/// `StbSecRaw` で残す（他ソフトは解釈できないが、参照部材の断面リンクは保たれる）。
 fn raw(id: u32, sec: &Section) -> String {
+    let id = sid(id);
     format!(
         "      <StbSecRaw id=\"{}\" name=\"{}\" area=\"{}\" iy=\"{}\" iz=\"{}\" j=\"{}\" depth=\"{}\" width=\"{}\"/>\n",
         id,
@@ -680,9 +783,9 @@ pub(super) fn standard_sections(model: &Model) -> StandardSections {
     };
 
     let sec_mat = section_materials(model);
-    // 断面へ付す材料属性（ST-Bridge は材料を断面側に持つ）。鋼は形鋼参照へ strength_main、
-    // RC/CFT/SRC は要素へ id_material を付す。柱用・梁用で異材料を共有する断面でも役割別に
-    // 正しい材料を付す（役割側に材料が無ければもう一方で代用）。
+    // 断面へ付す材料属性（ST-Bridge は材料を断面側にグレード名で持つ）。鋼は形鋼参照へ
+    // strength_main、RC/CFT/SRC のコンクリートは要素へ strength_concrete を付す。柱用・梁用で
+    // 異材料を共有する断面でも役割別に正しい材料を付す（役割側に材料が無ければもう一方で代用）。
     let mat_of = |base: u32, is_beam: bool| -> Option<(i64, String)> {
         let rm = sec_mat.get(&base)?;
         if is_beam {
@@ -697,15 +800,22 @@ pub(super) fn standard_sections(model: &Model) -> StandardSections {
             _ => String::new(),
         }
     };
+    // RC/CFT/SRC のコンクリート材料はグレード名（`Fc21` 等）を strength_concrete に付す。
     let id_mat_attr = |base: u32, is_beam: bool| -> String {
         match mat_of(base, is_beam) {
-            Some((id, _)) if id >= 0 => format!(" id_material=\"{}\"", id),
+            Some((_, name)) if !name.is_empty() => {
+                format!(" strength_concrete=\"{}\"", esc(&name))
+            }
             _ => String::new(),
         }
     };
 
     let mut steel = SteelLibrary::default();
-    let mut body = String::new();
+    // 断面要素は `StbSections` のスキーマ順（柱 RC/S/SRC/CFT → 梁 RC/S/SRC → …）へ
+    // 並べる必要があるため、(順位, XML) で集めて最後に整列する。同順位内は生成順を保つ。
+    // 順位: Column_RC=0, Column_S=1, Column_SRC=2, Column_CFT=3, Beam_RC=4, Beam_S=5,
+    //       Beam_SRC=6, その他フォールバック(StbSecRaw)=90。
+    let mut parts: Vec<(u8, String)> = Vec::new();
     let mut col_map: HashMap<u32, u32> = HashMap::new();
     let mut beam_map: HashMap<u32, u32> = HashMap::new();
 
@@ -721,17 +831,18 @@ pub(super) fn standard_sections(model: &Model) -> StandardSections {
         if let Some((fig_name, fig_body)) = steel_fig {
             steel.add(&fig_name, fig_body);
             if need_col {
-                body.push_str(&steel_column(
-                    base,
-                    sec,
-                    &fig_name,
-                    &strength_attr(base, false),
+                parts.push((
+                    1,
+                    steel_column(base, sec, &fig_name, &strength_attr(base, false)),
                 ));
                 col_map.insert(base, base);
             }
             if need_beam {
                 let bid = if need_col { alloc() } else { base };
-                body.push_str(&steel_beam(bid, sec, &fig_name, &strength_attr(base, true)));
+                parts.push((
+                    5,
+                    steel_beam(bid, sec, &fig_name, &strength_attr(base, true)),
+                ));
                 beam_map.insert(base, bid);
             }
             continue;
@@ -746,7 +857,7 @@ pub(super) fn standard_sections(model: &Model) -> StandardSections {
             let shape = sec.shape.as_ref().unwrap();
             if need_col {
                 let fig = cft_figure(shape, &mut steel).expect("CFT 図形");
-                body.push_str(&cft_column(base, sec, &fig, &id_mat_attr(base, false)));
+                parts.push((3, cft_column(base, sec, &fig, &id_mat_attr(base, false))));
                 col_map.insert(base, base);
             }
             if need_beam {
@@ -755,7 +866,7 @@ pub(super) fn standard_sections(model: &Model) -> StandardSections {
                 } else {
                     base
                 };
-                body.push_str(&raw(bid, sec));
+                parts.push((90, raw(bid, sec)));
                 beam_map.insert(base, bid);
             }
             continue;
@@ -766,13 +877,16 @@ pub(super) fn standard_sections(model: &Model) -> StandardSections {
             let shape = sec.shape.as_ref().unwrap();
             let steel_fig = src_steel_figure(shape, &mut steel).expect("SRC 内蔵鉄骨図形");
             if need_col {
-                body.push_str(&src_section(
-                    base,
-                    sec,
-                    false,
-                    shape,
-                    &steel_fig,
-                    &id_mat_attr(base, false),
+                parts.push((
+                    2,
+                    src_section(
+                        base,
+                        sec,
+                        false,
+                        shape,
+                        &steel_fig,
+                        &id_mat_attr(base, false),
+                    ),
                 ));
                 col_map.insert(base, base);
             }
@@ -782,13 +896,9 @@ pub(super) fn standard_sections(model: &Model) -> StandardSections {
                 } else {
                     base
                 };
-                body.push_str(&src_section(
-                    bid,
-                    sec,
-                    true,
-                    shape,
-                    &steel_fig,
-                    &id_mat_attr(base, true),
+                parts.push((
+                    6,
+                    src_section(bid, sec, true, shape, &steel_fig, &id_mat_attr(base, true)),
                 ));
                 beam_map.insert(base, bid);
             }
@@ -802,7 +912,10 @@ pub(super) fn standard_sections(model: &Model) -> StandardSections {
             if need_col {
                 // 円形など梁図形が無い場合も柱としては出力できる。
                 if let Some(fig) = &rc_col_fig {
-                    body.push_str(&rc_column(base, sec, shape, fig, &id_mat_attr(base, false)));
+                    parts.push((
+                        0,
+                        rc_column(base, sec, shape, fig, &id_mat_attr(base, false)),
+                    ));
                     col_map.insert(base, base);
                 }
             }
@@ -813,7 +926,7 @@ pub(super) fn standard_sections(model: &Model) -> StandardSections {
                     } else {
                         base
                     };
-                    body.push_str(&rc_beam(bid, sec, shape, fig, &id_mat_attr(base, true)));
+                    parts.push((4, rc_beam(bid, sec, shape, fig, &id_mat_attr(base, true))));
                     beam_map.insert(base, bid);
                 } else {
                     // 梁で使われるが梁図形に落ちない形状（例: RC 円形）は Raw で残す。
@@ -822,7 +935,7 @@ pub(super) fn standard_sections(model: &Model) -> StandardSections {
                     } else {
                         base
                     };
-                    body.push_str(&raw(bid, sec));
+                    parts.push((90, raw(bid, sec)));
                     beam_map.insert(base, bid);
                 }
             }
@@ -830,25 +943,30 @@ pub(super) fn standard_sections(model: &Model) -> StandardSections {
             // 梁図形しか無い（RcRect を柱に使わない）ケースでも need_col=true のとき
             // rc_col_fig=Some なので出力済み。念のため未出力なら Raw で残す。
             if !col_map.contains_key(&base) && !beam_map.contains_key(&base) {
-                body.push_str(&raw(base, sec));
+                parts.push((90, raw(base, sec)));
                 col_map.insert(base, base);
                 beam_map.insert(base, base);
             }
             continue;
         }
 
-        // フォールバック: SRC・CFT・耐震壁・形状未定義。Raw は柱/梁で型分けされないため
+        // フォールバック: 耐震壁・形状未定義。Raw は柱/梁で型分けされないため
         // 両者とも同一 id を参照する。
-        body.push_str(&raw(base, sec));
+        parts.push((90, raw(base, sec)));
         col_map.insert(base, base);
         beam_map.insert(base, base);
     }
 
-    let mut sections_xml = body;
-    sections_xml.push_str(&steel.render());
-
+    // スキーマ順（順位）に整列して結合する。同順位内は生成順（安定ソート）を保つ。
+    parts.sort_by_key(|(rank, _)| *rank);
+    let mut sections_xml = String::new();
+    for (_, xml) in &parts {
+        sections_xml.push_str(xml);
+    }
+    // StbSecSteel（形鋼ライブラリ）は呼び出し側でスラブ・壁断面の後に付す。
     StandardSections {
         sections_xml,
+        steel_lib: steel.render(),
         col_map,
         beam_map,
     }

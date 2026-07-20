@@ -41,15 +41,14 @@ impl App {
         }
     }
 
-    /// 「ST-Bridge 書出…」ダイアログを表示して保存先を尋ねる。
-    /// `mode` で断面表現（Raw＝物性直持ち／Standard＝標準断面要素）を選ぶ。
-    pub(crate) fn export_stbridge_dialog(&mut self, mode: squid_n_io::stbridge::SectionExportMode) {
+    /// 「ST-Bridge 書出…」ダイアログを表示して保存先を尋ね、標準 ST-Bridge で書き出す。
+    pub(crate) fn export_stbridge_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("ST-Bridge", &["stb", "xml"])
             .set_file_name("model.stb")
             .save_file()
         {
-            self.export_stbridge_to(path, mode);
+            self.export_stbridge_to(path);
         }
     }
 

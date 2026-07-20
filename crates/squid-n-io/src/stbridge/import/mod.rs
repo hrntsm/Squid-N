@@ -1,16 +1,17 @@
 //! ST-Bridge パース（Import）。設計書 §12.5。
 //!
-//! [`import_stbridge`] は次の 2 系統の断面表現を読み取れる。
-//! - **物性直持ち**（`StbSecRaw`）: Squid-N の既定書き出し（[`SectionExportMode::Raw`](super::SectionExportMode)）。
-//! - **ST-Bridge 標準の断面要素**（`StbSecColumn_S`/`StbSecBeam_S`/`StbSecColumn_RC`/
-//!   `StbSecBeam_RC`）＋形鋼ライブラリ（`StbSecSteel`）: BIM/他社ソフトや
-//!   [`SectionExportMode::Standard`](super::SectionExportMode) の書き出し。形鋼名から内部の
-//!   [`SectionShape`] を復元し、断面性能を再算定する。
+//! [`import_stbridge`] は ST-Bridge 標準スキーマ（2.0.2）の断面要素
+//! （`StbSecColumn_S`/`StbSecBeam_S`/`StbSecColumn_RC`/`StbSecBeam_RC`/`StbSecColumn_CFT`/
+//! `StbSecColumn_SRC`/`StbSecBeam_SRC`/`StbSecSlab_RC`/`StbSecSlabDeck`/`StbSecWall_RC`）＋
+//! 形鋼ライブラリ（`StbSecSteel`）を解釈する。形鋼名から内部の [`SectionShape`] を復元し、
+//! 断面性能を再算定する。材料は断面のグレード名（鋼 `strength_main`、RC/SRC/CFT の
+//! `strength_concrete`）から標準材料表（[`material_std`]）で物性へ解決する。
+//! 後方互換のため、Squid-N が過去に書き出した物性直持ち `StbSecRaw` も読み取れる。
 //!
-//! 標準断面は柱用（`StbSecColumn_*`）と梁用（`StbSecBeam_*`）に型分けされ、
-//! Squid-N が Standard 書き出しで柱・梁共有断面を分割した結果として断面 id が
-//! 文書順に整列しないことがある。取り込み後に断面 id を整列・再採番し、部材の
-//! 断面参照（`id_section`）を張り替える。
+//! 標準断面は柱用（`StbSecColumn_*`）と梁用（`StbSecBeam_*`）に型分けされ、柱・梁共有断面の
+//! 分割などで断面 id が文書順に整列しないことがある。取り込み後に断面 id を整列・再採番し、
+//! 部材の断面参照（`id_section`）を張り替える。node/material/story/section/element の id が
+//! 1 始まりや歯抜けでも 0 始まり連番へ正規化する。
 
 use super::StbError;
 use squid_n_core::ids::{ElemId, LoadCaseId, MaterialId, NodeId, SectionId, SlabId, StoryId};
@@ -21,6 +22,7 @@ use squid_n_core::model::{
 use squid_n_core::section_shape::{RcRebar, SectionShape};
 use std::collections::HashMap;
 
+mod material_std;
 mod rebar;
 mod steel;
 mod xml;
@@ -88,16 +90,19 @@ struct PendingMember {
     material: Option<u32>,
     /// `id_material` 属性がファイルに存在したか。存在する（=-1 含む）場合は部材が材料を
     /// 明示しているとみなし、断面材料の伝播を行わない（往復で None→Some 化を防ぐ）。
-    /// 属性が無い（実 ST-Bridge 相当）ときのみ断面材料を伝播する。
+    /// 属性が無い場合のみ断面材料を伝播する。
     has_material_attr: bool,
-    ref_vec: [f64; 3],
+    /// 部材軸まわりの断面回転角 [deg]（ST-Bridge `rotate`）。ref_vector は節点座標が
+    /// 揃う構築時に軸と `rotate` から算出する。
+    rotate: f64,
+    /// 部材端の接合条件 [i, j]（`condition_bottom`/`top`・`condition_start`/`end`）。
+    end_cond: [EndCondition; 2],
 }
 
 /// 取り込み途中の節点（id 正規化前）。
 struct RawNode {
     file_id: u32,
     coord: [f64; 3],
-    story: Option<u32>,
 }
 
 /// 取り込み途中の層（id 正規化前）。
@@ -105,8 +110,7 @@ struct RawStory {
     file_id: u32,
     name: String,
     elevation: f64,
-    /// 実 ST-Bridge の `StbStory` 直下 `StbNodeIdList/StbNodeId` が示す所属節点
-    /// （file node id 列）。Squid 方言は `StbNode` の `story` 属性を使うため空になる。
+    /// `StbStory` 直下 `StbNodeIdList/StbNodeId` が示す所属節点（file node id 列）。
     node_ids: Vec<u32>,
 }
 
@@ -166,22 +170,28 @@ enum CurSec {
         name: String,
         geom: Option<RcGeom>,
         rebar: Option<RcRebar>,
-        mat_id: Option<u32>,
+        /// 配筋コンテナ（`StbSecBarArrangement*`）側に付くかぶり [mm]。実 ST-Bridge は
+        /// かぶりをコンテナに、本数・径を子の `*_Same` に持つため別枠で控える。
+        rebar_cover: Option<f64>,
+        /// 断面のコンクリート材料（数値 id または `strength_concrete` グレード名）。
+        mat: Option<SecMatRef>,
     },
     Cft {
         file_id: u32,
         name: String,
         steel_name: Option<String>,
-        mat_id: Option<u32>,
+        mat: Option<SecMatRef>,
     },
     Src {
         file_id: u32,
         name: String,
         geom: Option<(f64, f64)>,
         rebar: Option<RcRebar>,
+        /// 配筋コンテナ側に付くかぶり [mm]（[`CurSec::Rc`] と同じ）。
+        rebar_cover: Option<f64>,
         steel_name: Option<String>,
         grade: String,
-        mat_id: Option<u32>,
+        mat: Option<SecMatRef>,
     },
     /// RC スラブ断面（`StbSecSlab_RC`）。子の図形要素から厚さを集める。
     Slab {
@@ -224,9 +234,9 @@ const UNSUPPORTED_ELEMENTS: &[&str] = &[
     "StbStripFooting",
     "StbParapet",
     "StbOpen",
-    // 断面（基礎・開口。鋼ブレース断面 StbSecBrace_S・StbSecSlab_RC・StbSecWall_RC は対応済み）
+    // 断面（基礎・開口。鋼ブレース断面 StbSecBrace_S・StbSecSlab_RC・StbSecWall_RC・
+    // デッキ合成スラブ StbSecSlabDeck は対応済み。鋼スラブ StbSecSlab_S は未対応）
     "StbSecSlab_S",
-    "StbSecSlabDeck",
     "StbSecFoundation_RC",
     "StbSecFoundationColumn_RC",
     "StbSecFoundationColumn_SRC",
@@ -236,6 +246,27 @@ const UNSUPPORTED_ELEMENTS: &[&str] = &[
     "StbSecPile_PC",
     "StbSecParapet_RC",
     "StbSecOpen_RC",
+];
+
+/// `StbMembers` 直下の部材グループコンテナ（複数形）。実 ST-Bridge は部材を
+/// `StbMembers > StbColumns > StbColumn` のように複数形コンテナへ入れ子にする
+/// （Squid 方言は `StbMembers > StbColumn` と直下に置く）。これらのコンテナ自体は
+/// 単なる入れ物なので未対応警告の対象にせず、その直属子で未対応のものだけを
+/// 「取り込み対象外」として拾う（fail-loud。取り込みループの `other` 分岐を参照）。
+const MEMBER_GROUP_CONTAINERS: &[&str] = &[
+    "StbColumns",
+    "StbPosts",
+    "StbGirders",
+    "StbBeams",
+    "StbBraces",
+    "StbSlabs",
+    "StbWalls",
+    "StbFootings",
+    "StbStripFootings",
+    "StbFoundationColumns",
+    "StbPiles",
+    "StbParapets",
+    "StbOpens",
 ];
 
 /// ST-Bridge ファイルを読み込み、UTF-8 文字列へデコードする。
@@ -343,26 +374,17 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                         version_ok = true;
                     }
                     "StbNode" => {
-                        let story = match get_i64(&a, "story") {
-                            Some(s) if s >= 0 => Some(s as u32),
-                            _ => None,
-                        };
                         raw_nodes.push(RawNode {
                             file_id: get_u32(&a, "id")?,
-                            // 座標属性は Squid-N 方言（小文字）と ST-Bridge 標準（大文字）の双方を許容。
-                            coord: [
-                                get_f64_any(&a, &["x", "X"])?,
-                                get_f64_any(&a, &["y", "Y"])?,
-                                get_f64_any(&a, &["z", "Z"])?,
-                            ],
-                            story,
+                            // 座標は ST-Bridge 標準の大文字 `X`/`Y`/`Z`。
+                            coord: [get_f64(&a, "X")?, get_f64(&a, "Y")?, get_f64(&a, "Z")?],
                         });
                     }
                     "StbStory" => {
                         raw_stories.push(RawStory {
                             file_id: get_u32(&a, "id")?,
                             name: a.get("name").cloned().unwrap_or_default(),
-                            elevation: get_f64_any(&a, &["height", "Z"])?,
+                            elevation: get_f64(&a, "height")?,
                             node_ids: Vec::new(),
                         });
                         // 直下の StbNodeIdList/StbNodeId をこの階へ集める窓を開く
@@ -448,7 +470,8 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                             name: a.get("name").cloned().unwrap_or_default(),
                             geom: None,
                             rebar: None,
-                            mat_id: mat_id_of(&a),
+                            rebar_cover: None,
+                            mat: sec_mat_ref_of(&a),
                         };
                     }
                     "StbSecColumn_RC_Rect" => {
@@ -486,7 +509,7 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                             file_id: get_u32(&a, "id")?,
                             name: a.get("name").cloned().unwrap_or_default(),
                             steel_name: None,
-                            mat_id: mat_id_of(&a),
+                            mat: sec_mat_ref_of(&a),
                         };
                     }
                     // --- 断面: 標準要素（SRC） ---
@@ -496,13 +519,14 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                             name: a.get("name").cloned().unwrap_or_default(),
                             geom: None,
                             rebar: None,
+                            rebar_cover: None,
                             steel_name: None,
                             grade: a
                                 .get("strength_steel")
                                 .or_else(|| a.get("strength_main_S"))
                                 .cloned()
                                 .unwrap_or_default(),
-                            mat_id: mat_id_of(&a),
+                            mat: sec_mat_ref_of(&a),
                         };
                     }
                     "StbSecColumn_SRC_Rect" => {
@@ -525,7 +549,32 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                             }
                         }
                     }
-                    // 配筋（RC / SRC の StbSecBarArrangement* 子要素）。現在の断面種別へ格納。
+                    // 配筋コンテナ（`StbSecBarArrangement*`）。実 ST-Bridge はかぶり
+                    // （`depth_cover_*`）を配置コンテナ側に、本数・径を子の `*_Same` 側に持つ。
+                    // 本数・径は下の `*_Same` 分岐で拾うため、ここではかぶりのみを控える。
+                    tag if tag.starts_with("StbSecBarArrangement") => {
+                        if let Ok(c) = get_f64_any(
+                            &a,
+                            &[
+                                "depth_cover",
+                                "depth_cover_top",
+                                "depth_cover_bottom",
+                                "depth_cover_start",
+                                "depth_cover_start_X",
+                                "depth_cover_end_X",
+                                "depth_cover_start_Y",
+                                "cover",
+                                "kaburi",
+                            ],
+                        ) {
+                            match &mut cur {
+                                CurSec::Rc { rebar_cover, .. } => *rebar_cover = Some(c),
+                                CurSec::Src { rebar_cover, .. } => *rebar_cover = Some(c),
+                                _ => {}
+                            }
+                        }
+                    }
+                    // 配筋（RC / SRC の StbSecBar{Column,Beam}_*_Same 子要素）。現在の断面種別へ格納。
                     tag if tag.starts_with("StbSecBarColumn_")
                         || tag.starts_with("StbSecBarBeam_") =>
                     {
@@ -572,10 +621,12 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                     "StbBrace" => {
                         let st = get_u32(&a, "id_node_start")?;
                         let en = get_u32(&a, "id_node_end")?;
+                        // `feature_brace`（既定 TENSION）。TENSIONANDCOMPRESSION のみ
+                        // 引張圧縮両用、それ以外（TENSION・未指定）は引張専用。
                         let tension_only = a
-                            .get("tension_only")
-                            .map(|v| v == "true" || v == "1")
-                            .unwrap_or(false);
+                            .get("feature_brace")
+                            .map(|v| v != "TENSIONANDCOMPRESSION")
+                            .unwrap_or(true);
                         pending_members.push(make_member(
                             &a,
                             st,
@@ -605,19 +656,22 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                             return Err(StbError::Parse("StbNodalLoad outside StbLoadCase".into()));
                         }
                     }
-                    // --- スラブ断面（StbSecSlab_RC）: 厚さを子要素から集める ---
-                    "StbSecSlab_RC" => {
+                    // --- スラブ断面: RC（StbSecSlab_RC）／デッキ合成（StbSecSlabDeck）。
+                    //     厚さ（コンクリート部せい）を図形の子要素から集める。 ---
+                    "StbSecSlab_RC" | "StbSecSlabDeck" => {
                         cur = CurSec::Slab {
                             file_id: get_u32(&a, "id")?,
-                            // 一部方言は厚さを StbSecSlab_RC の直属性に持つ。
-                            thickness: get_f64_any(&a, &["thickness", "t", "depth", "D"]).ok(),
+                            thickness: get_f64_any(&a, &["depth", "thickness", "t", "D"]).ok(),
                         };
                     }
-                    // スラブ断面の図形（厚さ）。方言差を吸収して複数キーを許容する。
-                    "StbSecSlab_RC_Straight" | "StbSecFigureSlab_RC" => {
+                    // スラブ断面の図形（厚さ = `depth`）。RC・デッキ双方の図形要素を受ける。
+                    "StbSecSlab_RC_Straight"
+                    | "StbSecFigureSlab_RC"
+                    | "StbSecSlabDeckStraight"
+                    | "StbSecFigureSlabDeck" => {
                         if let CurSec::Slab { thickness, .. } = &mut cur {
                             // 厚さ属性を持つ図形要素なら更新、無ければ既存値を保持。
-                            *thickness = get_f64_any(&a, &["thickness", "t", "depth", "D"])
+                            *thickness = get_f64_any(&a, &["depth", "thickness", "t", "D"])
                                 .ok()
                                 .or(*thickness);
                         }
@@ -682,15 +736,22 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                             }
                         }
                     }
-                    // 未対応の要素はデータ欠落として集計する（fail-loud）。明示リストに
-                    // 加え、部材（StbMembers）・断面（StbSections、ただし形鋼ライブラリ
-                    // コンテナ StbSecSteel は除く）・荷重（StbLoadCase）の直属子で未対応の
-                    // ものは、リスト外の未知要素であっても「取り込み対象外」として拾う。
+                    // 未対応の要素はデータ欠落として集計する（fail-loud）。明示リストに加え、
+                    // 部材グループコンテナ（StbColumns 等）の直属子・断面（StbSections、ただし
+                    // 形鋼ライブラリコンテナ StbSecSteel は除く）・荷重（StbLoadCase）の直属子で
+                    // 未対応のものは、リスト外の未知要素であっても「取り込み対象外」として拾う。
+                    // グループコンテナ自体（StbColumns 等）や StbMembers は入れ物なので拾わない。
                     other => {
-                        let skipped_data = UNSUPPORTED_ELEMENTS.contains(&other)
-                            || matches!(parent, Some("StbMembers"))
-                            || (matches!(parent, Some("StbSections")) && other != "StbSecSteel")
-                            || matches!(parent, Some("StbLoadCase"));
+                        let is_group_container =
+                            other == "StbMembers" || MEMBER_GROUP_CONTAINERS.contains(&other);
+                        let parent_is_member_group =
+                            parent.is_some_and(|p| MEMBER_GROUP_CONTAINERS.contains(&p));
+                        let skipped_data = !is_group_container
+                            && (UNSUPPORTED_ELEMENTS.contains(&other)
+                                || parent_is_member_group
+                                || (matches!(parent, Some("StbSections"))
+                                    && other != "StbSecSteel")
+                                || matches!(parent, Some("StbLoadCase")));
                         if skipped_data {
                             *unsupported.entry(other.to_string()).or_insert(0) += 1;
                         }
@@ -729,13 +790,20 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                             name,
                             geom,
                             rebar,
-                            mat_id,
+                            rebar_cover,
+                            mat,
                         } = std::mem::replace(&mut cur, CurSec::None)
                         {
                             match geom {
                                 Some(geom) => {
                                     // 配筋が無い（幾何のみの）ファイルは無筋相当の既定配筋で補う。
-                                    let rebar = rebar.unwrap_or_else(default_rebar);
+                                    let mut rebar = rebar.unwrap_or_else(default_rebar);
+                                    // かぶりが配筋要素側に無ければ配置コンテナ側の値を採る。
+                                    if rebar.cover == 0.0 {
+                                        if let Some(c) = rebar_cover {
+                                            rebar.cover = c;
+                                        }
+                                    }
                                     let shape = match geom {
                                         RcGeom::Rect { b, d } => {
                                             SectionShape::RcRect { b, d, rebar }
@@ -746,7 +814,7 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                                         file_id,
                                         name,
                                         kind: PendingSecKind::Shape(shape),
-                                        mat: mat_id.map(SecMatRef::Id),
+                                        mat,
                                     });
                                 }
                                 None => warnings.push(format!(
@@ -760,14 +828,14 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                             file_id,
                             name,
                             steel_name,
-                            mat_id,
+                            mat,
                         } = std::mem::replace(&mut cur, CurSec::None)
                         {
                             pending_secs.push(PendingSec {
                                 file_id,
                                 name,
                                 kind: PendingSecKind::CftRef(steel_name),
-                                mat: mat_id.map(SecMatRef::Id),
+                                mat,
                             });
                         }
                     }
@@ -777,31 +845,40 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
                             name,
                             geom,
                             rebar,
+                            rebar_cover,
                             steel_name,
                             grade,
-                            mat_id,
+                            mat,
                         } = std::mem::replace(&mut cur, CurSec::None)
                         {
                             match geom {
-                                Some((b, d)) => pending_secs.push(PendingSec {
-                                    file_id,
-                                    name,
-                                    mat: mat_id.map(SecMatRef::Id),
-                                    kind: PendingSecKind::SrcRef {
-                                        b,
-                                        d,
-                                        rebar: rebar.unwrap_or_else(default_rebar),
-                                        steel_name,
-                                        grade,
-                                    },
-                                }),
+                                Some((b, d)) => {
+                                    let mut rebar = rebar.unwrap_or_else(default_rebar);
+                                    if rebar.cover == 0.0 {
+                                        if let Some(c) = rebar_cover {
+                                            rebar.cover = c;
+                                        }
+                                    }
+                                    pending_secs.push(PendingSec {
+                                        file_id,
+                                        name,
+                                        mat,
+                                        kind: PendingSecKind::SrcRef {
+                                            b,
+                                            d,
+                                            rebar,
+                                            steel_name,
+                                            grade,
+                                        },
+                                    });
+                                }
                                 None => warnings.push(format!(
                                     "SRC 断面 (id={file_id}, name=\"{name}\") の図形を認識できず取り込めませんでした"
                                 )),
                             }
                         }
                     }
-                    "StbSecSlab_RC" => {
+                    "StbSecSlab_RC" | "StbSecSlabDeck" => {
                         // 厚さが取れたスラブ断面のみ登録する（cur は必ず None へ戻す）。
                         if let CurSec::Slab {
                             file_id,
@@ -931,17 +1008,16 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
             coord: n.coord,
             restraint: squid_n_core::dof::Dof6Mask::FREE,
             mass: None,
-            // 節点自身の story 属性（Squid 方言）を優先し、無ければ階の所属節点リストから引く。
-            story: n
-                .story
-                .or_else(|| node_story_from_list.get(&n.file_id).copied())
-                .and_then(|sfid| story_index.get(&sfid).copied())
+            // 節点の所属階は `StbStory/StbNodeIdList` から引く（標準スキーマ）。
+            story: node_story_from_list
+                .get(&n.file_id)
+                .and_then(|sfid| story_index.get(sfid).copied())
                 .map(StoryId),
         });
     }
 
-    // 階の所属節点リストを節点の story 属性からも補完する（StbNodeIdList を持たない
-    // Squid 方言でも Story.node_ids を完全にする。StbNodeIdList 由来との重複は除く）。
+    // 念のため、節点の story から Story.node_ids を補完する
+    // （StbNodeIdList 由来との重複は除く）。
     for node in &model.nodes {
         if let Some(sid) = node.story {
             let list = &mut model.stories[sid.index()].node_ids;
@@ -964,6 +1040,45 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
             fc: m.fc,
             fy: m.fy,
         });
+    }
+
+    // ST-Bridge 2.0 の StbModel は材料テーブル（E・ν・密度）を持たず、材料は断面に付く
+    // グレード名（コンクリート `Fc21`、鋼種 `SN400B`、鉄筋 `SD345` 等）で表す。日本の
+    // 構造材料は規格化されており名前が物性を一意に定めるため、断面が参照するグレード名を
+    // 標準材料表で物性へ解決し、同名の材料がまだ無ければ材料として追加する。
+    {
+        use std::collections::HashSet;
+        let mut existing: HashSet<String> =
+            model.materials.iter().map(|m| m.name.clone()).collect();
+        // 文書順で決定的に列挙し、重複名は最初の 1 回だけ追加する。
+        let mut grades: Vec<&str> = Vec::new();
+        for p in &pending_secs {
+            if let Some(SecMatRef::Grade(name)) = &p.mat {
+                if !name.is_empty() && !grades.contains(&name.as_str()) {
+                    grades.push(name.as_str());
+                }
+            }
+        }
+        for name in grades {
+            if existing.contains(name) {
+                continue;
+            }
+            if let Some(std) = material_std::resolve_grade(name) {
+                let id = MaterialId(model.materials.len() as u32);
+                model.materials.push(Material {
+                    concrete_class: Default::default(),
+                    id,
+                    name: name.to_string(),
+                    young: std.young,
+                    poisson: std.poisson,
+                    density: std.density,
+                    shear: None,
+                    fc: std.fc,
+                    fy: std.fy,
+                });
+                existing.insert(name.to_string());
+            }
+        }
     }
 
     // 断面側の材料参照を、部材への伝播用に file id → 正規化後 material index へ解決する。
@@ -1026,27 +1141,27 @@ pub fn import_stbridge_with_report(xml: &str) -> Result<(Model, ImportReport), S
             })
             .map(MaterialId);
         let id = ElemId(model.elements.len() as u32);
-        // ブレースは軸材なので両端ピン、梁・柱は既定で剛接合とする（ST-Bridge は端部
-        // 接合条件を持たないため取り込み後の既定値）。
+        // 梁・柱は端部接合条件（`condition_*`）を尊重し、ブレースは軸材なので両端ピン。
         let (kind, end_cond) = match m.kind {
-            PendingMemberKind::Beam => (
-                ElementKind::Beam,
-                [EndCondition::Fixed, EndCondition::Fixed],
-            ),
+            PendingMemberKind::Beam => (ElementKind::Beam, m.end_cond),
             PendingMemberKind::Brace { tension_only } => (
                 ElementKind::Brace { tension_only },
                 [EndCondition::Pinned, EndCondition::Pinned],
             ),
         };
+        // ref_vector は部材軸（節点座標）と `rotate` から算出する。
+        let ref_vector = ref_vector_from_rotate(
+            model.nodes[ni as usize].coord,
+            model.nodes[nj as usize].coord,
+            m.rotate,
+        );
         model.elements.push(ElementData {
             id,
             kind,
             nodes: smallvec::smallvec![NodeId(ni), NodeId(nj)],
             section,
             material,
-            local_axis: LocalAxis {
-                ref_vector: m.ref_vec,
-            },
+            local_axis: LocalAxis { ref_vector },
             end_cond,
             force_regime: ForceRegime::Auto,
             rigid_zone: Default::default(),
@@ -1408,13 +1523,20 @@ fn zero_section(id: SectionId, name: String) -> Section {
     }
 }
 
-/// 断面要素に付いた材料 id（`id_material` / `id_material_concrete` / `id_material_rc`）。
-fn mat_id_of(a: &HashMap<String, String>) -> Option<u32> {
-    get_i64(a, "id_material")
+/// RC/SRC/CFT 断面のコンクリート材料参照。数値 id（`id_material` 系）を優先し、
+/// 無ければ ST-Bridge 標準のグレード名 `strength_concrete`（`Fc21` 等）を採る。
+fn sec_mat_ref_of(a: &HashMap<String, String>) -> Option<SecMatRef> {
+    let id = get_i64(a, "id_material")
         .or_else(|| get_i64(a, "id_material_concrete"))
         .or_else(|| get_i64(a, "id_material_rc"))
-        .filter(|v| *v >= 0)
-        .map(|v| v as u32)
+        .filter(|v| *v >= 0);
+    if let Some(v) = id {
+        return Some(SecMatRef::Id(v as u32));
+    }
+    a.get("strength_concrete")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .map(SecMatRef::Grade)
 }
 
 fn make_member(
@@ -1432,10 +1554,12 @@ fn make_member(
         Some(m) if m >= 0 => Some(m as u32),
         _ => None,
     };
-    let ref_vec = [
-        get_f64(a, "rx").unwrap_or(0.0),
-        get_f64(a, "ry").unwrap_or(0.0),
-        get_f64(a, "rz").unwrap_or(1.0),
+    // 断面回転角（`rotate`、既定 0）。ref_vector は構築時に軸から算出する。
+    let rotate = get_f64(a, "rotate").unwrap_or(0.0);
+    // 端部接合条件（柱は bottom/top、大梁・小梁は start/end。既定は FIX）。
+    let end_cond = [
+        end_condition_of(a, &["condition_bottom", "condition_start"]),
+        end_condition_of(a, &["condition_top", "condition_end"]),
     ];
     Ok(PendingMember {
         kind,
@@ -1444,6 +1568,72 @@ fn make_member(
         section,
         material,
         has_material_attr,
-        ref_vec,
+        rotate,
+        end_cond,
     })
+}
+
+/// 部材端の接合条件属性（`FIX`/`PIN`）を [`EndCondition`] へ写す。既定・未知は `Fixed`。
+fn end_condition_of(a: &HashMap<String, String>, keys: &[&str]) -> EndCondition {
+    for k in keys {
+        if let Some(v) = a.get(*k) {
+            return match v.as_str() {
+                "PIN" => EndCondition::Pinned,
+                _ => EndCondition::Fixed,
+            };
+        }
+    }
+    EndCondition::Fixed
+}
+
+/// 部材軸（`p_i`→`p_j`）まわりに断面回転角 `rotate` [deg] を適用した ref_vector を返す。
+/// `rotate=0` の基準は、水平材は鉛直上（グローバル Z）、鉛直材はグローバル X 方向。
+/// これは従来の既定 ref_vector と同一の局所座標系を与える（水平材で [0,0,1]）。
+fn ref_vector_from_rotate(p_i: [f64; 3], p_j: [f64; 3], rotate_deg: f64) -> [f64; 3] {
+    let axis = {
+        let d = [p_j[0] - p_i[0], p_j[1] - p_i[1], p_j[2] - p_i[2]];
+        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if l < 1e-9 {
+            [0.0, 0.0, 1.0]
+        } else {
+            [d[0] / l, d[1] / l, d[2] / l]
+        }
+    };
+    // 軸が鉛直に近ければ基準を X、そうでなければ Z にとる。
+    let base = if axis[2].abs() > 0.99 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    // base を軸に直交化して rotate=0 の基準 ref0 を得る。
+    let bdot = base[0] * axis[0] + base[1] * axis[1] + base[2] * axis[2];
+    let ref0 = {
+        let r = [
+            base[0] - bdot * axis[0],
+            base[1] - bdot * axis[1],
+            base[2] - bdot * axis[2],
+        ];
+        let l = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt();
+        if l < 1e-9 {
+            base
+        } else {
+            [r[0] / l, r[1] / l, r[2] / l]
+        }
+    };
+    if rotate_deg.abs() < 1e-9 {
+        return ref0;
+    }
+    // ref0 を軸まわりに rotate 回転（ロドリゲスの回転公式。ref0⊥axis なので簡約形）。
+    let th = rotate_deg.to_radians();
+    let (s, c) = (th.sin(), th.cos());
+    let cross = [
+        axis[1] * ref0[2] - axis[2] * ref0[1],
+        axis[2] * ref0[0] - axis[0] * ref0[2],
+        axis[0] * ref0[1] - axis[1] * ref0[0],
+    ];
+    [
+        ref0[0] * c + cross[0] * s,
+        ref0[1] * c + cross[1] * s,
+        ref0[2] * c + cross[2] * s,
+    ]
 }
