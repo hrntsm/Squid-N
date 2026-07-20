@@ -50,7 +50,7 @@ impl App {
     /// Squid-N プロジェクト（.scz）とは別物なので project_path はクリアする。
     pub fn import_stbridge_from(&mut self, path: std::path::PathBuf) {
         self.last_error = None;
-        let xml = match std::fs::read_to_string(&path) {
+        let xml = match squid_n_io::stbridge::read_stbridge_file(&path) {
             Ok(s) => s,
             Err(e) => {
                 self.last_error = Some(format!("ST-Bridge読込エラー: {}", e));

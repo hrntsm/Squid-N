@@ -221,6 +221,47 @@ fn test_reject_v1() {
 }
 
 #[test]
+fn test_read_stbridge_file_shift_jis() {
+    use encoding_rs::SHIFT_JIS;
+    let m = representative_model();
+    let xml = export_stbridge(&m).unwrap();
+    // Shift_JIS には変換できない文字（XML 宣言の UTF-8 等）を避けるため、
+    // 日本語を含む注釈を付与した上で Shift_JIS へエンコードする。
+    let with_jp = format!("<!-- 柱と梁のモデル -->\n{}", xml);
+    let (encoded, _, _) = SHIFT_JIS.encode(&with_jp);
+
+    let dir = std::env::temp_dir().join("squid_n_test_stb_sjis");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("shift_jis.stb");
+    std::fs::write(&path, encoded.as_ref()).unwrap();
+
+    let decoded = read_stbridge_file(&path).expect("Shift_JIS デコード");
+    let m2 = import_stbridge(&decoded).expect("取り込み");
+    assert!(m2.validate().is_ok());
+    assert_eq!(m2.nodes.len(), m.nodes.len());
+}
+
+#[test]
+fn test_read_stbridge_file_utf8_bom() {
+    let m = representative_model();
+    let xml = export_stbridge(&m).unwrap();
+    let bytes = {
+        let mut b = vec![0xEF, 0xBB, 0xBF];
+        b.extend_from_slice(xml.as_bytes());
+        b
+    };
+    let dir = std::env::temp_dir().join("squid_n_test_stb_bom");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("utf8_bom.stb");
+    std::fs::write(&path, bytes).unwrap();
+
+    let decoded = read_stbridge_file(&path).expect("UTF-8 BOM デコード");
+    assert!(decoded.starts_with("<?xml") || decoded.starts_with("<!--"));
+    let m2 = import_stbridge(&decoded).expect("取り込み");
+    assert!(m2.validate().is_ok());
+}
+
+#[test]
 fn test_imported_model_validates() {
     let m = representative_model();
     let xml = export_stbridge(&m).unwrap();

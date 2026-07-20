@@ -34,7 +34,7 @@ mod import;
 mod section_std;
 
 pub use export::{export_stbridge, export_stbridge_with};
-pub use import::{import_stbridge, import_stbridge_with_report, ImportReport};
+pub use import::{import_stbridge, import_stbridge_with_report, read_stbridge_file, ImportReport};
 
 /// ST-Bridge 書き出し時の断面表現モード。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -64,6 +64,10 @@ pub enum StbError {
     Version(String),
     #[error("unmappable element: {0}")]
     Unmappable(String),
+    #[error("read: {0}")]
+    Io(String),
+    #[error("decode: {0}")]
+    Decode(String),
 }
 
 const STB_VERSION: &str = "2.0.0";

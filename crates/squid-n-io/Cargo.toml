@@ -16,6 +16,7 @@ arrow      = { workspace = true }
 parquet    = { workspace = true }
 quick-xml  = { workspace = true }
 smallvec   = { workspace = true }
+encoding_rs = { workspace = true }
 squid-n-core    = { path = "../squid-n-core" }
 squid-n-element = { path = "../squid-n-element" }
 
