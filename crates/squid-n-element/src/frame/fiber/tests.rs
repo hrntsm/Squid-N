@@ -18,8 +18,10 @@ fn make_test_beam_element(as_val: f64) -> crate::beam::BeamElement {
         g: 78846.15,
         a: 20000.0,
         a_mass: 20000.0,
-        iy: 66666666.66666667,
-        iz: 16666666.66666667,
+        // 要素座標系のフィールド値: せい 200（ローカル y 方向）× 幅 100 の矩形。
+        // iz（Mz 面、∫y²dA）=強軸 100·200³/12、iy（My 面、∫z²dA）=弱軸 200·100³/12。
+        iy: 16666666.66666667,
+        iz: 66666666.66666667,
         j: 0.0,
         as_y: as_val,
         as_z: as_val,
@@ -247,7 +249,9 @@ fn test_fiber_steel_yields_with_fy() {
         model: &Model::default(),
     };
     // 端部 ry に十分大きな逆対称回転を与え、曲げで降伏させる。
-    let big = 0.1;
+    // My 面の縁距離は幅/2=50mm（ファイバ座標は要素座標系: y=せい・z=幅）のため、
+    // 降伏後モーメントが弾性値の 1/2 を明確に下回るだけの曲率倍率を確保する。
+    let big = 0.2;
     let du = LocalVec {
         data: smallvec::smallvec![0.0, 0.0, 0.0, 0.0, big, 0.0, 0.0, 0.0, 0.0, 0.0, -big, 0.0],
     };
@@ -558,7 +562,9 @@ fn test_yield_progression() {
                 density: 0.0,
                 shear: Some(0.0),
                 fc: None,
-                fy: None,
+                // fy 未設定だと Bilinear の降伏点が 1e20 となり降伏しない
+                // （テストが恒等比較になってしまう）ため明示する。
+                fy: Some(235.0),
             }],
             ..Default::default()
         };
@@ -571,7 +577,9 @@ fn test_yield_progression() {
     let state = ElemState::default();
 
     let eps_y = 235.0 / 205000.0;
-    let z_max = 100.0;
+    // My 面（κy）の縁距離はファイバ座標の |z| 最大 = 幅/2 = 50mm
+    // （ファイバ座標は要素座標系: y=せい・z=幅）。
+    let z_max = 50.0;
     let ky_y = eps_y / z_max;
     let ky_final = ky_y * 3.0;
 

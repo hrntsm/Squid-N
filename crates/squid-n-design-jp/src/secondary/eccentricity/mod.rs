@@ -39,8 +39,8 @@ pub(crate) mod test_support {
     /// 柱: 底 z=0（拘束）・頂 z=3000、story=Some(S0)。
     /// 梁: 上端節点間を X 方向・Y 方向に接続（同一 section）。
     /// 質量: 上端4節点に等質量（mass[0]=1.0）。
-    /// section_iz_override: 右側 2 本（x=6000）の柱の iz を指定値に差し替え（None なら全同一）。
-    pub(crate) fn build_symmetric_frame(section_iz_override: Option<f64>) -> (Model, StoryId) {
+    /// section_iy_override: 右側 2 本（x=6000）の柱の iy を指定値に差し替え（None なら全同一）。
+    pub(crate) fn build_symmetric_frame(section_iy_override: Option<f64>) -> (Model, StoryId) {
         use smallvec::SmallVec;
         use squid_n_core::dof::Dof6Mask;
         use squid_n_core::ids::{ElemId, MaterialId, NodeId, SectionId};
@@ -65,11 +65,11 @@ pub(crate) mod test_support {
             thickness: None,
             shape: None,
         };
-        // 右側柱用 section（iz を上書き）
+        // 右側柱用 section（iy を上書き）
         let sec_right = Section {
             id: SectionId(1),
             name: "col_right".to_string(),
-            iz: section_iz_override.unwrap_or(1.0e6),
+            iy: section_iy_override.unwrap_or(1.0e6),
             ..sec_base.clone()
         };
         // 梁用 section: iz を非常に大きくして全柱で a ≈ 1（kbar→∞）にする。
@@ -152,9 +152,10 @@ pub(crate) mod test_support {
         // 部材構築ヘルパー
         // 柱の ref_vector = [0,1,0] にすると:
         //   ex=[0,0,1], ey=[0,1,0](Y軸), ez=[1,0,0](X軸)
-        //   I_globalX = iz·ey[0]² + iy·ez[0]² = iz·0 + iy·1 = iy → Dx ∝ iy
-        //   I_globalY = iz·ey[1]² + iy·ez[1]² = iz·1 + iy·0 = iz → Dy ∝ iz（★意図）
-        // これにより「右側柱の iz を 3 倍 → Dy が 3 倍 → 剛心 Xs = 4500」が成立。
+        // model_extract.rs は断面→要素座標系のクロス変換（elem iz ← sec.iy）を行うため:
+        //   I_globalX = elem_iz·ey[0]² + elem_iy·ez[0]² = elem_iy·1 = sec.iz → Dx ∝ sec.iz
+        //   I_globalY = elem_iz·ey[1]² + elem_iy·ez[1]² = elem_iz·1 = sec.iy → Dy ∝ sec.iy（★意図）
+        // これにより「右側柱の iy を 3 倍 → Dy が 3 倍 → 剛心 Xs = 4500」が成立。
         let col_local_axis = LocalAxis {
             ref_vector: [0.0, 1.0, 0.0],
         };
@@ -166,7 +167,7 @@ pub(crate) mod test_support {
         // 柱: bottom i → top i+4
         // 左側 (x=0): SectionId(0)、右側 (x=6000): SectionId(0 or 1)
         let col_sec = |i: usize| -> SectionId {
-            if section_iz_override.is_some() && (xy[i][0] - 6000.0).abs() < 1.0 {
+            if section_iy_override.is_some() && (xy[i][0] - 6000.0).abs() < 1.0 {
                 SectionId(1)
             } else {
                 SectionId(0)
@@ -219,7 +220,7 @@ pub(crate) mod test_support {
             });
         }
 
-        let sections = if section_iz_override.is_some() {
+        let sections = if section_iy_override.is_some() {
             vec![sec_base, sec_right, sec_beam]
         } else {
             vec![

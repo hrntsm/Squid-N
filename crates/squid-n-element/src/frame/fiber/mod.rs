@@ -50,6 +50,16 @@ fn build_gauss_fibers(
             _ => {}
         }
     }
+
+    // `rect_fiber_section`（および主筋配置）の座標規約は y=幅方向・z=せい方向だが、
+    // 要素座標系はせい方向＝ローカル y（LocalFrame: ey=ref_vector 直交化）のため、
+    // x 軸まわりの 90° 回転 (y,z)←(z,−y) で並べ替え、強軸曲げ（せい方向の応力勾配）が
+    // Mz 面（κz・∫y²dA、(uy,rz) ブロック）に対応するようにする。
+    for f in &mut fibers {
+        let (y, z) = (f.y, f.z);
+        f.y = z;
+        f.z = -y;
+    }
     (FiberSection { fibers }, mats)
 }
 
@@ -224,8 +234,10 @@ impl FiberBeam {
         let width = sec.map(|s| s.width).unwrap_or(100.0);
         let depth = sec.map(|s| s.depth).unwrap_or(200.0);
         let torsion_j = sec.map(|s| s.j).unwrap_or(0.0);
-        let as_y = sec.map(|s| s.as_y).unwrap_or(area * 5.0 / 6.0);
-        let as_z = sec.map(|s| s.as_z).unwrap_or(area * 5.0 / 6.0);
+        // クロス変換（beam/construct.rs と同一規約）: 要素ローカル y 方向せん断
+        // （uy、Mz 面と対）には断面 as_z（ウェブ）、z 方向には as_y（フランジ）を用いる。
+        let as_y = sec.map(|s| s.as_z).unwrap_or(area * 5.0 / 6.0);
+        let as_z = sec.map(|s| s.as_y).unwrap_or(area * 5.0 / 6.0);
 
         let shear = crate::shear_spring::ShearSpring::new(length, g, as_y, as_z);
 
@@ -300,8 +312,11 @@ impl FiberBeam {
         let width = sec.map(|s| s.width).unwrap_or(100.0);
         let depth = sec.map(|s| s.depth).unwrap_or(200.0);
         let area = sec.map(|s| s.area).unwrap_or(width * depth);
-        let iy = sec.map(|s| s.iy).unwrap_or(1.0);
-        let iz = sec.map(|s| s.iz).unwrap_or(1.0);
+        // 断面レイヤ→要素座標系のクロス変換（beam/construct.rs と同一規約）。
+        // 断面 iy（強軸）は要素座標系では z 軸まわり（Mz 面）＝EIz へ、
+        // 断面 iz（弱軸）は y 軸まわり（My 面）＝EIy へ対応する。
+        let iy = sec.map(|s| s.iz).unwrap_or(1.0);
+        let iz = sec.map(|s| s.iy).unwrap_or(1.0);
 
         // 端部積分点: ξ=∓1、重み w·(L/2) = Lp → w = 2Lp/L
         let w_end = 2.0 * lp / l;

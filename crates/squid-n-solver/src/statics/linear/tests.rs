@@ -359,9 +359,10 @@ fn test_linear_static_axial_cantilever() {
 }
 
 /// X 軸上の片持ち梁に「グローバル Y 方向」の先端荷重をかける。
-/// 参照ベクトル [0,0,1] では local z = global −y となるので、たわみは
-/// **iy** で決まる（iz ではない）。to_global を欠くと iz を使ってしまい誤る。
-/// よって iy≠iz の断面で、δ = PL³/(3E·iy) に一致することを確認する。
+/// 参照ベクトル [0,0,1] では local y = global Z（鉛直上）、local z = global −Y と
+/// なるので、水平（Y 方向）たわみは弱軸＝断面 **iz** で決まる（iy=強軸ではない）。
+/// クロス変換（construct.rs）または to_global を欠くと iy を使ってしまい誤る。
+/// よって iy≠iz の断面で、δ = PL³/(3E·iz) に一致することを確認する。
 #[test]
 fn test_beam_to_global_transverse_uses_correct_inertia() {
     // 現実的な鋼材大断面（iz=1e9 級）を用いる：to_global 修正の検証に加え、
@@ -381,12 +382,12 @@ fn test_beam_to_global_transverse_uses_correct_inertia() {
 
     let result = linear_static_once(&model, LoadCaseId(1)).unwrap();
     let uy = result.disp[1][1];
-    let expected = p * l.powi(3) / (3.0 * e * iy); // 曲げ支配（iy 使用）
-    let buggy = p * l.powi(3) / (3.0 * e * iz); // 誤った値=iz 使用（2倍）
-                                                // iy ベースの値に一致し、iz ベース(2倍)を明確に排除する。
+    let expected = p * l.powi(3) / (3.0 * e * iz); // 水平たわみ＝弱軸（iz 使用）
+    let buggy = p * l.powi(3) / (3.0 * e * iy); // 誤った値=iy（強軸）使用（1/2倍）
+                                                // iz ベースの値に一致し、iy ベース(1/2)を明確に排除する。
     assert!(
         (uy - expected).abs() / expected < 1e-3,
-        "uy={} expected(iy)={} buggy(iz)={}",
+        "uy={} expected(iz)={} buggy(iy)={}",
         uy,
         expected,
         buggy
