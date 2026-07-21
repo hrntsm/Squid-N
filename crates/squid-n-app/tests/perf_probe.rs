@@ -297,6 +297,11 @@ fn fmt_ms(d: std::time::Duration) -> String {
 }
 
 fn run_case(label: &str, nx: usize, ny: usize, n_stories: usize, with_slabs: bool) {
+    {
+        use std::io::Write;
+        println!(">>> starting {label} grid {nx}x{ny} x {n_stories} (slabs={with_slabs}) ...");
+        std::io::stdout().flush().ok();
+    }
     let model = build_grid_model(nx, ny, n_stories, with_slabs);
     let n_nodes = model.nodes.len();
     let n_elems = model.elements.len();
@@ -338,6 +343,8 @@ fn run_case(label: &str, nx: usize, ny: usize, n_stories: usize, with_slabs: boo
     println!("  ---------------------------------------------------------");
     println!("  sum(1..5) manual replay                   : {}", fmt_ms(sum));
     println!("  generate_stories_action (whole, fresh app): {}", fmt_ms(t_whole));
+    use std::io::Write;
+    std::io::stdout().flush().ok();
 }
 
 /// Not a correctness test -- an ad-hoc timing harness. `#[ignore]` so it does
@@ -355,4 +362,13 @@ fn perf_probe_generate_stories_action() {
     run_case("F wide+tall ", 15, 15, 20, true);
     // No-slab variant at the largest size, to isolate the slab-processing cost.
     run_case("G large,noSlab", 10, 10, 20, false);
+}
+
+/// Same as above but only the two smallest cases -- used to calibrate how long
+/// a single case takes before committing to the full sweep (see task notes).
+#[test]
+#[ignore = "perf probe calibration subset -- run explicitly with --release --ignored"]
+fn perf_probe_calibration_small() {
+    run_case("A small     ", 5, 5, 5, true);
+    run_case("B medium-w  ", 10, 10, 5, true);
 }
