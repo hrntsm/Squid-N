@@ -228,123 +228,198 @@ impl Analysis<'_> {
         self.solve_and_recover(&f_free)
     }
 
-    /// 地震静的解析の水平力（Ai 分布）を荷重ケースとして構築して返す。
-    /// `seismic_static_with` の載荷部分を切り出したもので、主軸の計算
-    /// （主軸の計算（構造力学）の P ベクトル）にも用いる。
-    pub fn build_seismic_load_case(
-        &self,
-        cfg: SeismicCfg,
-    ) -> Result<squid_n_core::model::LoadCase, SolveError> {
-        let SeismicCfg {
-            dir,
-            mode,
-            z,
-            soil,
-            c0,
-        } = cfg;
-        let stories = &self.model.stories;
-        if stories.is_empty() {
-            return Err(SolveError::InvalidInput(
-                "階(Story)が定義されていません。地震荷重(Ai分布)には階の定義・地震重量・剛床(ダイアフラム)が必要です。解析タブの「階の自動生成」を実行してください。".into(),
-            ));
-        }
-
-        let (t, _) = match mode {
+    /// 地震荷重ケース構築に用いる設計用固有周期 T [s] を算定する。
+    ///
+    /// - `AiMode::Approx`: 略算式 T = h(0.02+0.01α)（令88条・昭和55年建設省
+    ///   告示第1793号）。h は建築物の高さ（GL〜PH 階を除く最上階。地下深さ・
+    ///   塔屋は含めない。従来の「最上階の生 Z 標高」は、基部が Z=0 に無い
+    ///   モデルや地下階付きモデルで h を誤っていた）。
+    /// - `AiMode::SemiPrecise`: 固有値解析（1 次モード）による周期。
+    ///
+    /// T は加力方向（X/Y）によらず同一の値になるため、[`Self::build_seismic_load_case`]
+    /// が X・Y 双方向で呼ばれる場合に本関数を 1 回だけ呼び、その結果を
+    /// [`Self::build_seismic_load_case_with_period`] へ渡すことで、固有値解析
+    /// （部分空間反復）の重複実行を避けられる。
+    pub fn seismic_period(&self, mode: AiMode) -> Result<f64, SolveError> {
+        match mode {
             AiMode::Approx => {
-                // h は建築物の高さ（GL〜PH 階を除く最上階。地下深さ・塔屋は含めない。
-                // 令88条・告示1793号）。従来の「最上階の生 Z 標高」は、基部が
-                // Z=0 に無いモデルや地下階付きモデルで h を誤っていた。
                 let height_m = building_height_mm(self.model) / 1000.0;
                 let steel_ratio = steel_height_ratio(self.model);
-                (squid_n_load::ai::approx_t(height_m, steel_ratio), 0)
+                Ok(squid_n_load::ai::approx_t(height_m, steel_ratio))
             }
             AiMode::SemiPrecise => {
                 // 固有周期は載荷方向に依存しないため、同一 Analysis 上での
                 // 2 回目以降（EX→EY 等）はキャッシュを返し固有値解析を省く。
-                let t = if let Some(&t) = self.semi_precise_t.get() {
-                    t
-                } else {
-                    let modal = eigen::solve_eigen(self.model, &self.dofmap, &self.reducer, 1)?;
-                    let t = modal.period.first().copied().unwrap_or(0.3);
-                    let _ = self.semi_precise_t.set(t);
-                    t
-                };
-                (t, 0)
-            }
-        };
-
-        let tc = squid_n_load::ai::tc_of(soil);
-        let rt_val = squid_n_load::ai::rt(t, tc);
-
-        let story_weights: Vec<f64> = stories
-            .iter()
-            .map(|s| s.seismic_weight.unwrap_or(0.0))
-            .collect();
-
-        if story_weights.is_empty() || story_weights.iter().all(|&w| w == 0.0) {
-            return Err(SolveError::InvalidInput(
-                "階の地震重量(seismic_weight)がすべて 0 です。各階の重量を設定してください。"
-                    .into(),
-            ));
-        }
-
-        // PH（塔屋）階・地下階を含む階種別ごとの層せん断力算定式に対応する
-        // （seismic_shear_distribution。全階 Normal なら ai_distribution と厳密一致）。
-        // 主系統の重量（Qi 用）は ci_override（副剛床の Ci 直接入力）を持つ剛床の
-        // 重量を除外する（main_system_weight。§副剛床のCi直接入力）。
-        // α・Ai・Ci は「全剛床の場合の Ci」に従うため、副剛床を含む階全体の
-        // 重量（ci_weight = seismic_weight）から算定する。
-        let specs: Vec<squid_n_load::ai::StorySeismicSpec> = stories
-            .iter()
-            .map(|s| squid_n_load::ai::StorySeismicSpec {
-                weight: main_system_weight(s),
-                ci_weight: s.seismic_weight.unwrap_or(0.0),
-                level_kind: s.level_kind,
-            })
-            .collect();
-        let ai = squid_n_load::ai::seismic_shear_distribution(&specs, z, rt_val, c0, t);
-
-        // Create a load case from the Ai distribution horizontal forces
-        let lc_id = LoadCaseId(1001);
-        let dir_vec = match dir {
-            SeismicDir::X => [1.0, 0.0, 0.0],
-            SeismicDir::Y => [0.0, 1.0, 0.0],
-        };
-
-        // Attach Pi forces to master nodes of each story's diaphragms（多剛床の階
-        // では重量比で按分し、ci_override を持つ副剛床には指定 Ci による力を
-        // 別途作用させる。§1.6・distribute_seismic_forces 参照）。
-        let mut lc = squid_n_core::model::LoadCase {
-            kind: Default::default(),
-            id: lc_id,
-            name: format!("seismic_{:?}_{:?}", dir, mode),
-            nodal: Vec::new(),
-            member: Vec::new(),
-        };
-
-        for (i, story) in stories.iter().enumerate() {
-            let pi = ai.pi.get(i).copied().unwrap_or(0.0);
-            for (master, share) in distribute_seismic_forces(story, pi) {
-                if share == 0.0 {
-                    continue;
+                if let Some(&t) = self.semi_precise_t.get() {
+                    return Ok(t);
                 }
-                let f = [dir_vec[0] * share, dir_vec[1] * share, 0.0, 0.0, 0.0, 0.0];
-                lc.nodal.push(squid_n_core::model::NodalLoad {
-                    node: master,
-                    values: f,
-                });
+                let modal = eigen::solve_eigen_with_solver(
+                    self.model,
+                    &self.dofmap,
+                    &self.reducer,
+                    1,
+                    &*self.solver,
+                )?;
+                let t = modal.period.first().copied().unwrap_or(0.3);
+                let _ = self.semi_precise_t.set(t);
+                Ok(t)
             }
         }
-
-        if lc.nodal.is_empty() {
-            return Err(SolveError::InvalidInput(
-                "地震力を作用させる剛床(ダイアフラム)が階に定義されていません。解析タブの「階の自動生成」を実行してください。".into(),
-            ));
-        }
-
-        Ok(lc)
     }
 
+    /// 地震静的解析の水平力（Ai 分布）を荷重ケースとして構築して返す。
+    /// `seismic_static_with` の載荷部分を切り出したもので、主軸の計算
+    /// （主軸の計算（構造力学）の P ベクトル）にも用いる。
+    ///
+    /// 内部的には [`Self::seismic_period`] で T を求め、
+    /// [`Self::build_seismic_load_case_with_period`] へ委譲する（挙動は従来と同一）。
+    pub fn build_seismic_load_case(
+        &self,
+        cfg: SeismicCfg,
+    ) -> Result<squid_n_core::model::LoadCase, SolveError> {
+        if self.model.stories.is_empty() {
+            return Err(SolveError::InvalidInput(
+                "階(Story)が定義されていません。地震荷重(Ai分布)には階の定義・地震重量・剛床(ダイアフラム)が必要です。解析タブの「階の自動生成」を実行してください。".into(),
+            ));
+        }
+        let t = self.seismic_period(cfg.mode)?;
+        self.build_seismic_load_case_with_period(cfg, t)
+    }
+
+    /// 設計用固有周期 T [s]（[`Self::seismic_period`] 参照）を受け取り、
+    /// Ai 分布・階水平力の算定から荷重ケース構築までを行う。
+    ///
+    /// X・Y 両方向の地震荷重ケースを構築する際、T は方向によらず同一なので、
+    /// 呼び出し側が [`Self::seismic_period`] を 1 回だけ呼んだ結果をここへ
+    /// 渡すことで、固有値解析（SemiPrecise モード）の重複実行を避けられる。
+    pub fn build_seismic_load_case_with_period(
+        &self,
+        cfg: SeismicCfg,
+        t: f64,
+    ) -> Result<squid_n_core::model::LoadCase, SolveError> {
+        build_seismic_load_case_from_model(self.model, cfg, t)
+    }
+
+    /// 地震静的解析（設計用固有周期 T 指定版）。
+    ///
+    /// [`Self::seismic_static_with`] と同じ求解を行うが、T を呼び出し側から
+    /// 受け取るため固有値解析（SemiPrecise モード）を内部で実行しない。
+    /// UI 側で「固有値解析は明示実行のみ・その結果の周期を再利用する」方針を
+    /// 実現するための入口（暗黙の固有値解析を避ける）。
+    pub fn seismic_static_with_period(
+        &self,
+        cfg: SeismicCfg,
+        t: f64,
+    ) -> Result<StaticOnce, SolveError> {
+        let lc = self.build_seismic_load_case_with_period(cfg, t)?;
+
+        if self.n_indep == 0 {
+            return Ok(self.zero_result());
+        }
+
+        let f_free = self.assemble_f_free_from_nodal(&lc.nodal);
+        self.solve_and_recover(&f_free)
+    }
+}
+
+/// 地震静的解析の水平力（Ai 分布）荷重ケースを、モデルと設計用固有周期 T から
+/// 構築する（[`Analysis`] を要しないモデル単独版）。
+///
+/// Ai 分布・階水平力の算定は剛性行列・自由度構成に依存しないため、
+/// `Analysis::prepare`（K 組立・拘束縮約・分解）なしで呼び出せる。UI 側の
+/// 「EX/EY ケースへの荷重同期」のように、解析準備前に荷重ケースだけを
+/// 構築したい場合に用いる（暗黙のフル解析準備を避ける）。
+pub fn build_seismic_load_case_from_model(
+    model: &Model,
+    cfg: SeismicCfg,
+    t: f64,
+) -> Result<squid_n_core::model::LoadCase, SolveError> {
+    let SeismicCfg {
+        dir,
+        mode,
+        z,
+        soil,
+        c0,
+    } = cfg;
+    let stories = &model.stories;
+    if stories.is_empty() {
+        return Err(SolveError::InvalidInput(
+                "階(Story)が定義されていません。地震荷重(Ai分布)には階の定義・地震重量・剛床(ダイアフラム)が必要です。解析タブの「階の自動生成」を実行してください。".into(),
+            ));
+    }
+
+    let tc = squid_n_load::ai::tc_of(soil);
+    let rt_val = squid_n_load::ai::rt(t, tc);
+
+    let story_weights: Vec<f64> = stories
+        .iter()
+        .map(|s| s.seismic_weight.unwrap_or(0.0))
+        .collect();
+
+    if story_weights.is_empty() || story_weights.iter().all(|&w| w == 0.0) {
+        return Err(SolveError::InvalidInput(
+            "階の地震重量(seismic_weight)がすべて 0 です。各階の重量を設定してください。".into(),
+        ));
+    }
+
+    // PH（塔屋）階・地下階を含む階種別ごとの層せん断力算定式に対応する
+    // （seismic_shear_distribution。全階 Normal なら ai_distribution と厳密一致）。
+    // 主系統の重量（Qi 用）は ci_override（副剛床の Ci 直接入力）を持つ剛床の
+    // 重量を除外する（main_system_weight。§副剛床のCi直接入力）。
+    // α・Ai・Ci は「全剛床の場合の Ci」に従うため、副剛床を含む階全体の
+    // 重量（ci_weight = seismic_weight）から算定する。
+    let specs: Vec<squid_n_load::ai::StorySeismicSpec> = stories
+        .iter()
+        .map(|s| squid_n_load::ai::StorySeismicSpec {
+            weight: main_system_weight(s),
+            ci_weight: s.seismic_weight.unwrap_or(0.0),
+            level_kind: s.level_kind,
+        })
+        .collect();
+    let ai = squid_n_load::ai::seismic_shear_distribution(&specs, z, rt_val, c0, t);
+
+    // Create a load case from the Ai distribution horizontal forces
+    let lc_id = LoadCaseId(1001);
+    let dir_vec = match dir {
+        SeismicDir::X => [1.0, 0.0, 0.0],
+        SeismicDir::Y => [0.0, 1.0, 0.0],
+    };
+
+    // Attach Pi forces to master nodes of each story's diaphragms（多剛床の階
+    // では重量比で按分し、ci_override を持つ副剛床には指定 Ci による力を
+    // 別途作用させる。§1.6・distribute_seismic_forces 参照）。
+    let mut lc = squid_n_core::model::LoadCase {
+        kind: Default::default(),
+        id: lc_id,
+        name: format!("seismic_{:?}_{:?}", dir, mode),
+        nodal: Vec::new(),
+        member: Vec::new(),
+    };
+
+    for (i, story) in stories.iter().enumerate() {
+        let pi = ai.pi.get(i).copied().unwrap_or(0.0);
+        for (master, share) in distribute_seismic_forces(story, pi) {
+            if share == 0.0 {
+                continue;
+            }
+            let f = [dir_vec[0] * share, dir_vec[1] * share, 0.0, 0.0, 0.0, 0.0];
+            lc.nodal.push(squid_n_core::model::NodalLoad {
+                node: master,
+                values: f,
+            });
+        }
+    }
+
+    if lc.nodal.is_empty() {
+        return Err(SolveError::InvalidInput(
+                "地震力を作用させる剛床(ダイアフラム)が階に定義されていません。解析タブの「階の自動生成」を実行してください。".into(),
+            ));
+    }
+
+    Ok(lc)
+}
+
+impl Analysis<'_> {
     /// 各節点の地震静的水平力の大きさ P [N]（`model.nodes` と同順）。
     /// 主軸の計算 `tan2Θ = −Pᵗ(uy+vx)/Pᵗ(vy−ux)` の P ベクトル用
     /// （Ai 分布は加力方向によらないため、X・Y 加力とも同じ分布）。

@@ -26,7 +26,9 @@ mod wind;
 
 pub use config::{AiMode, SeismicCfg, SeismicDir, WindStaticCfg};
 pub(crate) use seismic::distribute_pi_over_diaphragms;
-pub use seismic::{building_height_mm, ground_elevation, steel_height_ratio};
+pub use seismic::{
+    build_seismic_load_case_from_model, building_height_mm, ground_elevation, steel_height_ratio,
+};
 
 pub struct Analysis<'m> {
     model: &'m Model,
@@ -38,6 +40,23 @@ pub struct Analysis<'m> {
     /// ため、同一 `Analysis` 上で X・Y 両方向の地震荷重を構築しても固有値解析は
     /// 1 回で済む（`build_seismic_load_case`）。
     semi_precise_t: std::sync::OnceLock<f64>,
+}
+
+/// [`Analysis::prepare`] が構築した DofMap・拘束縮約・分解済みソルバを、
+/// モデルへの参照から切り離して保持する入れ物。
+///
+/// UI 側で「`prepare` → 地震荷重ケース構築 → 荷重ケースだけ更新 →
+/// 再度 `prepare`」という流れを取ると、剛性・自由度構成が変わっていないのに
+/// 毎回 K を再分解してしまう。荷重ケースの内容（`Model::load_cases`）だけを
+/// 差し替える場合は、[`Analysis::into_parts`] で分解結果を取り出しておき、
+/// 荷重ケース更新後のモデルに対して [`Analysis::from_parts`] で結合し直せば、
+/// 再分解を避けられる。フィールドは非公開で、`Analysis` の内部表現以外の
+/// 用途を持たない。
+pub struct AnalysisParts {
+    dofmap: DofMap,
+    reducer: Reducer,
+    solver: Box<dyn LinearSolver>,
+    n_indep: usize,
 }
 
 impl<'m> Analysis<'m> {
@@ -142,6 +161,45 @@ impl<'m> Analysis<'m> {
         })
     }
 
+    /// DofMap・拘束縮約・分解済みソルバをモデル参照から切り離して取り出す。
+    ///
+    /// 荷重ケースの内容だけを変えて再度解析したい場合、[`Self::prepare`] を
+    /// 呼び直す代わりに、本メソッドで取り出した [`AnalysisParts`] を
+    /// [`Self::from_parts`] で新しいモデル参照に結合し直すことで、
+    /// K の組立・拘束縮約・分解を再実行せずに済む。
+    pub fn into_parts(self) -> AnalysisParts {
+        AnalysisParts {
+            dofmap: self.dofmap,
+            reducer: self.reducer,
+            solver: self.solver,
+            n_indep: self.n_indep,
+        }
+    }
+
+    /// [`Self::into_parts`] で取り出した分解済み状態を、モデルへの参照と
+    /// 結合して `Analysis` を再構築する。
+    ///
+    /// **重要**: 節点・要素・拘束・断面/材料の割当（＝剛性と自由度構成）が
+    /// `into_parts` を呼んだ時点から変わっていない場合にのみ有効。
+    /// 荷重ケース（`Model::load_cases`）の内容の変更のみを想定しており、
+    /// `validate`/`precheck` は再実行しない。剛性・自由度構成に影響する変更
+    /// （節点座標・要素・拘束・断面/材料割当など）を行った後に呼ぶと、
+    /// 古い DofMap・分解済み K のまま解析することになり、誤った結果や
+    /// パニックの原因になる。そのような変更を行った場合は必ず
+    /// [`Self::prepare`] を呼び直すこと。
+    pub fn from_parts(model: &'m Model, parts: AnalysisParts) -> Analysis<'m> {
+        Analysis {
+            model,
+            dofmap: parts.dofmap,
+            reducer: parts.reducer,
+            solver: parts.solver,
+            n_indep: parts.n_indep,
+            // SemiPrecise 周期キャッシュは持ち越さない（モデルの荷重内容が
+            // 変わっても周期は不変だが、安全側で再算定させる）。
+            semi_precise_t: std::sync::OnceLock::new(),
+        }
+    }
+
     /// 全自由度ゼロの結果（有効自由度なしのモデル用）。
     fn zero_result(&self) -> StaticOnce {
         StaticOnce {
@@ -217,8 +275,18 @@ impl<'m> Analysis<'m> {
     }
 
     /// Solve eigenvalue problem (subspace iteration) for n_modes lowest modes.
+    ///
+    /// 既に `prepare` で分解済みの `self.solver`（縮約後剛性行列 K_red の分解）を
+    /// そのまま再利用する。固有値解析専用の再分解は行わない
+    /// （[`eigen::solve_eigen_with_solver`] 参照）。
     pub fn eigen(&self, n_modes: usize) -> Result<ModalResult, SolveError> {
-        eigen::solve_eigen(self.model, &self.dofmap, &self.reducer, n_modes)
+        eigen::solve_eigen_with_solver(
+            self.model,
+            &self.dofmap,
+            &self.reducer,
+            n_modes,
+            &*self.solver,
+        )
     }
 
     /// 複数の荷重ケースを一括で解く（分解済み K を共有）。

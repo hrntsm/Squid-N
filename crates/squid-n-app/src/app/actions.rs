@@ -27,6 +27,8 @@ impl App {
         self.nav = Navigator::default();
         self.last_static = None;
         self.last_error = None;
+        self.last_notice = None;
+        self.auto_load_sync_hash = None;
         self.staleness = Staleness::default();
         self.sync_node_edit();
         self.refresh_beam_loads();
@@ -156,51 +158,112 @@ impl App {
     ///
     /// 解析準備前にスラブ荷重・躯体自重を「DL」等の標準ケースへ（レビュー §1.1・
     /// 照合レビュー：③梁自重・②壁荷重の CMoQ 経路を長期応力解析へ接続）、
-    /// 階が定義済みなら地震荷重を「EX」「EY」ケースへ同期する。
+    /// 階が定義済みなら地震荷重を「EX」「EY」ケースへ同期する
+    /// （`sync_auto_load_cases_action`。モデル・関連設定が前回同期時から
+    /// 変わっていなければ丸ごとスキップする）。
     pub fn run_linear_static(&mut self, lc: LoadCaseId) {
         self.apply_parallelism_setting();
         self.last_error = None;
-        self.sync_gravity_load_cases_action();
-        // 剛域の反映は地震荷重の同期より先に行う（SemiPrecise の固有周期算定が
-        // 剛域込みの剛性を用いるようにするため。`sync_seismic_load_cases_action`
-        // は内部で別途 `Analysis::prepare` する）。
-        self.apply_rigid_zones_for_analysis();
-        self.sync_seismic_load_cases_action();
-        match Analysis::prepare(&self.model) {
-            Ok(analysis) => match analysis.linear_static(lc) {
-                Ok(res) => {
-                    let member_forces = res.member_forces.clone();
-                    let mut bundle = self.results.take().unwrap_or_default();
-                    let key = StaticCaseKey::User(lc);
-                    bundle.statics.retain(|(id, _)| *id != key);
-                    bundle.statics.push((key, res));
-                    bundle.member_forces = member_forces;
-                    self.results = Some(bundle);
-                    self.last_static = Some(StaticKey::Case(key));
-                    self.staleness.mark_fresh();
-                    self.run_design_check();
-                }
-                Err(e) => self.last_error = Some(format!("線形静的解析エラー: {:?}", e)),
-            },
-            Err(e) => self.last_error = Some(format!("解析準備エラー: {:?}", e)),
+        self.last_notice = None;
+        self.sync_auto_load_cases_action();
+        let res = Self::compute_linear_static(self.model.clone(), lc);
+        self.apply_static_case_result(StaticCaseKey::User(lc), res);
+    }
+
+    /// 線形静的解析の純粋計算部分。所有権を取り `&self` を使わないため、
+    /// バックグラウンドジョブ（`start_linear_static_job`）からも呼び出せる。
+    /// 剛域は呼び出し側（`sync_auto_load_cases_action`）で適用済みのモデルを
+    /// 渡す前提のため、ここでは再適用しない（二重適用を避ける）。
+    fn compute_linear_static(
+        model: squid_n_core::model::Model,
+        lc: LoadCaseId,
+    ) -> Result<squid_n_solver::linear::StaticOnce, String> {
+        match Analysis::prepare(&model) {
+            Ok(analysis) => analysis
+                .linear_static(lc)
+                .map_err(|e| format!("線形静的解析エラー: {:?}", e)),
+            Err(e) => Err(format!("解析準備エラー: {:?}", e)),
         }
+    }
+
+    /// `compute_linear_static`/`compute_seismic`/`compute_wind` に共通の結果適用
+    /// （`StaticCaseKey` で区別される単一荷重ケースの静的解析結果）。
+    /// bundle への格納・last_static 設定・staleness.mark_fresh・design_check の
+    /// 実行はいずれも `run_linear_static`/`run_seismic`/`run_wind` で同一のため、
+    /// ここへ集約し同期版・バックグラウンドジョブ双方から使う。
+    fn apply_static_case_result(
+        &mut self,
+        key: StaticCaseKey,
+        res: Result<squid_n_solver::linear::StaticOnce, String>,
+    ) {
+        match res {
+            Ok(res) => {
+                let member_forces = res.member_forces.clone();
+                let mut bundle = self.results.take().unwrap_or_default();
+                bundle.statics.retain(|(id, _)| *id != key);
+                bundle.statics.push((key, res));
+                bundle.member_forces = member_forces;
+                self.results = Some(bundle);
+                self.last_static = Some(StaticKey::Case(key));
+                self.staleness.mark_fresh();
+                self.run_design_check();
+            }
+            Err(e) => self.last_error = Some(e),
+        }
+    }
+
+    /// 線形静的解析をバックグラウンドスレッドで実行する（P8 §5）。
+    /// UI スレッドをブロックしないよう重い解析を逃がす。
+    /// 既にジョブが実行中の場合は何もしない（last_error に案内文を設定）。
+    pub fn start_linear_static_job(&mut self, lc: LoadCaseId) {
+        if self.job.is_some() {
+            self.last_error = Some("解析実行中です".to_string());
+            return;
+        }
+        self.apply_parallelism_setting();
+        self.last_error = None;
+        self.last_notice = None;
+        self.sync_auto_load_cases_action();
+        let model = self.model.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::compute_linear_static(model, lc)
+            }))
+            .unwrap_or_else(|_| {
+                Err(
+                    "解析スレッドが異常終了しました（プログラムの不具合の可能性があります）。"
+                        .to_string(),
+                )
+            });
+            let _ = tx.send(JobResult::StaticCase {
+                key: StaticCaseKey::User(lc),
+                res,
+            });
+        });
+        self.job = Some(AnalysisJob {
+            label: "線形静的解析",
+            started: std::time::SystemTime::now(),
+            rx,
+            #[cfg(feature = "gui")]
+            jump_on_success: None,
+        });
     }
 
     /// T7: 荷重組合せ解析を実行し、結果を `bundle.combos` に格納する。
     /// 指定インデックスの荷重組合せが存在しない場合はエラーメッセージをセット。
     ///
     /// 解析準備前にスラブ荷重・躯体自重を「DL」等の標準ケースへ、階が定義済み
-    /// なら地震荷重を「EX」「EY」ケースへ同期する（レビュー §1.1・照合レビュー）。
+    /// なら地震荷重を「EX」「EY」ケースへ同期する（レビュー §1.1・照合レビュー、
+    /// `sync_auto_load_cases_action`。モデル・関連設定が前回同期時から変わって
+    /// いなければ丸ごとスキップする）。
     /// 組合せが空の地震荷重ケースを参照している場合は解かずにエラーで案内する
     /// （地震項が黙って 0 になるのを防ぐ）。
     pub fn run_combination(&mut self, index: usize) {
         self.apply_parallelism_setting();
         self.last_error = None;
-        self.sync_gravity_load_cases_action();
-        // 剛域の反映は地震荷重の同期より先に行う（SemiPrecise の固有周期算定が
-        // 剛域込みの剛性を用いるようにするため）。
-        self.apply_rigid_zones_for_analysis();
-        self.sync_seismic_load_cases_action();
+        self.last_notice = None;
+        self.sync_auto_load_cases_action();
         let Some(combo) = self.model.combinations.get(index).cloned() else {
             self.last_error = Some(format!("荷重組合せ #{} が存在しません", index));
             return;
@@ -212,45 +275,113 @@ impl App {
             ));
             return;
         }
-        match Analysis::prepare(&self.model) {
-            Ok(analysis) => match analysis.linear_combination(&combo) {
-                Ok(res) => {
-                    let member_forces = res.member_forces.clone();
-                    let mut bundle = self.results.take().unwrap_or_default();
-                    // StaticKey::Combo は bundle.combos 上の位置を指す規約
-                    // （current_static・ナビゲータと共有）。再実行時は既存位置を
-                    // その場で差し替え、他の組合せ結果のキーを無効化しない。
-                    let pos = match bundle
-                        .combos
-                        .iter()
-                        .position(|(name, _)| *name == combo.name)
-                    {
-                        Some(pos) => {
-                            bundle.combos[pos].1 = res;
-                            pos
-                        }
-                        None => {
-                            bundle.combos.push((combo.name.clone(), res));
-                            bundle.combos.len() - 1
-                        }
-                    };
-                    bundle.member_forces = member_forces;
-                    self.results = Some(bundle);
-                    self.last_static = Some(StaticKey::Combo(pos));
-                    self.staleness.mark_fresh();
-                    // 荷重継続性区分（長期/短期）は組合せ内容から自動判定する
-                    // （令82条の荷重組合せ: G+P=長期、地震・積雪・風入り=短期）。
-                    self.design_term = if squid_n_load::combo::is_short_term_combo(&combo.name) {
-                        LoadTerm::Short
-                    } else {
-                        LoadTerm::Long
-                    };
-                    self.run_design_check();
-                }
-                Err(e) => self.last_error = Some(format!("荷重組合せ解析エラー: {:?}", e)),
-            },
-            Err(e) => self.last_error = Some(format!("解析準備エラー: {:?}", e)),
+        let name = combo.name.clone();
+        let res = Self::compute_combination(self.model.clone(), combo);
+        self.apply_combo_result(name, res);
+    }
+
+    /// 荷重組合せ解析の純粋計算部分。所有権を取り `&self` を使わないため、
+    /// バックグラウンドジョブ（`start_combination_job`）からも呼び出せる。
+    fn compute_combination(
+        model: squid_n_core::model::Model,
+        combo: squid_n_core::model::LoadCombination,
+    ) -> Result<squid_n_solver::linear::StaticOnce, String> {
+        match Analysis::prepare(&model) {
+            Ok(analysis) => analysis
+                .linear_combination(&combo)
+                .map_err(|e| format!("荷重組合せ解析エラー: {:?}", e)),
+            Err(e) => Err(format!("解析準備エラー: {:?}", e)),
         }
+    }
+
+    /// `compute_combination` の結果を適用する（bundle.combos への格納・
+    /// last_static 設定・design_term 自動判定・design_check の実行）。
+    /// `name` は組合せ名（`bundle.combos` 内の名前一致検索・再実行時の位置差替に
+    /// 使う。`run_combination`/`start_combination_job` 双方から使う）。
+    fn apply_combo_result(
+        &mut self,
+        name: String,
+        res: Result<squid_n_solver::linear::StaticOnce, String>,
+    ) {
+        match res {
+            Ok(res) => {
+                let member_forces = res.member_forces.clone();
+                let mut bundle = self.results.take().unwrap_or_default();
+                // StaticKey::Combo は bundle.combos 上の位置を指す規約
+                // （current_static・ナビゲータと共有）。再実行時は既存位置を
+                // その場で差し替え、他の組合せ結果のキーを無効化しない。
+                let pos = match bundle.combos.iter().position(|(n, _)| *n == name) {
+                    Some(pos) => {
+                        bundle.combos[pos].1 = res;
+                        pos
+                    }
+                    None => {
+                        bundle.combos.push((name.clone(), res));
+                        bundle.combos.len() - 1
+                    }
+                };
+                bundle.member_forces = member_forces;
+                self.results = Some(bundle);
+                self.last_static = Some(StaticKey::Combo(pos));
+                self.staleness.mark_fresh();
+                // 荷重継続性区分（長期/短期）は組合せ内容から自動判定する
+                // （令82条の荷重組合せ: G+P=長期、地震・積雪・風入り=短期）。
+                self.design_term = if squid_n_load::combo::is_short_term_combo(&name) {
+                    LoadTerm::Short
+                } else {
+                    LoadTerm::Long
+                };
+                self.run_design_check();
+            }
+            Err(e) => self.last_error = Some(e),
+        }
+    }
+
+    /// 荷重組合せ解析をバックグラウンドスレッドで実行する（P8 §5）。
+    /// UI スレッドをブロックしないよう重い解析を逃がす。
+    /// 既にジョブが実行中の場合は何もしない（last_error に案内文を設定）。
+    pub fn start_combination_job(&mut self, index: usize) {
+        if self.job.is_some() {
+            self.last_error = Some("解析実行中です".to_string());
+            return;
+        }
+        self.apply_parallelism_setting();
+        self.last_error = None;
+        self.last_notice = None;
+        self.sync_auto_load_cases_action();
+        let Some(combo) = self.model.combinations.get(index).cloned() else {
+            self.last_error = Some(format!("荷重組合せ #{} が存在しません", index));
+            return;
+        };
+        if let Some(name) = self.empty_seismic_case_in_combo(&combo) {
+            self.last_error = Some(format!(
+                "荷重組合せ「{}」が参照する地震荷重ケース「{}」が空です。解析タブの「階の自動生成」を実行して地震荷重を生成してください。",
+                combo.name, name
+            ));
+            return;
+        }
+        let model = self.model.clone();
+        let name = combo.name.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::compute_combination(model, combo)
+            }))
+            .unwrap_or_else(|_| {
+                Err(
+                    "解析スレッドが異常終了しました（プログラムの不具合の可能性があります）。"
+                        .to_string(),
+                )
+            });
+            let _ = tx.send(JobResult::Combo { name, res });
+        });
+        self.job = Some(AnalysisJob {
+            label: "荷重組合せ解析",
+            started: std::time::SystemTime::now(),
+            rx,
+            #[cfg(feature = "gui")]
+            jump_on_success: None,
+        });
     }
 
     /// 全荷重組合せを一括解析し、結果を `bundle.combos` へ格納する
@@ -265,29 +396,35 @@ impl App {
     pub fn run_all_combinations(&mut self) {
         self.apply_parallelism_setting();
         self.last_error = None;
-        self.sync_gravity_load_cases_action();
+        self.last_notice = None;
         if self.model.combinations.is_empty() {
             self.last_error =
                 Some("荷重組合せがありません。荷重タブで作成してください。".to_string());
             return;
         }
-        // 剛域の反映は地震荷重の同期より先に行う（SemiPrecise の固有周期算定が
-        // 剛域込みの剛性を用いるようにするため）。
-        self.apply_rigid_zones_for_analysis();
-        self.sync_seismic_load_cases_action();
-        let analysis = match Analysis::prepare(&self.model) {
-            Ok(a) => a,
-            Err(e) => {
-                self.last_error = Some(format!("解析準備エラー: {:?}", e));
-                return;
-            }
-        };
-        let combos = self.model.combinations.clone();
+        // 解析準備前にスラブ荷重・躯体自重を「DL」等の標準ケースへ、階が定義済み
+        // なら地震荷重を「EX」「EY」ケースへ同期する（`sync_auto_load_cases_action`。
+        // モデル・関連設定が前回同期時から変わっていなければ丸ごとスキップする）。
+        self.sync_auto_load_cases_action();
         // 空の地震荷重ケース（未生成の EX/EY 等）を参照する組合せは解かずに
-        // エラーへ回す（地震項が黙って 0 になるのを防ぐ）。
+        // エラーへ回す（地震項が黙って 0 になるのを防ぐ）。UI スレッド側の
+        // `self.model` を参照するためバックグラウンドジョブでもここで行う。
+        let (combos, errors) = self.filter_combos_for_all_combinations();
+        let computed = Self::compute_all_combinations(self.model.clone(), combos);
+        self.apply_all_combinations_result(computed, errors);
+    }
+
+    /// `run_all_combinations`/`start_all_combinations_job` 共通の事前フィルタ。
+    /// 空の地震荷重ケースを参照する組合せを除外し、(解析対象の組合せ, エラー文一覧)
+    /// を返す。
+    fn filter_combos_for_all_combinations(
+        &self,
+    ) -> (Vec<squid_n_core::model::LoadCombination>, Vec<String>) {
         let mut errors: Vec<String> = Vec::new();
-        let combos: Vec<squid_n_core::model::LoadCombination> = combos
-            .into_iter()
+        let combos = self
+            .model
+            .combinations
+            .iter()
             .filter(|combo| match self.empty_seismic_case_in_combo(combo) {
                 Some(name) => {
                     errors.push(format!(
@@ -298,35 +435,79 @@ impl App {
                 }
                 None => true,
             })
+            .cloned()
             .collect();
+        (combos, errors)
+    }
+
+    /// 全荷重組合せ一括解析の純粋計算部分。所有権を取り `&self` を使わないため、
+    /// バックグラウンドジョブ（`start_all_combinations_job`）からも呼び出せる。
+    /// `Analysis::prepare` を 1 回だけ行い、`analysis_cfg.threads` の並列設定に
+    /// 応じて `Analysis::linear_combination_batch` で組合せ単位に並列解析する。
+    /// `Analysis::prepare` 自体が失敗した場合は `Err` で全体を中断する
+    /// （個別組合せへは処理を進めない。既存結果は `apply_all_combinations_result`
+    /// 側で変更しない）。
+    #[allow(clippy::type_complexity)]
+    fn compute_all_combinations(
+        model: squid_n_core::model::Model,
+        combos: Vec<squid_n_core::model::LoadCombination>,
+    ) -> Result<Vec<(String, Result<squid_n_solver::linear::StaticOnce, String>)>, String> {
+        let analysis = Analysis::prepare(&model).map_err(|e| format!("解析準備エラー: {:?}", e))?;
         let results = analysis.linear_combination_batch(&combos);
+        Ok(combos
+            .iter()
+            .zip(results)
+            .map(|(combo, res)| {
+                (
+                    combo.name.clone(),
+                    res.map_err(|e| format!("[{}] {:?}", combo.name, e)),
+                )
+            })
+            .collect())
+    }
+
+    /// `compute_all_combinations` の結果を適用する。個別組合せの解析エラーは
+    /// 処理を止めず、件数と最初のエラー内容を `last_error` にまとめる
+    /// （他の組合せの結果は失わない）。`pre_errors`（事前フィルタで除外された
+    /// 組合せのエラー）と合わせて1件も解けなかった場合、および
+    /// `Analysis::prepare` 自体が失敗した場合は既存の結果を変更せず、案内
+    /// メッセージを `last_error` に設定して return する。
+    #[allow(clippy::type_complexity)]
+    fn apply_all_combinations_result(
+        &mut self,
+        computed: Result<Vec<(String, Result<squid_n_solver::linear::StaticOnce, String>)>, String>,
+        mut errors: Vec<String>,
+    ) {
+        let items = match computed {
+            Ok(items) => items,
+            Err(e) => {
+                self.last_error = Some(e);
+                return;
+            }
+        };
 
         let mut bundle = self.results.take().unwrap_or_default();
         let mut last_ok: Option<(usize, String)> = None;
-        for (combo, res) in combos.iter().zip(results) {
+        for (name, res) in items {
             match res {
                 Ok(res) => {
                     let member_forces = res.member_forces.clone();
                     // StaticKey::Combo は bundle.combos 上の位置を指す規約
                     // （run_combination と同じ「名前一致なら置換、なければ push」）。
-                    let pos = match bundle
-                        .combos
-                        .iter()
-                        .position(|(name, _)| *name == combo.name)
-                    {
+                    let pos = match bundle.combos.iter().position(|(n, _)| *n == name) {
                         Some(pos) => {
                             bundle.combos[pos].1 = res;
                             pos
                         }
                         None => {
-                            bundle.combos.push((combo.name.clone(), res));
+                            bundle.combos.push((name.clone(), res));
                             bundle.combos.len() - 1
                         }
                     };
                     bundle.member_forces = member_forces;
-                    last_ok = Some((pos, combo.name.clone()));
+                    last_ok = Some((pos, name));
                 }
-                Err(e) => errors.push(format!("[{}] {:?}", combo.name, e)),
+                Err(e) => errors.push(e),
             }
         }
 
@@ -358,6 +539,50 @@ impl App {
                 errors[0]
             ));
         }
+    }
+
+    /// 全荷重組合せ一括解析をバックグラウンドスレッドで実行する（P8 §5）。
+    /// UI スレッドをブロックしないよう重い解析を逃がす。
+    /// 既にジョブが実行中の場合は何もしない（last_error に案内文を設定）。
+    pub fn start_all_combinations_job(&mut self) {
+        if self.job.is_some() {
+            self.last_error = Some("解析実行中です".to_string());
+            return;
+        }
+        self.apply_parallelism_setting();
+        self.last_error = None;
+        self.last_notice = None;
+        if self.model.combinations.is_empty() {
+            self.last_error =
+                Some("荷重組合せがありません。荷重タブで作成してください。".to_string());
+            return;
+        }
+        self.sync_auto_load_cases_action();
+        let (combos, pre_errors) = self.filter_combos_for_all_combinations();
+        let model = self.model.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let computed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::compute_all_combinations(model, combos)
+            }))
+            .unwrap_or_else(|_| {
+                Err(
+                    "解析スレッドが異常終了しました（プログラムの不具合の可能性があります）。"
+                        .to_string(),
+                )
+            });
+            let _ = tx.send(JobResult::AllCombos {
+                computed,
+                pre_errors,
+            });
+        });
+        self.job = Some(AnalysisJob {
+            label: "全組合せ一括解析",
+            started: std::time::SystemTime::now(),
+            rx,
+            #[cfg(feature = "gui")]
+            jump_on_success: None,
+        });
     }
 
     /// 表示対象の静的解析結果を解決する。優先順: ナビゲータ選択 → 最後に実行した結果。
@@ -827,6 +1052,7 @@ impl App {
     pub fn run_eigen(&mut self, n_modes: usize) {
         self.apply_parallelism_setting();
         self.last_error = None;
+        self.last_notice = None;
         self.apply_rigid_zones_for_analysis();
         match Analysis::prepare(&self.model) {
             Ok(analysis) => match analysis.eigen(n_modes) {
@@ -855,6 +1081,7 @@ impl App {
     /// これで荷重組合せ G+P±K が実行可能になる）。
     pub fn generate_stories_action(&mut self) {
         self.last_error = None;
+        self.last_notice = None;
         self.sync_gravity_load_cases_action();
         let gravity_lcs = gravity_cases_for_seismic_weight(&self.model);
         let include_density = density_self_weight_for_stories(&self.model);
@@ -879,6 +1106,10 @@ impl App {
                 // 剛域込みの剛性を用いるようにするため）。
                 self.apply_rigid_zones_for_analysis();
                 self.sync_seismic_load_cases_action();
+                // 直後に run_linear_static 等（`sync_auto_load_cases_action`）が
+                // 呼ばれても、いま行った DL/LL/EX/EY の同期を無駄に繰り返さない
+                // よう、同期後の状態のハッシュを記録しておく。
+                self.auto_load_sync_hash = Some(self.compute_auto_load_sync_hash());
             }
             Err(e) => self.last_error = Some(format!("階の自動生成エラー: {}", e)),
         }
@@ -888,14 +1119,26 @@ impl App {
     /// 方向・Ai算定法・Z・地盤種別・C0 は `analysis_cfg` を用いる。
     /// 結果は `StaticCaseKey::Seismic(dir)` に格納するため、X/Y 双方の地震静的結果
     /// および任意のユーザー荷重ケースの結果と衝突せず共存できる。
-    /// あわせて同じ水平力を「EX」「EY」ケースへ同期する（荷重組合せ用）。
+    /// あわせて同じ水平力を「EX」「EY」ケースへ同期する（荷重組合せ用、
+    /// `sync_auto_load_cases_action`。モデル・関連設定が前回同期時から変わって
+    /// いなければ丸ごとスキップする）。
+    ///
+    /// 設計用固有周期 T は `design_seismic_period` で暗黙の解析なしに決定する
+    /// （内部で固有値解析を実行しない `Analysis::seismic_static_with_period` を
+    /// 使う）。SemiPrecise で固有値解析が未実行の場合は解析せず、実行を促す
+    /// メッセージを `last_error` に設定して return する。
     pub fn run_seismic(&mut self, dir: SeismicDir) {
         self.apply_parallelism_setting();
         self.last_error = None;
-        // 剛域の反映は地震荷重の同期より先に行う（SemiPrecise の固有周期算定が
-        // 剛域込みの剛性を用いるようにするため）。
-        self.apply_rigid_zones_for_analysis();
-        self.sync_seismic_load_cases_action();
+        self.last_notice = None;
+        self.sync_auto_load_cases_action();
+        let t = match self.design_seismic_period() {
+            Ok(t) => t,
+            Err(msg) => {
+                self.last_error = Some(msg);
+                return;
+            }
+        };
         let cfg = squid_n_solver::analysis::SeismicCfg {
             dir,
             mode: self.analysis_cfg.ai_mode,
@@ -903,24 +1146,75 @@ impl App {
             soil: self.analysis_cfg.soil,
             c0: self.analysis_cfg.c0,
         };
-        match Analysis::prepare(&self.model) {
-            Ok(analysis) => match analysis.seismic_static_with(cfg) {
-                Ok(res) => {
-                    let member_forces = res.member_forces.clone();
-                    let mut bundle = self.results.take().unwrap_or_default();
-                    let key = StaticCaseKey::Seismic(dir);
-                    bundle.statics.retain(|(id, _)| *id != key);
-                    bundle.statics.push((key, res));
-                    bundle.member_forces = member_forces;
-                    self.results = Some(bundle);
-                    self.last_static = Some(StaticKey::Case(key));
-                    self.staleness.mark_fresh();
-                    self.run_design_check();
-                }
-                Err(e) => self.last_error = Some(format!("地震解析エラー: {:?}", e)),
-            },
-            Err(e) => self.last_error = Some(format!("解析準備エラー: {:?}", e)),
+        let res = Self::compute_seismic(self.model.clone(), cfg, t);
+        self.apply_static_case_result(StaticCaseKey::Seismic(dir), res);
+    }
+
+    /// 地震静的(Ai分布)解析の純粋計算部分。所有権を取り `&self` を使わないため、
+    /// バックグラウンドジョブ（`start_seismic_job`）からも呼び出せる。
+    fn compute_seismic(
+        model: squid_n_core::model::Model,
+        cfg: squid_n_solver::analysis::SeismicCfg,
+        t: f64,
+    ) -> Result<squid_n_solver::linear::StaticOnce, String> {
+        match Analysis::prepare(&model) {
+            Ok(analysis) => analysis
+                .seismic_static_with_period(cfg, t)
+                .map_err(|e| format!("地震解析エラー: {:?}", e)),
+            Err(e) => Err(format!("解析準備エラー: {:?}", e)),
         }
+    }
+
+    /// 地震静的解析をバックグラウンドスレッドで実行する（P8 §5）。
+    /// UI スレッドをブロックしないよう重い解析を逃がす。
+    /// 既にジョブが実行中の場合は何もしない（last_error に案内文を設定）。
+    pub fn start_seismic_job(&mut self, dir: SeismicDir) {
+        if self.job.is_some() {
+            self.last_error = Some("解析実行中です".to_string());
+            return;
+        }
+        self.apply_parallelism_setting();
+        self.last_error = None;
+        self.last_notice = None;
+        self.sync_auto_load_cases_action();
+        let t = match self.design_seismic_period() {
+            Ok(t) => t,
+            Err(msg) => {
+                self.last_error = Some(msg);
+                return;
+            }
+        };
+        let cfg = squid_n_solver::analysis::SeismicCfg {
+            dir,
+            mode: self.analysis_cfg.ai_mode,
+            z: self.analysis_cfg.z,
+            soil: self.analysis_cfg.soil,
+            c0: self.analysis_cfg.c0,
+        };
+        let model = self.model.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::compute_seismic(model, cfg, t)
+            }))
+            .unwrap_or_else(|_| {
+                Err(
+                    "解析スレッドが異常終了しました（プログラムの不具合の可能性があります）。"
+                        .to_string(),
+                )
+            });
+            let _ = tx.send(JobResult::StaticCase {
+                key: StaticCaseKey::Seismic(dir),
+                res,
+            });
+        });
+        self.job = Some(AnalysisJob {
+            label: "地震静的解析",
+            started: std::time::SystemTime::now(),
+            rx,
+            #[cfg(feature = "gui")]
+            jump_on_success: None,
+        });
     }
 
     /// 風荷重の静的解析を実行し、結果を `StaticCaseKey::Wind(dir)` に格納する
@@ -929,6 +1223,7 @@ impl App {
     pub fn run_wind(&mut self, dir: SeismicDir) {
         self.apply_parallelism_setting();
         self.last_error = None;
+        self.last_notice = None;
         let cfg = squid_n_solver::analysis::WindStaticCfg {
             dir,
             v0: self.analysis_cfg.v0,
@@ -937,24 +1232,67 @@ impl App {
             parapet_mm: self.analysis_cfg.parapet_mm,
         };
         self.apply_rigid_zones_for_analysis();
-        match Analysis::prepare(&self.model) {
-            Ok(analysis) => match analysis.wind_static(cfg) {
-                Ok(res) => {
-                    let member_forces = res.member_forces.clone();
-                    let mut bundle = self.results.take().unwrap_or_default();
-                    let key = StaticCaseKey::Wind(dir);
-                    bundle.statics.retain(|(id, _)| *id != key);
-                    bundle.statics.push((key, res));
-                    bundle.member_forces = member_forces;
-                    self.results = Some(bundle);
-                    self.last_static = Some(StaticKey::Case(key));
-                    self.staleness.mark_fresh();
-                    self.run_design_check();
-                }
-                Err(e) => self.last_error = Some(format!("風荷重解析エラー: {:?}", e)),
-            },
-            Err(e) => self.last_error = Some(format!("解析準備エラー: {:?}", e)),
+        let res = Self::compute_wind(self.model.clone(), cfg);
+        self.apply_static_case_result(StaticCaseKey::Wind(dir), res);
+    }
+
+    /// 風荷重静的解析の純粋計算部分。所有権を取り `&self` を使わないため、
+    /// バックグラウンドジョブ（`start_wind_job`）からも呼び出せる。
+    fn compute_wind(
+        model: squid_n_core::model::Model,
+        cfg: squid_n_solver::analysis::WindStaticCfg,
+    ) -> Result<squid_n_solver::linear::StaticOnce, String> {
+        match Analysis::prepare(&model) {
+            Ok(analysis) => analysis
+                .wind_static(cfg)
+                .map_err(|e| format!("風荷重解析エラー: {:?}", e)),
+            Err(e) => Err(format!("解析準備エラー: {:?}", e)),
         }
+    }
+
+    /// 風荷重静的解析をバックグラウンドスレッドで実行する（P8 §5）。
+    /// UI スレッドをブロックしないよう重い解析を逃がす。
+    /// 既にジョブが実行中の場合は何もしない（last_error に案内文を設定）。
+    pub fn start_wind_job(&mut self, dir: SeismicDir) {
+        if self.job.is_some() {
+            self.last_error = Some("解析実行中です".to_string());
+            return;
+        }
+        self.apply_parallelism_setting();
+        self.last_error = None;
+        self.last_notice = None;
+        let cfg = squid_n_solver::analysis::WindStaticCfg {
+            dir,
+            v0: self.analysis_cfg.v0,
+            roughness: self.analysis_cfg.roughness,
+            cpi: 0.0,
+            parapet_mm: self.analysis_cfg.parapet_mm,
+        };
+        self.apply_rigid_zones_for_analysis();
+        let model = self.model.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::compute_wind(model, cfg)
+            }))
+            .unwrap_or_else(|_| {
+                Err(
+                    "解析スレッドが異常終了しました（プログラムの不具合の可能性があります）。"
+                        .to_string(),
+                )
+            });
+            let _ = tx.send(JobResult::StaticCase {
+                key: StaticCaseKey::Wind(dir),
+                res,
+            });
+        });
+        self.job = Some(AnalysisJob {
+            label: "風荷重静的解析",
+            started: std::time::SystemTime::now(),
+            rx,
+            #[cfg(feature = "gui")]
+            jump_on_success: None,
+        });
     }
 
     /// Z表 CSV（`squid_n_load::z_table::ZTable::from_csv`）を読み込み `self.z_table`
@@ -1373,6 +1711,12 @@ impl App {
                 match result {
                     JobResult::Pushover(res) => self.apply_pushover_result(res),
                     JobResult::TimeHistory(res) => self.apply_time_history_result(res),
+                    JobResult::StaticCase { key, res } => self.apply_static_case_result(key, res),
+                    JobResult::Combo { name, res } => self.apply_combo_result(name, res),
+                    JobResult::AllCombos {
+                        computed,
+                        pre_errors,
+                    } => self.apply_all_combinations_result(computed, pre_errors),
                 }
                 #[cfg(feature = "gui")]
                 {
@@ -1505,9 +1849,32 @@ impl App {
         // 一本部材指定（Model.beam_groups）: グループ単位の採用応力を合成し、
         // 所属部材の検定文脈（部材長・端部/中央モーメント等）を上書きする。
         let group_overrides = beam_group_overrides(&self.model, &results.member_forces);
+        // 部材ID→要素の索引（旧: ループ内で `elements.iter().find` していたため
+        // O(部材数²) だった）。ループ前に一度だけ構築する。同一IDが重複した場合に
+        // `find`（先頭一致）と同じ結果になるよう、forward 走査 + `entry().or_insert`
+        // で「先勝ち」にする（`or_insert` は既に埋まっていれば上書きしない）。
+        let mut elem_by_id: std::collections::HashMap<ElemId, &squid_n_core::model::ElementData> =
+            std::collections::HashMap::with_capacity(self.model.elements.len());
+        for e in &self.model.elements {
+            elem_by_id.entry(e.id).or_insert(e);
+        }
+        // 地震時短期 QD 用の長期内力索引（旧: 部材ごとに `list.iter().find` して
+        // いたため O(部材数²)）。同上の「先勝ち」ルールで構築する。
+        let long_mf_by_id: Option<
+            std::collections::HashMap<ElemId, &squid_n_element::beam::MemberForces>,
+        > = long_member_forces.map(|list| {
+            let mut m = std::collections::HashMap::with_capacity(list.len());
+            for (id, mf) in list {
+                m.entry(*id).or_insert(mf);
+            }
+            m
+        });
+        // 柱の座屈長さ係数 K 用の節点まわり梁索引（`buckling::g_ratio_at` の全要素
+        // 走査を避けるため、ループ前に 1 回だけ構築して使い回す）。
+        let column_k_index = squid_n_design_jp::steel::buckling::BeamNodeIndex::build(&self.model);
         let mut checks: Vec<(ElemId, f64, squid_n_design_jp::CheckResult)> = Vec::new();
         for (elem_id, mf) in &results.member_forces {
-            let elem = self.model.elements.iter().find(|e| e.id == *elem_id);
+            let elem = elem_by_id.get(elem_id).copied();
             let Some(elem) = elem else {
                 continue;
             };
@@ -1554,8 +1921,12 @@ impl App {
             // 場合。K は節点まわり剛度比 G から算定）。柱以外は None（lk=部材長）。
             // RC 柱の検定は lk を使わないため、柱一律で設定して問題ない。
             let lk = if kind == squid_n_design_jp::MemberKind::Column {
-                squid_n_design_jp::steel::buckling::steel_column_k(&self.model, elem)
-                    .map(|k| k * length)
+                squid_n_design_jp::steel::buckling::steel_column_k_with_index(
+                    &self.model,
+                    &column_k_index,
+                    elem,
+                )
+                .map(|k| k * length)
             } else {
                 None
             };
@@ -1573,24 +1944,26 @@ impl App {
             };
             // 地震時短期の設計用せん断力 QD の文脈（長期内力・割増係数 n・内法長）。
             // 内法長 l′/h′ は剛域（フェイス距離）控除後の長さとする。
-            let seismic_qd = long_member_forces
-                .and_then(|list| list.iter().find(|(id, _)| id == elem_id))
-                .map(|(_, mf_long)| {
-                    let face_sum = elem.rigid_zone.face_i + elem.rigid_zone.face_j;
-                    let clear_length = match group {
-                        // 一本部材は両外端の剛域控除後のグループ内法長。
-                        Some(g) => g.clear_length,
-                        None if length - face_sum > 0.0 => length - face_sum,
-                        None => length,
-                    };
-                    squid_n_design_jp::SeismicQd {
-                        long_at: mf_long.at.clone(),
-                        // 割増係数 n（柱は 1.5 以上）。梁・柱とも 1.5。
-                        n_factor: 1.5,
-                        clear_length,
-                        method: self.analysis_cfg.qd_method,
-                    }
-                });
+            let seismic_qd =
+                long_mf_by_id
+                    .as_ref()
+                    .and_then(|map| map.get(elem_id))
+                    .map(|mf_long| {
+                        let face_sum = elem.rigid_zone.face_i + elem.rigid_zone.face_j;
+                        let clear_length = match group {
+                            // 一本部材は両外端の剛域控除後のグループ内法長。
+                            Some(g) => g.clear_length,
+                            None if length - face_sum > 0.0 => length - face_sum,
+                            None => length,
+                        };
+                        squid_n_design_jp::SeismicQd {
+                            long_at: mf_long.at.clone(),
+                            // 割増係数 n（柱は 1.5 以上）。梁・柱とも 1.5。
+                            n_factor: 1.5,
+                            clear_length,
+                            method: self.analysis_cfg.qd_method,
+                        }
+                    });
             // S 造部材の断面検定属性（欠損率・横座屈長さ）。
             let steel_attr = self
                 .model
@@ -2273,7 +2646,7 @@ impl App {
     /// DL に自重を含めるため、階の自動生成（地震用重量）では密度からの自重直接
     /// 算入を無効にして二重計上を防ぐ（`density_self_weight_for_stories`）。
     ///
-    /// 解析実行系（`run_linear_static`/`run_combination`）・`generate_stories_action`
+    /// 解析実行系（`sync_auto_load_cases_action` 経由）・`generate_stories_action`
     /// の入口で毎回呼ぶことを想定した冪等な同期アクション。
     pub fn sync_gravity_load_cases_action(&mut self) {
         use squid_n_core::model::{LoadCaseKind, LoadPurpose};
@@ -2333,29 +2706,69 @@ impl App {
         );
     }
 
+    /// 地震荷重(Ai分布)の設計用固有周期 T[s] を、暗黙の解析なしで決定する。
+    ///
+    /// - `AiMode::Approx`: 略算式 T = h(0.02+0.01α)（令88条・昭和55年建設省
+    ///   告示第1793号）。即時計算で解析は不要。
+    /// - `AiMode::SemiPrecise`: 明示実行済みの固有値解析結果
+    ///   （`self.results` の `modal`）の1次周期（`ModalResult::period[0]`）を
+    ///   再利用する。固有値解析が未実行（`results` が無い・`modal` が無い・
+    ///   `period` が空のいずれか）の場合は `Err`（実行を促す日本語メッセージ）。
+    ///
+    /// `Analysis::prepare`（剛性行列組立+Cholesky分解）や固有値解析を新たに
+    /// 実行することはない（暗黙の重い解析を避けるための入口）。
+    fn design_seismic_period(&self) -> Result<f64, String> {
+        match self.analysis_cfg.ai_mode {
+            AiMode::Approx => {
+                let height_m = squid_n_solver::analysis::building_height_mm(&self.model) / 1000.0;
+                let steel_ratio = squid_n_solver::analysis::steel_height_ratio(&self.model);
+                Ok(squid_n_load::ai::approx_t(height_m, steel_ratio))
+            }
+            AiMode::SemiPrecise => self
+                .results
+                .as_ref()
+                .and_then(|r| r.modal.as_ref())
+                .and_then(|m| m.period.first().copied())
+                .ok_or_else(|| {
+                    "精算周期(固有値解析)が選択されていますが固有値解析が未実行です。\
+                     解析タブの固有値解析を先に実行してください\
+                     (EX/EY の地震荷重は更新されません)。"
+                        .to_string()
+                }),
+        }
+    }
+
     /// 地震荷重の標準ケース（EX・EY、kind=Seismic）へ Ai 分布の水平力を同期する。
     ///
     /// 階（`model.stories`）が定義されている場合に、地震静的解析と同じ載荷
-    /// （`Analysis::build_seismic_load_case`。方向・Ai算定法・Z・地盤種別・C0 は
+    /// （`build_seismic_load_case_from_model`。方向・Ai算定法・Z・地盤種別・C0 は
     /// `analysis_cfg`）を EX/EY ケースへ書き込む。これにより荷重組合せ
     /// （G+P±K など）が EX/EY を参照して解析できる。
     ///
-    /// 階が未定義・解析準備に失敗・地震荷重が構築できない場合は何もしない
-    /// （既存の EX/EY ケースは変更しない。組合せ実行時に空の地震ケースを
-    /// 参照していればエラーで案内する）。冪等な同期アクション
-    /// （`sync_gravity_load_cases_action` と同じ規約）。
+    /// 設計用固有周期 T は `design_seismic_period` で決定する（`Analysis::prepare`
+    /// を要しないモデル単独版 `build_seismic_load_case_from_model` を使うため、
+    /// 本関数自体は剛性行列組立や固有値解析を一切行わない）。X・Y 双方向で T を
+    /// 共有するため `design_seismic_period` の呼び出しは 1 回のみ。
+    ///
+    /// 階が未定義・地震荷重が構築できない場合は何もしない（既存の EX/EY
+    /// ケースは変更しない。組合せ実行時に空の地震ケースを参照していれば
+    /// エラーで案内する）。SemiPrecise で固有値解析が未実行の場合も同様に
+    /// 何もせず、代わりに `last_notice` へ実行を促すメッセージを設定する
+    /// （`last_error` とは別枠。解析自体は継続してよい注意事項のため）。
+    /// 冪等な同期アクション（`sync_gravity_load_cases_action` と同じ規約）。
     pub fn sync_seismic_load_cases_action(&mut self) {
         use squid_n_core::model::LoadCaseKind;
         if self.model.stories.is_empty() {
             return;
         }
-        let built: Vec<(&'static str, squid_n_core::model::LoadCase)> = {
-            // 荷重ケースの構築だけが目的なので、K の組立・分解を省いた軽量準備を
-            // 使う（`build_seismic_load_case` は分解済み K を使わない。実測で
-            // 本アクションの支配的コストは prepare の組立・分解だった）。
-            let Ok(analysis) = Analysis::prepare_load_case_gen(&self.model) else {
+        let t = match self.design_seismic_period() {
+            Ok(t) => t,
+            Err(msg) => {
+                self.last_notice = Some(msg);
                 return;
-            };
+            }
+        };
+        let built: Vec<(&'static str, squid_n_core::model::LoadCase)> =
             [(SeismicDir::X, EX_CASE_NAME), (SeismicDir::Y, EY_CASE_NAME)]
                 .into_iter()
                 .filter_map(|(dir, name)| {
@@ -2366,16 +2779,75 @@ impl App {
                         soil: self.analysis_cfg.soil,
                         c0: self.analysis_cfg.c0,
                     };
-                    analysis
-                        .build_seismic_load_case(cfg)
-                        .ok()
-                        .map(|lc| (name, lc))
+                    squid_n_solver::analysis::build_seismic_load_case_from_model(
+                        &self.model,
+                        cfg,
+                        t,
+                    )
+                    .ok()
+                    .map(|lc| (name, lc))
                 })
-                .collect()
-        };
+                .collect();
         for (name, lc) in built {
             self.sync_one_auto_case(name, LoadCaseKind::Seismic, lc.nodal, lc.member);
         }
+    }
+
+    /// `sync_auto_load_cases_action` が同期の要否判定に使うハッシュを計算する。
+    ///
+    /// 荷重同期（DL/LL/EX/EY）の結果に影響し得る入力をすべて含める:
+    /// モデル本体（`bincode` でシリアライズしてハッシュ）、地震荷重の
+    /// Ai算定法（`ai_mode`）・地域係数 Z・地盤種別・標準せん断力係数 C0、
+    /// および SemiPrecise 時は `design_seismic_period` の値（算定できた場合のみ。
+    /// `to_bits()` でビット列化してハッシュ。固有値解析が未実行で `Err` の場合は
+    /// 含めない＝モデル・設定が同じなら「未実行」状態も同一ハッシュに畳み込む）。
+    fn compute_auto_load_sync_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if let Ok(bytes) = bincode::serialize(&self.model) {
+            bytes.hash(&mut hasher);
+        }
+        std::mem::discriminant(&self.analysis_cfg.ai_mode).hash(&mut hasher);
+        self.analysis_cfg.z.to_bits().hash(&mut hasher);
+        (self.analysis_cfg.soil as u8).hash(&mut hasher);
+        self.analysis_cfg.c0.to_bits().hash(&mut hasher);
+        if matches!(self.analysis_cfg.ai_mode, AiMode::SemiPrecise) {
+            if let Ok(t) = self.design_seismic_period() {
+                t.to_bits().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    /// 自重・積載・地震荷重の自動同期（`sync_gravity_load_cases_action` ・
+    /// `sync_seismic_load_cases_action`）をまとめて行う、解析実行系
+    /// （`run_linear_static`/`run_combination`/`run_all_combinations`/
+    /// `run_seismic`）共通の入口。
+    ///
+    /// モデルが交差小梁スラブを含む場合、床荷重分配（DL・LL(架構用)・
+    /// LL(地震用)の3系統×床格子サブFEM解析）は重い処理になり得るため、
+    /// 前回の同期時からモデル・関連設定（`compute_auto_load_sync_hash`）が
+    /// 一切変わっていなければ丸ごとスキップする。
+    ///
+    /// 手順:
+    /// 1. `apply_rigid_zones_for_analysis`（冪等・軽量なので常に実行。
+    ///    剛域の反映は地震荷重の同期より先に行う。SemiPrecise の固有周期算定が
+    ///    剛域込みの剛性を用いるようにするため）。
+    /// 2. 現在のハッシュを計算し、前回保存したハッシュと一致すればスキップ。
+    /// 3. 不一致なら `sync_gravity_load_cases_action` → `sync_seismic_load_cases_action`
+    ///    の順で実行する。
+    /// 4. 同期後（荷重ケースの内容が書き換わった後）のモデルで再度ハッシュを
+    ///    計算して保存する（同期前のハッシュを保存すると、次回呼び出しで
+    ///    「同期していないのに一致」と誤判定するため、必ず同期後の状態で保存する）。
+    pub fn sync_auto_load_cases_action(&mut self) {
+        self.apply_rigid_zones_for_analysis();
+        let current = self.compute_auto_load_sync_hash();
+        if self.auto_load_sync_hash == Some(current) {
+            return;
+        }
+        self.sync_gravity_load_cases_action();
+        self.sync_seismic_load_cases_action();
+        self.auto_load_sync_hash = Some(self.compute_auto_load_sync_hash());
     }
 
     /// 名前付き荷重ケースを指定の `kind`・内容へ冪等に同期する

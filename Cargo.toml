@@ -39,3 +39,13 @@ encoding_rs = "0.8"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# デバッグビルド（cargo run / cargo test）でも数値計算が実用速度で動くようにする。
+# 自クレートは opt-level 1（デバッグ体験を保ちつつ基本最適化のみ）、
+# 依存クレート（faer の疎 Cholesky 等の行列演算ホットパス）は opt-level 3。
+# opt-level 0 のままでは小規模モデルの静解析でも UI 操作に支障が出る。
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

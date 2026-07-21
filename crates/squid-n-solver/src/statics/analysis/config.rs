@@ -26,6 +26,10 @@ pub struct SeismicCfg {
 }
 
 impl Default for SeismicCfg {
+    /// 既定の Ai 算定法は略算（`AiMode::Approx`）。略算周期 T = h(0.02+0.01α)
+    /// （令88条・昭55建告1793号、h: 建築物の高さ、α: 鉄骨造比）で求め、
+    /// 固有値解析を要しない。精算周期（`SemiPrecise`）は固有値解析の明示実行を
+    /// 前提とするオプトイン設定。
     fn default() -> Self {
         Self {
             dir: SeismicDir::X,

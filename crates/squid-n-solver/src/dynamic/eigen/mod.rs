@@ -3,7 +3,7 @@ use crate::constraint::Reducer;
 use squid_n_core::dof::DofMap;
 use squid_n_core::model::Model;
 use squid_n_element::behavior::MassOption;
-use squid_n_math::solver::{make_solver, SolveError, SolverBackend};
+use squid_n_math::solver::{make_solver, LinearSolver, SolveError, SolverBackend};
 
 const EIGEN_TOL: f64 = 1e-10;
 const EIGEN_MAX_ITER: usize = 200;
@@ -24,6 +24,44 @@ pub fn solve_eigen(
     dofmap: &DofMap,
     reducer: &Reducer,
     n_modes: usize,
+) -> Result<ModalResult, SolveError> {
+    // 自由度数（縮約後）が 0 なら分解すら不要（0×0 行列を factorize しない）。
+    if reducer.n_indep == 0 || n_modes == 0 {
+        return Ok(ModalResult {
+            omega2: vec![],
+            period: vec![],
+            shapes: vec![],
+            participation: vec![],
+            effective_mass: vec![],
+        });
+    }
+
+    let k_free = assemble_global_k(model, dofmap);
+    let k_red = reducer.reduce_k(&k_free);
+
+    // 部分空間反復では 1 回の分解を（部分空間サイズ×反復回数）回の求解で
+    // 再利用するため、直接法を明示する（反復法では再利用が効かない）。
+    let mut solver = make_solver(SolverBackend::DirectSparseCholesky);
+    solver.factorize(&k_red)?;
+
+    solve_eigen_with_solver(model, dofmap, reducer, n_modes, solver.as_ref())
+}
+
+/// [`solve_eigen`] の本体ロジック。呼び出し側（[`crate::analysis::Analysis`]）が
+/// 既に縮約後剛性行列 `k_red` を分解済みソルバとして保持している場合に、
+/// その分解を再利用して再分解のコストを省くための版。
+///
+/// `solver` は縮約後剛性行列 K_red（本関数が内部で `assemble_global_k` +
+/// `reducer.reduce_k` により組み立てるものと同一の行列）に対して、
+/// 呼び出し側で既に `factorize` 済みであることを前提とする（本関数は
+/// factorize を行わない）。要求自由度が 0（`reducer.n_indep == 0`）の場合は
+/// ソルバに一切触れずに早期リターンするため、未分解のソルバを渡しても安全。
+pub fn solve_eigen_with_solver(
+    model: &Model,
+    dofmap: &DofMap,
+    reducer: &Reducer,
+    n_modes: usize,
+    solver: &dyn LinearSolver,
 ) -> Result<ModalResult, SolveError> {
     let m_free = assemble_global_m(model, dofmap, MassOption::Consistent);
     let m_red = reducer.reduce_k(&m_free);
@@ -53,11 +91,6 @@ pub fn solve_eigen(
 
     let k_free = assemble_global_k(model, dofmap);
     let k_red = reducer.reduce_k(&k_free);
-
-    // 部分空間反復では 1 回の分解を（部分空間サイズ×反復回数）回の求解で
-    // 再利用するため、直接法を明示する（反復法では再利用が効かない）。
-    let mut solver = make_solver(SolverBackend::DirectSparseCholesky);
-    solver.factorize(&k_red)?;
 
     // 部分空間サイズ q: Bathe の定石 q = min(2p, p+8) にならい、要求モード数 p に対して
     // オーバーサンプリングする（p が大きいときに q が際限なく増えて計算コストが
@@ -170,7 +203,7 @@ node.mass や材料の密度(ρ)で並進質量を追加するか、要求モー
         for i in 0..n {
             phi[i] = x[i * q + m];
         }
-        let norm2 = m_norm(&phi, &m_red, n);
+        let norm2 = m_norm(&phi, &m_red);
         if norm2 > 0.0 {
             let inv = 1.0 / norm2.sqrt();
             for v in &mut phi {
@@ -227,22 +260,48 @@ fn init_subspace(n: usize, q: usize, k_diag: &[f64], m_diag: &[f64]) -> Vec<f64>
     x
 }
 
+/// 疎行列とベクトルの積 y = A·x（格納済みの非ゼロ要素のみを走査する）。
+///
+/// `squid_n_math::sparse::sparse_matvec` への薄いラッパ。K/M は要素剛性・
+/// 質量行列の組立時点で局所行列の全成分（上下三角とも）を triplet 化して
+/// 足し込んでいるため（`squid_n_element::behavior::LocalMat::to_triplets`）、
+/// 全体行列は上三角のみ・対称圧縮などではなく非ゼロ要素を対称に両方格納した
+/// 「フル対称」形式になっている。したがって `sparse_matvec` の単純な
+/// 列走査（`y[row] += val * x[col]`）だけで、かつての `get()` 全ペア走査と
+/// 完全に同じ結果が得られる（`assemble_global_k`/`assemble_global_m` と
+/// `Reducer::reduce_k` の実装で確認済み。§検証参照）。
+fn spmv(mat: &faer::sparse::SparseColMat<usize, f64>, x: &[f64]) -> Vec<f64> {
+    squid_n_math::sparse::sparse_matvec(mat, x)
+}
+
+/// Y^T·A·Y（q×q 対称行列）を、A の非ゼロ要素だけを使って計算する。
+///
+/// 従来は (a,b) 全ペアについて `mat.get()`（二分探索）で密に走査していたため
+/// O(q²·n²) だった。ここでは A の列ごとの積 Z = A·Y（各列は [`spmv`] で
+/// O(nnz)、q 列で O(nnz·q)）を先に求め、続いて Yᵀ·Z（O(n·q²)）を計算する
+/// ことで、密行列走査を完全に排除する。結果の対称性は i≤j のみ計算して
+/// 対角外を転写することで維持する（数値順序が変わるため最終桁のみ従来と
+/// 異なり得るが、固有値解析は収束判定つき反復であり許容される）。
 fn proj_yty(
     y: &[f64],
     mat_red: &faer::sparse::SparseColMat<usize, f64>,
     n: usize,
     q: usize,
 ) -> Vec<f64> {
+    // z_cols[j] = A · y_col_j
+    let z_cols: Vec<Vec<f64>> = (0..q)
+        .map(|j| {
+            let col: Vec<f64> = (0..n).map(|r| y[r * q + j]).collect();
+            spmv(mat_red, &col)
+        })
+        .collect();
+
     let mut result = vec![0.0; q * q];
     for i in 0..q {
-        for j in 0..=i {
+        for j in i..q {
             let mut s = 0.0;
             for a in 0..n {
-                let mut tmp = 0.0;
-                for b in 0..n {
-                    tmp += mat_red.get(a, b).copied().unwrap_or(0.0) * y[b * q + j];
-                }
-                s += y[a * q + i] * tmp;
+                s += y[a * q + i] * z_cols[j][a];
             }
             result[i * q + j] = s;
             result[j * q + i] = s;
@@ -251,16 +310,11 @@ fn proj_yty(
     result
 }
 
-fn m_norm(phi: &[f64], m_red: &faer::sparse::SparseColMat<usize, f64>, n: usize) -> f64 {
-    let mut norm2 = 0.0;
-    for a in 0..n {
-        let mut tmp = 0.0;
-        for b in 0..n {
-            tmp += m_red.get(a, b).copied().unwrap_or(0.0) * phi[b];
-        }
-        norm2 += phi[a] * tmp;
-    }
-    norm2
+/// φᵀ·M·φ を M の非ゼロ要素だけを使って計算する（[`spmv`] 1 回 + 内積）。
+/// 従来の O(n²) 密走査を O(nnz) に落とす。
+fn m_norm(phi: &[f64], m_red: &faer::sparse::SparseColMat<usize, f64>) -> f64 {
+    let m_phi = spmv(m_red, phi);
+    phi.iter().zip(m_phi.iter()).map(|(p, mp)| p * mp).sum()
 }
 
 /// Generalized eigenvalue problem K*z = θ*M*z。
@@ -471,14 +525,9 @@ fn compute_participation(
         for (m_idx, phi_red) in shapes.iter().enumerate() {
             let phi_free = reducer.expand_u(phi_red);
 
-            let mut m_phi = vec![0.0; n_free];
-            for a in 0..n_free {
-                let mut s = 0.0;
-                for b in 0..n_free {
-                    s += m_free.get(a, b).copied().unwrap_or(0.0) * phi_free[b];
-                }
-                m_phi[a] = s;
-            }
+            // 従来は (a,b) 全ペアを `mat.get()` で密走査していた（モード×3方向で
+            // O(n_free²)）。M の非ゼロ要素のみを使う spmv に置き換え O(nnz) にする。
+            let m_phi = spmv(m_free, &phi_free);
 
             let mut phi_m_phi = 0.0;
             for a in 0..n_free {

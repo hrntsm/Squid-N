@@ -5317,6 +5317,7 @@ dependencies = [
 name = "squid-n-app"
 version = "0.0.1"
 dependencies = [
+ "bincode",
  "eframe",
  "egui",
  "egui_extras",

@@ -492,6 +492,139 @@ fn test_seismic_flow_requires_then_uses_stories() {
         .all(|lc| lc.name != DL_CASE_NAME));
 }
 
+/// 性能修正: Ai算定法が既定の略算（`AiMode::Approx`）の場合、固有値解析を
+/// 一切実行せずに `sync_seismic_load_cases_action` が EX/EY を同期できる
+/// （暗黙の固有値解析・暗黙の `Analysis::prepare` の廃止）。
+#[test]
+fn test_sync_seismic_approx_mode_syncs_ex_ey_without_eigen() {
+    let mut app = App::default();
+    app.load_model(crate::sample::portal_frame());
+    assert_eq!(app.analysis_cfg.ai_mode, AiMode::Approx, "既定は略算のはず");
+    app.generate_stories_action();
+    assert!(app.last_error.is_none(), "{:?}", app.last_error);
+    assert!(
+        app.last_notice.is_none(),
+        "略算モードでは注意メッセージは出ないはず: {:?}",
+        app.last_notice
+    );
+    assert!(app.results.is_none(), "固有値解析は実行されていないはず");
+
+    let ex = app
+        .model
+        .load_cases
+        .iter()
+        .find(|lc| lc.name == EX_CASE_NAME)
+        .expect("EXケースが同期されるはず");
+    assert!(!ex.nodal.is_empty(), "EXには水平力が入っているはず");
+    let ey = app
+        .model
+        .load_cases
+        .iter()
+        .find(|lc| lc.name == EY_CASE_NAME)
+        .expect("EYケースが同期されるはず");
+    assert!(!ey.nodal.is_empty(), "EYには水平力が入っているはず");
+}
+
+/// 性能修正: 精算周期（`AiMode::SemiPrecise`）を選択したが固有値解析が
+/// 未実行の場合、`sync_seismic_load_cases_action` は EX/EY を更新せず、
+/// `last_notice` に実行を促すメッセージを設定する（`last_error` は使わない。
+/// 解析自体は継続してよいため）。
+#[test]
+fn test_sync_seismic_semiprecise_without_eigen_sets_notice_and_skips() {
+    let mut app = App::default();
+    app.load_model(crate::sample::portal_frame());
+    // まず既定(略算)で EX/EY を生成しておく。
+    app.generate_stories_action();
+    assert!(app.last_error.is_none(), "{:?}", app.last_error);
+    let ex_before = app
+        .model
+        .load_cases
+        .iter()
+        .find(|lc| lc.name == EX_CASE_NAME)
+        .cloned()
+        .expect("EXケースが同期されているはず");
+
+    // 精算周期へ切り替え、固有値解析は実行しない。
+    app.analysis_cfg.ai_mode = AiMode::SemiPrecise;
+    app.last_notice = None;
+    app.sync_seismic_load_cases_action();
+
+    assert!(
+        app.last_notice.is_some(),
+        "固有値解析未実行時は注意メッセージが設定されるはず"
+    );
+    let ex_after = app
+        .model
+        .load_cases
+        .iter()
+        .find(|lc| lc.name == EX_CASE_NAME)
+        .cloned()
+        .expect("EXケースは残っているはず（削除されない）");
+    assert_eq!(
+        ex_before, ex_after,
+        "固有値解析未実行時はEXケースが更新されないはず"
+    );
+
+    // run_seismic も同様に、解析を行わず last_error で案内する。
+    app.last_error = None;
+    app.run_seismic(SeismicDir::X);
+    assert!(
+        app.last_error.is_some(),
+        "SemiPreciseで固有値解析未実行ならrun_seismicはエラーを返すはず"
+    );
+}
+
+/// 性能修正: `sync_auto_load_cases_action` は前回同期時からモデル・関連設定
+/// （`analysis_cfg` の一部）が変わっていなければ DL/LL/EX/EY の再計算を
+/// 丸ごとスキップする。ハッシュが一致する状態を人為的に作り、既存の
+/// （手で壊した）荷重ケース内容が上書きされない＝スキップされたことを確認する。
+#[test]
+fn test_sync_auto_load_cases_action_skips_when_hash_unchanged() {
+    let mut app = App::default();
+    app.load_model(crate::sample::portal_frame());
+    app.generate_stories_action();
+    assert!(app.last_error.is_none(), "{:?}", app.last_error);
+
+    let ex_idx = app
+        .model
+        .load_cases
+        .iter()
+        .position(|lc| lc.name == EX_CASE_NAME)
+        .expect("EXケースが生成されているはず");
+    assert!(
+        !app.model.load_cases[ex_idx].nodal.is_empty(),
+        "前提: EXには水平力が入っているはず"
+    );
+    // EX ケースの内容を手で壊す。
+    app.model.load_cases[ex_idx].nodal.clear();
+    app.model.load_cases[ex_idx].member.clear();
+
+    // 「この(壊れた)モデル状態で同期済み」であるとキャッシュへ偽装する
+    // （`compute_auto_load_sync_hash` と同じロジック。Approx モードなので
+    // 固有周期 T のハッシュ組み込みは対象外）。
+    fn fake_hash(app: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if let Ok(bytes) = bincode::serialize(&app.model) {
+            bytes.hash(&mut hasher);
+        }
+        std::mem::discriminant(&app.analysis_cfg.ai_mode).hash(&mut hasher);
+        app.analysis_cfg.z.to_bits().hash(&mut hasher);
+        (app.analysis_cfg.soil as u8).hash(&mut hasher);
+        app.analysis_cfg.c0.to_bits().hash(&mut hasher);
+        hasher.finish()
+    }
+    app.auto_load_sync_hash = Some(fake_hash(&app));
+
+    app.sync_auto_load_cases_action();
+
+    let ex_after = &app.model.load_cases[ex_idx];
+    assert!(
+        ex_after.nodal.is_empty() && ex_after.member.is_empty(),
+        "ハッシュ一致時は同期がスキップされ、壊した内容がそのまま残るはず"
+    );
+}
+
 /// 剛床代表節点は慣性力重心に自動生成される。再度自動生成しても
 /// 既存の代表節点を再利用するため節点数が増えないことを確認する
 /// （story_gen + edit の統合: `generate_stories` → `ApplyStories` の往復）。
@@ -940,6 +1073,188 @@ fn test_start_job_while_running_is_rejected() {
     assert!(app.last_error.is_none(), "{:?}", app.last_error);
     assert!(app.results.as_ref().unwrap().pushover.is_some());
     assert!(app.results.as_ref().unwrap().time_history.is_none());
+}
+
+/// `start_linear_static_job` はバックグラウンドで `run_linear_static` と同じ結果
+/// （変位・格納キー・検定結果）を与える。
+#[test]
+fn test_async_linear_static_job_flow() {
+    let mut app_sync = App::default();
+    app_sync.load_model(crate::sample::portal_frame());
+    app_sync.run_linear_static(LoadCaseId(0));
+    assert!(app_sync.last_error.is_none(), "{:?}", app_sync.last_error);
+    let expected_disp = app_sync.results.as_ref().unwrap().statics[0].1.disp.clone();
+
+    let mut app = App::default();
+    app.load_model(crate::sample::portal_frame());
+    app.start_linear_static_job(LoadCaseId(0));
+    assert!(app.job.is_some());
+    assert_eq!(app.job.as_ref().unwrap().label, "線形静的解析");
+
+    wait_for_job(&mut app);
+
+    assert!(app.last_error.is_none(), "{:?}", app.last_error);
+    assert!(app.job.is_none());
+    let bundle = app.results.as_ref().unwrap();
+    let (_, static_once) = bundle
+        .statics
+        .iter()
+        .find(|(k, _)| *k == StaticCaseKey::User(LoadCaseId(0)))
+        .expect("線形静的解析結果が格納されるはず");
+    assert_eq!(static_once.disp, expected_disp);
+    assert_eq!(
+        app.last_static,
+        Some(StaticKey::Case(StaticCaseKey::User(LoadCaseId(0))))
+    );
+    assert!(!bundle.checks.is_empty());
+}
+
+/// `start_combination_job` はバックグラウンドで `run_combination` と同じ結果を与える。
+#[test]
+fn test_async_combination_job_flow() {
+    let combo = squid_n_core::model::LoadCombination {
+        name: "G+Kx".into(),
+        terms: vec![(LoadCaseId(0), 1.0), (LoadCaseId(1), 1.0)],
+    };
+
+    let mut app = App::default();
+    app.load_model(crate::sample::portal_frame());
+    app.undo.run(
+        &mut app.model,
+        Box::new(squid_n_edit::AddCombination {
+            combo: combo.clone(),
+        }),
+    );
+
+    app.start_combination_job(0);
+    assert!(app.job.is_some());
+    assert_eq!(app.job.as_ref().unwrap().label, "荷重組合せ解析");
+
+    wait_for_job(&mut app);
+
+    assert!(app.last_error.is_none(), "{:?}", app.last_error);
+    assert!(app.job.is_none());
+    let bundle = app.results.as_ref().unwrap();
+    assert_eq!(bundle.combos.len(), 1);
+    assert_eq!(bundle.combos[0].0, combo.name);
+    assert!(!bundle.checks.is_empty());
+    assert_eq!(app.last_static, Some(StaticKey::Combo(0)));
+}
+
+/// `start_all_combinations_job` はバックグラウンドで `run_all_combinations` と
+/// 同じ結果（combos の名前・変位）を与える。決定性のため `threads=1` を明示する。
+#[test]
+fn test_async_all_combinations_job_flow() {
+    let combos = vec![
+        squid_n_core::model::LoadCombination {
+            name: "G+Kx".into(),
+            terms: vec![(LoadCaseId(0), 1.0), (LoadCaseId(1), 1.0)],
+        },
+        squid_n_core::model::LoadCombination {
+            name: "G-Kx".into(),
+            terms: vec![(LoadCaseId(0), 1.0), (LoadCaseId(1), -1.0)],
+        },
+    ];
+
+    let mut app_sync = App::default();
+    app_sync.load_model(crate::sample::portal_frame());
+    app_sync.analysis_cfg.threads = 1;
+    for combo in &combos {
+        app_sync.undo.run(
+            &mut app_sync.model,
+            Box::new(squid_n_edit::AddCombination {
+                combo: combo.clone(),
+            }),
+        );
+    }
+    app_sync.run_all_combinations();
+    assert!(app_sync.last_error.is_none(), "{:?}", app_sync.last_error);
+
+    let mut app = App::default();
+    app.load_model(crate::sample::portal_frame());
+    app.analysis_cfg.threads = 1;
+    for combo in &combos {
+        app.undo.run(
+            &mut app.model,
+            Box::new(squid_n_edit::AddCombination {
+                combo: combo.clone(),
+            }),
+        );
+    }
+    app.start_all_combinations_job();
+    assert!(app.job.is_some());
+    assert_eq!(app.job.as_ref().unwrap().label, "全組合せ一括解析");
+
+    wait_for_job(&mut app);
+
+    assert!(app.last_error.is_none(), "{:?}", app.last_error);
+    assert!(app.job.is_none());
+    let bundle_sync = app_sync.results.as_ref().unwrap();
+    let bundle = app.results.as_ref().unwrap();
+    assert_eq!(bundle.combos.len(), bundle_sync.combos.len());
+    for ((name, res), (name_sync, res_sync)) in bundle.combos.iter().zip(bundle_sync.combos.iter())
+    {
+        assert_eq!(name, name_sync);
+        assert_eq!(res.disp, res_sync.disp);
+    }
+    assert_eq!(app.last_static, app_sync.last_static);
+}
+
+/// `start_seismic_job` はバックグラウンドで `run_seismic` と同じ結果を与える。
+#[test]
+fn test_async_seismic_job_flow() {
+    let mut app = App::default();
+    app.load_model(crate::sample::portal_frame());
+    app.generate_stories_action();
+    assert!(app.last_error.is_none(), "{:?}", app.last_error);
+
+    app.start_seismic_job(SeismicDir::X);
+    assert!(app.job.is_some());
+    assert_eq!(app.job.as_ref().unwrap().label, "地震静的解析");
+
+    wait_for_job(&mut app);
+
+    assert!(app.last_error.is_none(), "{:?}", app.last_error);
+    assert!(app.job.is_none());
+    let bundle = app.results.as_ref().unwrap();
+    assert!(bundle
+        .statics
+        .iter()
+        .any(|(k, _)| *k == StaticCaseKey::Seismic(SeismicDir::X)));
+    assert_eq!(
+        app.last_static,
+        Some(StaticKey::Case(StaticCaseKey::Seismic(SeismicDir::X)))
+    );
+    assert!(!bundle.checks.is_empty());
+}
+
+/// `start_wind_job` はバックグラウンドで `run_wind` と同じ結果を与える
+/// （サンプルの門型ラーメンは Y 方向の風のみ見付け幅を持つ。`test_run_wind_static`
+/// と同じ理由）。
+#[test]
+fn test_async_wind_job_flow() {
+    let mut app = App::default();
+    app.load_model(crate::sample::portal_frame());
+    app.generate_stories_action();
+    assert!(app.last_error.is_none(), "{:?}", app.last_error);
+
+    app.start_wind_job(SeismicDir::Y);
+    assert!(app.job.is_some());
+    assert_eq!(app.job.as_ref().unwrap().label, "風荷重静的解析");
+
+    wait_for_job(&mut app);
+
+    assert!(app.last_error.is_none(), "{:?}", app.last_error);
+    assert!(app.job.is_none());
+    let bundle = app.results.as_ref().unwrap();
+    assert!(bundle
+        .statics
+        .iter()
+        .any(|(k, _)| *k == StaticCaseKey::Wind(SeismicDir::Y)));
+    assert_eq!(
+        app.last_static,
+        Some(StaticKey::Case(StaticCaseKey::Wind(SeismicDir::Y)))
+    );
 }
 
 #[test]

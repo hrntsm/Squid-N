@@ -22,7 +22,9 @@
 //! - `EndCondition::SemiRigid` はピンとみなさず G の計算値をそのまま用いる。
 //! - 剛域・特殊形状による材長補正は行わず、節点間の幾何学的長さを用いる。
 
+use squid_n_core::ids::NodeId;
 use squid_n_core::model::{ElementData, ElementKind, EndCondition, Model};
+use std::collections::HashMap;
 
 /// ピン端・梁無し節点に用いる剛度比 G の規定値（本実装の既定値）。
 const G_PIN: f64 = 10.0;
@@ -91,7 +93,42 @@ fn flexural_stiffness(model: &Model, elem: &ElementData, length: f64) -> Option<
     Some(mat.young * sec.iy / length)
 }
 
-/// 節点 `node_idx`（`elem.nodes` の 0/1）まわりの剛度比 G を求める。
+/// 節点ID → その節点に接続する線材（`ElementKind::Beam`）要素への参照インデックス。
+///
+/// `g_ratio_at_with_index`（延いては `steel_column_k_with_index`）が節点まわりの
+/// 部材を求める際に、モデル全要素を毎回線形走査するのを避けるために使う。
+/// 判定ロジック自体（どの要素を G の柱側/梁側に数えるか）は一切変更しない
+/// （ここで絞り込むのは従来の `other.kind == ElementKind::Beam &&
+/// other.nodes[..2].contains(node_id)` と同じ集合）。
+pub struct BeamNodeIndex<'m> {
+    by_node: HashMap<NodeId, Vec<&'m ElementData>>,
+}
+
+impl<'m> BeamNodeIndex<'m> {
+    /// モデル全体から一度だけ構築する。複数回の `steel_column_k_with_index`
+    /// 呼び出し（部材数ぶん）で使い回すことを想定する。
+    pub fn build(model: &'m Model) -> Self {
+        let mut by_node: HashMap<NodeId, Vec<&'m ElementData>> = HashMap::new();
+        for elem in &model.elements {
+            if elem.kind != ElementKind::Beam {
+                continue;
+            }
+            for node_id in elem.nodes.iter().take(2) {
+                by_node.entry(*node_id).or_default().push(elem);
+            }
+        }
+        Self { by_node }
+    }
+
+    fn beams_at(&self, node_id: NodeId) -> &[&'m ElementData] {
+        self.by_node
+            .get(&node_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+}
+
+/// 節点 `node_idx`（`elem.nodes` の 0/1）まわりの剛度比 G を求める（インデックス版）。
 ///
 /// `G = Σ(E・I/L)_柱 / Σ(E・I/L)_梁`。部材種別は部材軸の鉛直成分による
 /// 幾何判定（|ez| ≥ 0.8 柱、|ez| ≤ 0.2 梁。それ以外＝斜材は無視）で、
@@ -99,7 +136,12 @@ fn flexural_stiffness(model: &Model, elem: &ElementData, length: f64) -> Option<
 ///
 /// - 当該柱端の `EndCondition` が `Pinned` の場合は G=10（本実装の既定値）。
 /// - 節点に接する梁が無い場合（Σ梁 = 0）は G=10（同上）。
-fn g_ratio_at(model: &Model, column: &ElementData, node_idx: usize) -> f64 {
+fn g_ratio_at_with_index(
+    model: &Model,
+    index: &BeamNodeIndex<'_>,
+    column: &ElementData,
+    node_idx: usize,
+) -> f64 {
     if matches!(column.end_cond.get(node_idx), Some(EndCondition::Pinned)) {
         return G_PIN;
     }
@@ -109,13 +151,7 @@ fn g_ratio_at(model: &Model, column: &ElementData, node_idx: usize) -> f64 {
 
     let mut sum_col = 0.0_f64;
     let mut sum_beam = 0.0_f64;
-    for other in &model.elements {
-        if other.kind != ElementKind::Beam {
-            continue;
-        }
-        if !other.nodes.iter().take(2).any(|n| n == node_id) {
-            continue;
-        }
+    for other in index.beams_at(*node_id) {
         let Some((len, ez)) = line_geometry(model, other) else {
             continue;
         };
@@ -136,11 +172,18 @@ fn g_ratio_at(model: &Model, column: &ElementData, node_idx: usize) -> f64 {
 }
 
 /// 柱 `elem` の座屈長さ係数 K（水平移動が拘束されない場合）を、モデルの
-/// 節点まわり剛度比から算定する。
+/// 節点まわり剛度比から算定する（インデックス版）。
 ///
 /// 柱でない（幾何判定で |ez| < 0.8）、または線材でない場合は None。
 /// 呼び出し側は `lk = K・L` を [`crate::DesignCtx::lk`] に渡すことを想定する。
-pub fn steel_column_k(model: &Model, elem: &ElementData) -> Option<f64> {
+///
+/// `index` は事前に `BeamNodeIndex::build(model)` で一度だけ構築し、
+/// 全部材ぶんのループで使い回すこと（全部材×全要素の O(n²) 線形探索を回避）。
+pub fn steel_column_k_with_index(
+    model: &Model,
+    index: &BeamNodeIndex<'_>,
+    elem: &ElementData,
+) -> Option<f64> {
     if elem.kind != ElementKind::Beam {
         return None;
     }
@@ -148,9 +191,23 @@ pub fn steel_column_k(model: &Model, elem: &ElementData) -> Option<f64> {
     if ez < 0.8 {
         return None;
     }
-    let ga = g_ratio_at(model, elem, 0);
-    let gb = g_ratio_at(model, elem, 1);
+    let ga = g_ratio_at_with_index(model, index, elem, 0);
+    let gb = g_ratio_at_with_index(model, index, elem, 1);
     Some(sway_buckling_k(ga, gb))
+}
+
+/// 柱 `elem` の座屈長さ係数 K（水平移動が拘束されない場合）を、モデルの
+/// 節点まわり剛度比から算定する。
+///
+/// 柱でない（幾何判定で |ez| < 0.8）、または線材でない場合は None。
+/// 呼び出し側は `lk = K・L` を [`crate::DesignCtx::lk`] に渡すことを想定する。
+///
+/// 単発呼び出し用の互換 API（内部で `BeamNodeIndex` を都度構築する）。
+/// 部材数ぶんループで呼ぶ場合は `BeamNodeIndex::build` を一度だけ構築して
+/// [`steel_column_k_with_index`] を使うこと（O(n²) を避けられる）。
+pub fn steel_column_k(model: &Model, elem: &ElementData) -> Option<f64> {
+    let index = BeamNodeIndex::build(model);
+    steel_column_k_with_index(model, &index, elem)
 }
 
 #[cfg(test)]
