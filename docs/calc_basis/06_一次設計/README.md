@@ -7,7 +7,7 @@
 > 各項目は「導入文（何を・どの基準で）、算定式、実装」の順で記す。
 
 実装は `squid_n_design_jp` にある。
-材料強度は `material_strength.rs` が担い、突合の全体は[断面検定_参照実装照合](https://github.com/hrntsm/squid-n/blob/main/v_and_v/断面検定_参照実装照合.md)を参照する。
+材料強度は `material_strength.rs` が担い、突合の全体は[断面検定_参照実装照合](https://github.com/hrntsm/squid-n/blob/main/dev_docs/v_and_v/断面検定_参照実装照合.md)を参照する。
 
 ## この章の内容
 

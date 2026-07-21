@@ -1,6 +1,6 @@
 # P4 レビュー報告（仕様 vs 実装の乖離・資料上の報告の正確性・仕様自体の妥当性）
 
-本報告は `specs/P4_材料と断面.md`（設計書 §6.3/§7/§8/§18）と現状実装（`squid-n-material`・`squid-n-section`・`squid-n-skeleton`、および後続が依存する `squid-n-element`/`squid-n-design-jp` 周辺）を照合し、
+本報告は `dev_docs/specs/P4_材料と断面.md`（設計書 §6.3/§7/§8/§18）と現状実装（`squid-n-material`・`squid-n-section`・`squid-n-skeleton`、および後続が依存する `squid-n-element`/`squid-n-design-jp` 周辺）を照合し、
 「仕様通りか」「実装が間違っていないか」「資料上の報告が間違っていないか」「仕様自体がこのライブラリの目的（日本の建築構造計算一貫プログラム）に適するか」を審査した結果である。
 前提: `cargo build --workspace` は成功。`cargo test` は（下記に示す緩い assert のため）緑になる可能性が高いが、**DoD（§8.4）は未達**。
 
@@ -151,7 +151,7 @@ pub fn section_response(
 pub material: usize,
 ```
 
-- 仕様 §6 の雛形: `pub material: MaterialId`。実装は `usize`。「ライブラリAPIは調査不要・写譯で埋める」（specs/README §5）の方針に反し、型が違う。`MaterialId` を使えば `model.materials[mat_id.index()]` で参照でき、`squid-n-core` との整合が取れる。
+- 仕様 §6 の雛形: `pub material: MaterialId`。実装は `usize`。「ライブラリAPIは調査不要・写譯で埋める」（dev_docs/specs/README §5）の方針に反し、型が違う。`MaterialId` を使えば `model.materials[mat_id.index()]` で参照でき、`squid-n-core` との整合が取れる。
 
 ### 1.9 `section_response` の接線剛性は正しいが、単位規定がない
 `crates/squid-n-section/src/fiber.rs:38` の doc に単位が無い。`Fiber.y/z` が mm か m か、`area` が mm² か m² か、`SectionStrain.eps0/ky/kz` の単位（無次元・1/mm・1/m）。`SectionForce.n/my/mz` が N・N·mm か kN・kN·m か。
@@ -284,16 +284,16 @@ alpha: 0.4,
 
 ## 3. 資料上の報告の正確性
 
-### 3.1 V&V 索引（`v_and_v/README.md`）に P4 項目が存在しない ★過小申告
-`v_and_v/README.md:44-64` の索引 #1〜#18 に、P4 の核心（履歴則・ファイバ断面・スケルトン）の行が無い。#15 プッシュオーバー（P5）、#16 壁（P5.5）、#17 時刻歴（P6）、#18 限界耐力（P12）はあるのに、**P4 の「履歴則」「ファイバ断面」「スケルトン自動算定」が欠落**。
+### 3.1 V&V 索引（`dev_docs/v_and_v/README.md`）に P4 項目が存在しない ★過小申告
+`dev_docs/v_and_v/README.md:44-64` の索引 #1〜#18 に、P4 の核心（履歴則・ファイバ断面・スケルトン）の行が無い。#15 プッシュオーバー（P5）、#16 壁（P5.5）、#17 時刻歴（P6）、#18 限界耐力（P12）はあるのに、**P4 の「履歴則」「ファイバ断面」「スケルトン自動算定」が欠落**。
 - P4 が完了扱いで索引に載せられていないことは、P3 レビュー §3.2 と同じく過小申告。P4 の DoD §8.4 の 3 項目を索引に加え、現状は ❌ または 🔶 と明記すべき。
 
 ### 3.2 `pending_items.md` に P4 の未達項目が記載されていない ★過小申告
-`v_and_v/pending_items.md` は P3（§7）・P5（§1）・P5.5（§2）・P6（§3）の未達を記録するが、**P4 のセクションが存在しない**。経過表（§経過:143-149）も P3/P5/P5.5/P6 のみで P4 が抜ける。
+`dev_docs/v_and_v/pending_items.md` は P3（§7）・P5（§1）・P5.5（§2）・P6（§3）の未達を記録するが、**P4 のセクションが存在しない**。経過表（§経過:143-149）も P3/P5/P5.5/P6 のみで P4 が抜ける。
 - P4 が「完了」扱いで未達が記録されていない。P3 レビューを受けて P3 項目は充実したが、P4 は未対応。本レビューの §1/§2 を pending_items.md に P4 セクションとして起票すべき。
 
-### 3.3 `specs/README.md` の状態表は「作成済」で妥当
-`specs/README.md:22` の P4 行「作成済」は仕様書の作成状態を指し、実装完了ではない。これは README の文脈（「状態」=仕様書有無）として妥当。ただし実装完了とは別であり、P4 仕様書の §0.2「完了像」が満たされていないことをどこかに明示する必要がある（現状どこにも明記なし）。
+### 3.3 `dev_docs/specs/README.md` の状態表は「作成済」で妥当
+`dev_docs/specs/README.md:22` の P4 行「作成済」は仕様書の作成状態を指し、実装完了ではない。これは README の文脈（「状態」=仕様書有無）として妥当。ただし実装完了とは別であり、P4 仕様書の §0.2「完了像」が満たされていないことをどこかに明示する必要がある（現状どこにも明記なし）。
 
 ---
 
@@ -368,8 +368,8 @@ alpha: 0.4,
    - `Concrete::new`/`MenegottoPinto::new` のデフォルト埋込を廃止。外部データまたは `with_params` 必須化。
    - `build_member_skeleton` の `max_curvature/num_steps/alpha` を外部設定化。
 7. **V&V 索引と pending_items.md の補完**
-   - `v_and_v/README.md` の索引に「履歴則」「ファイバ断面」「スケルトン自動算定」を追加。現状は ❌。
-   - `v_and_v/pending_items.md` に P4 セクションを新設し、§1/§2 の未達を記載。
+   - `dev_docs/v_and_v/README.md` の索引に「履歴則」「ファイバ断面」「スケルトン自動算定」を追加。現状は ❌。
+   - `dev_docs/v_and_v/pending_items.md` に P4 セクションを新設し、§1/§2 の未達を記載。
 8. **仕様書の改訂**
    - §6 に単位規定（mm/mm²/1/mm/N/N·mm）を明記。
    - §6 にファイバ状態管理規則（ファイバごとに独立インスタンス）を明記。

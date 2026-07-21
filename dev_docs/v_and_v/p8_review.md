@@ -1,7 +1,7 @@
 # P8（操作・連携：MCP・ST-Bridge・GUI拡充）監査レポート
 
 **監査日:** 2026-06-22
-**対象:** `crates/squid-n-mcp`・`crates/squid-n-io/src/stbridge.rs`・`crates/squid-n-edit`・`crates/squid-n-app`／`specs/P8_操作と連携.md`
+**対象:** `crates/squid-n-mcp`・`crates/squid-n-io/src/stbridge.rs`・`crates/squid-n-edit`・`crates/squid-n-app`／`dev_docs/specs/P8_操作と連携.md`
 **結論:** P8 は「実装」とコミットされているが、**MCP は `--features mcp` でコンパイル不能**、
 ST-Bridge は未実装、MCP ツールの中身は大半がスタブ。DoD §8.1〜§8.3 はいずれも未達。
 
@@ -9,7 +9,7 @@ ST-Bridge は未実装、MCP ツールの中身は大半がスタブ。DoD §8.1
 
 ## 1. 完了報告との乖離
 
-- コミット `f1b6c4d "P8 操作・連携 実装と specs/P8 の整合性調整"` は「実装」と称している。
+- コミット `f1b6c4d "P8 操作・連携 実装と dev_docs/specs/P8 の整合性調整"` は「実装」と称している。
 - V&V README の索引には P8 の行が無く（明示の ✅ 虚偽記載は無い）、しかし「実装済み」の体裁で main にある。
 - **実態:** 下表のとおり MCP サーバは非デフォルト機能 `mcp` の下でコンパイルすら通らず（13 エラー）、
   通常ビルド・テストで一度も検証されていない（P7 の `p7` と同じ rot 罠）。テストは squid-n-mcp・stbridge とも **0 件**。

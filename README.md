@@ -36,8 +36,9 @@ cargo build --workspace
 （`main` への push で GitHub Pages に自動デプロイ）。ローカルでのプレビュー手順は
 [CONTRIBUTING.md](CONTRIBUTING.md#ドキュメントサイトmdbook) を参照。
 
-各要素・設計式の検証状況は `v_and_v/README.md` を参照（開発者向け。設計仕様は `specs/`、
-開発運用ドキュメントは `dev_docs/`。いずれもドキュメントサイトには含めない）。
+開発者向けドキュメントは `dev_docs/` に集約している（ドキュメントサイトには含めない）。
+設計仕様は `dev_docs/specs/`、各要素・設計式の検証状況は `dev_docs/v_and_v/README.md`、
+ロードマップ・申し送りは `dev_docs/ROADMAP.md`・`dev_docs/handoff/` を参照。
 
 ## ライセンス
 
