@@ -14,7 +14,7 @@ use squid_n_core::model::Model;
 /// で片側協力幅を算定する。対象は水平材（勾配 5% までは水平とみなす）のみ。
 /// 適用不能（スラブ厚 t≤0・非水平・取り付く床なし・bf≤b）は None。
 /// 連続梁の λ・吹抜け補正・二重スラブ/片持ちスラブの区別は未対応（v1。
-/// docs/v_and_v/剛性計算_参照実装照合.md 参照）。
+/// dev_docs/v_and_v/剛性計算_参照実装照合.md 参照）。
 fn slab_cooperating_width(
     model: &Model,
     data: &squid_n_core::model::ElementData,

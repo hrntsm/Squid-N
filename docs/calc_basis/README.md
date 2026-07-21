@@ -4,7 +4,7 @@
 
 構造計算一貫プログラムは、応力や変形、検定比、保有水平耐力といった出力を、法令や規準に定められた根拠に基づいて算定したものだと説明できなければならない。
 このセクションは「なぜその値になるのか」、すなわち法令、規準、力学の根拠を扱う。
-開発者向けの設計仕様（[specs](https://github.com/hrntsm/squid-n/blob/main/specs/README.md)）と検証記録（[V&V](https://github.com/hrntsm/squid-n/blob/main/v_and_v/README.md)）はリポジトリにある。
+開発者向けの設計仕様（[specs](https://github.com/hrntsm/squid-n/blob/main/dev_docs/specs/README.md)）と検証記録（[V&V](https://github.com/hrntsm/squid-n/blob/main/dev_docs/v_and_v/README.md)）はリポジトリにある。
 
 ## このセクションの読み方
 
@@ -15,7 +15,7 @@
 最後に **実装** で、どのクレートのどの関数が算定するかを `crate::path::func` の形で示し、読者がコードと照合できるようにする。
 
 数式は原則として、実装コードに現れる記号や係数の形で記す。
-実装への逐語的な定数の対応は、技術リードのサインオフ用チェックリストである[原典照合リスト](https://github.com/hrntsm/squid-n/blob/main/specs/原典照合リスト.md)と相互に参照する。
+実装への逐語的な定数の対応は、技術リードのサインオフ用チェックリストである[原典照合リスト](https://github.com/hrntsm/squid-n/blob/main/dev_docs/specs/原典照合リスト.md)と相互に参照する。
 
 ## 目次
 
@@ -79,12 +79,12 @@ Squid-N はこの体系に沿って計算を構成している。
 
 **CFT指針**：『コンクリート充填鋼管（CFT）構造設計・施工指針』。
 
-このほか、規準・指針が式を直接与えない実務的取扱い（床荷重の分配、壁エレメント置換、剛床への荷重按分など）は「実務慣用」と明記し、市販の一貫構造計算プログラムとの突合による検証記録を[V&V](https://github.com/hrntsm/squid-n/blob/main/v_and_v/README.md)に置く。
+このほか、規準・指針が式を直接与えない実務的取扱い（床荷重の分配、壁エレメント置換、剛床への荷重按分など）は「実務慣用」と明記し、市販の一貫構造計算プログラムとの突合による検証記録を[V&V](https://github.com/hrntsm/squid-n/blob/main/dev_docs/v_and_v/README.md)に置く。
 製品固有の係数（免震・制振部材、高強度せん断補強筋等）は各製品の技術資料・大臣認定値（Category B）に依拠する。
 
 ## 出典の分類（Category A / B）
 
-本ソフトが用いる数値や式を、[原典照合リスト](https://github.com/hrntsm/squid-n/blob/main/specs/原典照合リスト.md)の方針に従って次のように区分する。
+本ソフトが用いる数値や式を、[原典照合リスト](https://github.com/hrntsm/squid-n/blob/main/dev_docs/specs/原典照合リスト.md)の方針に従って次のように区分する。
 
 **Category A（法令・告示の公開値）**：誰でも原典（法令や告示）で照合できる値を指す。
 このセクションはこれらを条番号や式番号まで明示する。
@@ -93,7 +93,7 @@ Squid-N はこの体系に沿って計算を構成している。
 出典の文献名とページを併記し、利用組織がライセンスや実測で確定すべき旨を明記する。
 
 **力学の閉形式**：ティモシェンコ梁剛性、CMQ、Newmark 更新式のような教科書的な力学式を指す。
-原典照合ではなく、理論解と一致するかどうかの数値 DoD で自己検証する（[V&V](https://github.com/hrntsm/squid-n/blob/main/v_and_v/README.md)）。
+原典照合ではなく、理論解と一致するかどうかの数値 DoD で自己検証する（[V&V](https://github.com/hrntsm/squid-n/blob/main/dev_docs/v_and_v/README.md)）。
 
 ## 単位系・記号の凡例
 

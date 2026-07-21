@@ -1,4 +1,4 @@
-//! T2: 偏心率 Re（剛心＝武藤 D値法・略算）。仕様 `specs/P7_二次設計.md` §5。
+//! T2: 偏心率 Re（剛心＝武藤 D値法・略算）。仕様 `dev_docs/specs/P7_二次設計.md` §5。
 //!
 //! 本モジュールは2層構造になっている:
 //! 1. **厳密な計算コア**（`d_value` / `center_of_rigidity` / `eccentricity`）。

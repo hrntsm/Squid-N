@@ -17,12 +17,12 @@ Rust で実装されています。
 
 ## 開発者向け資料
 
-設計仕様（specs）・検証記録（V&V）・開発運用ドキュメントは開発者向けのため本サイトには含めていません。
-リポジトリの以下を参照してください。
+設計仕様・検証記録・開発運用ドキュメントは開発者向けのため本サイトには含めていません。
+これらは [dev_docs/](https://github.com/hrntsm/squid-n/tree/main/dev_docs) に集約しており、リポジトリの以下を参照してください。
 
-- [specs/](https://github.com/hrntsm/squid-n/tree/main/specs)：フェーズ単位の実装仕様書と原典（法令・規準）照合リスト
-- [v_and_v/](https://github.com/hrntsm/squid-n/tree/main/v_and_v)：各要素・各設計式の Verification & Validation レポート
-- [dev_docs/](https://github.com/hrntsm/squid-n/tree/main/dev_docs)：ロードマップ、申し送り、UI 関連ドキュメント
+- [dev_docs/specs/](https://github.com/hrntsm/squid-n/tree/main/dev_docs/specs)：フェーズ単位の実装仕様書と原典（法令・規準）照合リスト
+- [dev_docs/v_and_v/](https://github.com/hrntsm/squid-n/tree/main/dev_docs/v_and_v)：各要素・各設計式の Verification & Validation レポート
+- [dev_docs/ROADMAP.md](https://github.com/hrntsm/squid-n/blob/main/dev_docs/ROADMAP.md)・[dev_docs/handoff/](https://github.com/hrntsm/squid-n/tree/main/dev_docs/handoff)：ロードマップ、申し送り、UI 関連ドキュメント
 
 ## リポジトリ
 

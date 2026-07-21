@@ -28,7 +28,7 @@ jobs:
         run: cargo test --workspace
       # mcp は非デフォルト feature のため --workspace では検証されない。
       # 過去に rmcp API 追従漏れでコンパイル不能のまま放置された経緯があり
-      # （v_and_v/p8_review.md）、ここで明示的にビルド・テストして再発を防ぐ。
+      # （dev_docs/v_and_v/p8_review.md）、ここで明示的にビルド・テストして再発を防ぐ。
       - name: MCP featureテスト実行
         run: cargo test -p squid-n-mcp --features mcp
       # gui は非デフォルト feature のため --workspace では検証されない。

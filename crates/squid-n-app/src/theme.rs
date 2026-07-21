@@ -43,15 +43,15 @@ pub const GREEN_600: Color32 = Color32::from_rgb(0x16, 0xA3, 0x4A);
 pub const ERROR_RED: Color32 = Color32::from_rgb(0xEA, 0x43, 0x35);
 
 // ===== §3 データビジュアライゼーション配色 =====
-/// データ点・通常 trial（デフォルトの試行点・バー・線・リンク）
+/// 標準・既定（既定の線・要素・変位、グラフの基準系列）
 pub const DATA_BLUE: Color32 = Color32::from_rgb(0x42, 0x85, 0xF4);
-/// パレート解・重要・負方向（高スコア・負のバー）
+/// 超過・危険側（検定比 > 1.0＝NG・応力集中・負方向の量・崩壊ヒンジ）
 pub const PARETO_RED: Color32 = Color32::from_rgb(0xEA, 0x43, 0x35);
-/// 強調・ベスト・中間
+/// 注意・中間（検定比 0.8〜1.0・中間状態・予測値）
 pub const BEST_YELLOW: Color32 = Color32::from_rgb(0xFB, 0xBC, 0x04);
-/// 良好・収束・実行中
+/// 良好・OK（検定比 ≤ 0.8＝OK・収束・正常状態）
 pub const GOOD_GREEN: Color32 = Color32::from_rgb(0x34, 0xA8, 0x53);
-/// ハイライト試行点（選択中の試行点・等高線）
+/// ハイライト（選択中の節点・部材・断面）
 pub const HILITE_PURPLE: Color32 = Color32::from_rgb(0x7C, 0x4D, 0xFF);
 /// 二次部材（小梁・間柱）= 解析対象外の実在部材の線・輪郭
 /// （スラブの BEST_YELLOW と同族の暖色。線の視認性のため濃いめのアンバー）

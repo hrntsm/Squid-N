@@ -6,7 +6,7 @@
 > 各項目は「導入文（何を・どの基準で）、算定式、実装」の順で記す。
 
 実装は `squid_n_design_jp::secondary` に置く。
-監査結果は[P7 監査](https://github.com/hrntsm/squid-n/blob/main/v_and_v/p7_review.md)と[終局検定_参照実装照合](https://github.com/hrntsm/squid-n/blob/main/v_and_v/終局検定_参照実装照合.md)を参照。
+監査結果は[P7 監査](https://github.com/hrntsm/squid-n/blob/main/dev_docs/v_and_v/p7_review.md)と[終局検定_参照実装照合](https://github.com/hrntsm/squid-n/blob/main/dev_docs/v_and_v/終局検定_参照実装照合.md)を参照。
 
 ## この章の内容
 

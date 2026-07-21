@@ -6,7 +6,7 @@
 > 旧版で主張した「V&V 索引 #13 の ✅ は虚偽」という判断自体が誤りであり、#13 ✅ は妥当である。
 > 本来の問題は UI 横断タスク（UI-1/2/3/4/6 等）の未達であり、2026-06 の改修で対応済み。
 
-本報告は `specs/P3_最小UIと設計.md` と現状実装（主に `squid-n-app`・`squid-n-design-jp`・`squid-n-edit`・関連 `squid-n-core/squid-n-section/squid-n-solver/squid-n-element/squid-n-load`）を照合し、
+本報告は `dev_docs/specs/P3_最小UIと設計.md` と現状実装（主に `squid-n-app`・`squid-n-design-jp`・`squid-n-edit`・関連 `squid-n-core/squid-n-section/squid-n-solver/squid-n-element/squid-n-load`）を照合し、
 「仕様通りか」「実装が間違っていないか」「資料上の報告が間違っていないか」「仕様自体がこのライブラリの目的（日本の建築構造計算一貫プログラム）に適するか」を審査した結果である。
 
 ## 0. サマリ
@@ -45,7 +45,7 @@ let expected_ratio = (100.0 * 1000.0 / 5e6) / (235.0 / 1.5);
 ```
 - これは `0.02 / 156.67 ≈ 1.28e-4` を期待値としている。仕様 §6.4 が要求する `0.1197` と**3 桁以上乖離**。
 - テストは「通る」が、DoD「規準例題一致」は未達。`cargo test` の緑が DoD 成立を意味しない典型例。
-- V&V レポート `v_and_v/README.md` の索引 #13「許容応力度設計 ✅」は**虚偽報告**。正しくは 🔶 または ❌。
+- V&V レポート `dev_docs/v_and_v/README.md` の索引 #13「許容応力度設計 ✅」は**虚偽報告**。正しくは 🔶 または ❌。
 
 ### 1.3 RC 設計で Fc をヤング率から取得★致命的
 
@@ -138,7 +138,7 @@ let rebar_grade = "SD345";   // 材料名を見ずに固定
 ## 3. 資料上の報告の正確性
 
 ### 3.1 V&V 索引 #13「許容応力度設計 ✅」は虚偽
-`v_and_v/README.md:58`
+`dev_docs/v_and_v/README.md:58`
 > | 13 | 許容応力度設計 | squid-n-design-jp | allowable_stress.rs | `test_*` | P7 | ✅ |
 
 - §1.1/1.2 に示すとおり、仕様 §6.4 の検算例と一致しないテストしか存在しない。
@@ -146,7 +146,7 @@ let rebar_grade = "SD345";   // 材料名を見ずに固定
 - **正しくは ❌（未達）または 🔶（一部実装）**。併せて「仕様 §6.4 の手計算例（検定比=0.1197）に一致するテストを追加すること」を項目に明記すべき。
 
 ### 3.2 pending_items.md の過小申告
-`v_and_v/pending_items.md:108`
+`dev_docs/v_and_v/pending_items.md:108`
 > | P3 (最小UI) | UI-16 レポート出力の土台 | ❌ |
 
 - UI-16（レポート）は P9 側の項目。P3 のスコープ（§0.3）ではレポートは「含まない → P9」。
@@ -194,7 +194,7 @@ let rebar_grade = "SD345";   // 材料名を見ずに固定
    - 鉄筋グレードを `mat.name` から取得。SD345 短期上限を F=345 に。
    - RC 曲げ・せん断の基本式を実装し、コンクリート許容応力度を検定比に反映。
 3. **V&V 索引 #13 の修正**
-   - `v_and_v/README.md` の #13 を ❌ に変更。フェーズを P3 に修正。§6.4 数値例のテストを追加で合格後に ✅ に戻す。
+   - `dev_docs/v_and_v/README.md` の #13 を ❌ に変更。フェーズを P3 に修正。§6.4 数値例のテストを追加で合格後に ✅ に戻す。
 4. **編集トランザクションの統一**
    - `squid-n-app/src/command.rs` を削除し `squid-n-edit` に統一。`squid-n-app` は `squid-n-edit` に依存。
    - `squid-n-edit::SetNodeCoord` にインデクスチェックを追加。

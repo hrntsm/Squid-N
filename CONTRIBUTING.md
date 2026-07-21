@@ -80,8 +80,8 @@ cargo fmt --all -- --check
 
 ドキュメントサイトは**アプリケーション利用者向け**（計算根拠・理論・出典）です。
 [mdBook](https://rust-lang.github.io/mdBook/) で構築しています。
-開発者向けの設計仕様（`specs/`）・検証（`v_and_v/`）・開発運用ドキュメント
-（`dev_docs/`）はサイトに含めず、リポジトリ内で直接参照してください。
+開発者向けドキュメント（設計仕様・検証記録・申し送り・ロードマップ）は `dev_docs/` に集約しており、
+サイトには含めません。構成は [dev_docs/README.md](dev_docs/README.md) を参照してください。
 
 ```bash
 # mdBook の導入（初回のみ）

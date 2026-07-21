@@ -6,7 +6,7 @@
 //! （`compute_shear_yield_qy`）も同様に軽量な閉形式解を必要とする。本モジュールは
 //! 閉形式の簡易式で Mu・Qsu・Qmu を算定し、両者の入力とする。係数は靭性指針・
 //! 技術基準解説書等の略算式に基づく代表値であり、全て要・原典照合
-//! （specs/原典照合リスト.md）。
+//! （dev_docs/specs/原典照合リスト.md）。
 //!
 //! squid-n-solver（Layer 4）が squid-n-design-jp（Layer 5）に依存できない
 //! （循環依存になる）ため、本体は Layer 0 の squid-n-core に置き、
