@@ -141,8 +141,12 @@ pub struct DesignCtx {
     pub length: f64,
     /// 圧縮フランジの支点間距離（横座屈長さ）lb [mm]。None なら `length`。
     pub lb: Option<f64>,
-    /// 座屈長さ lk [mm]。None なら `length`（座屈長さ係数 K=1 相当）。
-    pub lk: Option<f64>,
+    /// 強軸まわり座屈長さ lk_y [mm]（断面二次半径 i_y=√(Iy/A) と対）。
+    /// None なら `length`（座屈長さ係数 K=1 相当）。[`effective_slenderness`] 参照。
+    pub lk_y: Option<f64>,
+    /// 弱軸まわり座屈長さ lk_z [mm]（断面二次半径 i_z=√(Iz/A) と対）。
+    /// None なら `length`（座屈長さ係数 K=1 相当）。[`effective_slenderness`] 参照。
+    pub lk_z: Option<f64>,
     /// せん断スパン比 M/(Q·d) 算定用の部材代表値 `(|Mz|max, 対応する |Qy|)`
     /// （強軸曲げ方向）。「モーメントが最大となる検定位置の値を採用」の規定に
     /// 対応する。None の場合は当該評価位置の |Mz|, |Qy| を使う。
@@ -181,7 +185,8 @@ impl Default for DesignCtx {
             kind: MemberKind::Beam,
             length: 0.0,
             lb: None,
-            lk: None,
+            lk_y: None,
+            lk_z: None,
             shear_span: None,
             shear_span_y: None,
             rc_damage_control: true,
@@ -192,6 +197,44 @@ impl Default for DesignCtx {
             steel_fb_rule: SteelFbRule::default(),
         }
     }
+}
+
+/// 強軸・弱軸の座屈長さを個別に扱った有効細長比 λ の算定
+/// （鋼構造設計規準・SRC規準の柱・梁・ブレース・CFT 柱で共用）。
+///
+/// `λ = max(λ_y, λ_z)`（`λ_y = lk_y/i_y`、`λ_z = lk_z/i_z`）。
+/// - `i_y = √(max(Iy,0)/A)`、`i_z = √(max(Iz,0)/A)`（`iy`/`iz`/`area` は
+///   呼び出し側が渡す断面二次モーメント・断面積。CFT 柱は鋼管単体の値を渡す
+///   ことで従来の「鋼管単体の i で評価」の流儀を維持できる）。
+/// - `lk_y`/`lk_z` が `None` の場合は `length` を用いる（座屈長さ係数 K=1 相当）。
+/// - 各軸の `i` が極小、または対応する座屈長さが 0 以下の場合は、その軸の
+///   λ を 0（座屈無視）とする。
+///
+/// 両軸とも `None`（=`length` 共通）の場合、`λ = max(length/i_y, length/i_z)
+/// = length/min(i_y, i_z)` となり、軸別座屈長さ導入前の `λ = lk/i_min`
+/// （`i_min = √(min(Iy,Iz)/A)`）と一致する。
+pub fn effective_slenderness(
+    iy: f64,
+    iz: f64,
+    area: f64,
+    length: f64,
+    lk_y: Option<f64>,
+    lk_z: Option<f64>,
+) -> f64 {
+    let axis_lambda = |i_sq: f64, lk: Option<f64>| -> f64 {
+        let i = if area > 1e-9 {
+            (i_sq.max(0.0) / area).sqrt()
+        } else {
+            0.0
+        };
+        let lk_val = lk.unwrap_or(length);
+        if i > 1e-9 && lk_val > 1e-9 {
+            lk_val / i
+        } else {
+            0.0
+        }
+    };
+    axis_lambda(iy, lk_y).max(axis_lambda(iz, lk_z))
 }
 
 pub trait DesignCheck {

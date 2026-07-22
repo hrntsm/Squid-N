@@ -200,17 +200,22 @@ fn h_figure(height: f64, width: f64, web_thick: f64, flange_thick: f64) -> (Stri
 }
 
 /// 角形鋼管の形鋼図形名と `StbSecSteel` エントリ（鋼断面・CFT 角形で共用）。
-fn box_figure(height: f64, width: f64, thick: f64) -> (String, String) {
+///
+/// `corner_r` は断面入力の角部外半径 [mm]。`corner_r > 0` ならその値を r 属性に
+/// 出力する。`corner_r <= 0`（未入力、または角部半径を持たない CftBox 由来）は
+/// ST-Bridge スキーマ上 r（length）に 0 以下を許さないため、従来通り板厚を
+/// 便宜値として与える（取り込み側では r 属性は無視されるため実害は無い）。
+fn box_figure(height: f64, width: f64, thick: f64, corner_r: f64) -> (String, String) {
     let name = format!("BOX-{}x{}x{}", num(height), num(width), num(thick));
-    // type は BCP/BCR/STKR/ELSE のいずれか（種別を内部で持たないため ELSE）。r（角部半径）は
-    // length>0 が必須で取り込みでは無視されるため、板厚を便宜値として与える。
+    // type は BCP/BCR/STKR/ELSE のいずれか（種別を内部で持たないため ELSE）。
+    let r = if corner_r > 0.0 { corner_r } else { thick };
     let body = format!(
         "<StbSecRoll-BOX name=\"{}\" type=\"ELSE\" A=\"{}\" B=\"{}\" t=\"{}\" r=\"{}\"/>",
         esc(&name),
         num(height),
         num(width),
         num(thick),
-        num(thick)
+        num(r)
     );
     (name, body)
 }
@@ -241,7 +246,8 @@ fn steel_figure(shape: &SectionShape) -> Option<(String, String)> {
             height,
             width,
             thick,
-        } => Some(box_figure(height, width, thick)),
+            corner_r,
+        } => Some(box_figure(height, width, thick, corner_r)),
         SectionShape::SteelPipe { outer_dia, thick } => Some(pipe_figure(outer_dia, thick)),
         SectionShape::SteelAngle {
             leg_a,
@@ -594,7 +600,7 @@ fn cft_figure(shape: &SectionShape, steel: &mut SteelLibrary) -> Option<String> 
             height,
             width,
             thick,
-        } => box_figure(height, width, thick),
+        } => box_figure(height, width, thick, 0.0),
         SectionShape::CftPipe { outer_dia, thick } => pipe_figure(outer_dia, thick),
         _ => return None,
     };

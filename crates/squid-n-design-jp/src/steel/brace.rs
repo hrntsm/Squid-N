@@ -2,7 +2,7 @@
 //! 鉄骨ブレースの許容応力度検定）。
 
 use crate::material_strength::{steel_fc, steel_ft};
-use crate::{CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
+use crate::{effective_slenderness, CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
 use squid_n_core::model::Section;
 
 use super::{nonzero, safe_denom};
@@ -18,16 +18,15 @@ pub(crate) fn check_brace(
     term: LoadTerm,
 ) -> CheckResult {
     let area = nonzero(sec.area);
-    // 有効細長比 λ = lk/i_min（i_min は iy/iz の小さい方）。
-    let i_min_sq = sec.iy.min(sec.iz).max(0.0) / area;
-    let i_min = i_min_sq.sqrt();
-    let lk = ctx.lk.unwrap_or(ctx.length);
-    let buckling_note = if lk <= 1e-9 {
+    // 有効細長比 λ = max(lk_y/i_y, lk_z/i_z)（強軸・弱軸を個別の座屈長さで評価）。
+    let lk_y_resolved = ctx.lk_y.unwrap_or(ctx.length);
+    let lk_z_resolved = ctx.lk_z.unwrap_or(ctx.length);
+    let buckling_note = if lk_y_resolved <= 1e-9 && lk_z_resolved <= 1e-9 {
         "（座屈長さ0のため座屈無視 λ=0）"
     } else {
         ""
     };
-    let lambda = if i_min > 1e-9 { lk / i_min } else { 0.0 };
+    let lambda = effective_slenderness(sec.iy, sec.iz, area, ctx.length, ctx.lk_y, ctx.lk_z);
 
     let term_label = match term {
         LoadTerm::Long => "長期",

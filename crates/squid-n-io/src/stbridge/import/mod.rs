@@ -1582,6 +1582,7 @@ fn build_sections(
                             height,
                             width,
                             thick,
+                            ..
                         } => Some(SectionShape::CftBox {
                             height,
                             width,

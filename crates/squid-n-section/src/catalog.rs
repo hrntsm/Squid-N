@@ -161,6 +161,9 @@ fn parse_shape_from_name(shape: CatalogShape, name: &str) -> Option<SectionShape
                 height: dims[0],
                 width: dims[1],
                 thick: dims[2],
+                // カタログ名の角R（BCP/BCR等の末尾数値）は寸法情報のみのため無視する
+                // （下記 test_parse_shape_box_ignores_corner_radius 参照）。
+                corner_r: 0.0,
             })
         }
         CatalogShape::Pipe => {
@@ -347,6 +350,7 @@ mod tests {
                 height: 100.0,
                 width: 100.0,
                 thick: 12.0,
+                corner_r: 0.0,
             }
         );
     }
@@ -361,6 +365,7 @@ mod tests {
                 height: 1000.0,
                 width: 1000.0,
                 thick: 22.0,
+                corner_r: 0.0,
             }
         );
     }

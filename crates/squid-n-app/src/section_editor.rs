@@ -22,6 +22,7 @@ pub struct SectionEditorDraft {
     pub tw: f64,
     pub tf: f64,
     pub t: f64,
+    /// 角形鋼管の角部外半径 r [mm]（0 は角部を直角とみなす）。
     pub r: f64,
     // リップ溝形（リップ長）
     pub lip: f64,
@@ -63,7 +64,7 @@ impl Default for SectionEditorDraft {
             tw: 8.0,
             tf: 12.0,
             t: 12.0,
-            r: 12.0,
+            r: 0.0,
             lip: 20.0,
             upper_width: 200.0,
             upper_thick: 12.0,
@@ -430,6 +431,8 @@ fn steel_box_fields(ui: &mut egui::Ui, d: &mut SectionEditorDraft) {
         num_field(ui, &mut d.b);
         ui.label("t 板厚:");
         num_field(ui, &mut d.t);
+        ui.label("r 角部半径:");
+        num_field(ui, &mut d.r);
     });
 }
 
@@ -639,6 +642,7 @@ fn build_shape(d: &SectionEditorDraft) -> SectionShape {
             height: d.h,
             width: d.b,
             thick: d.t,
+            corner_r: d.r,
         },
         ShapeKind::SteelAngle => SectionShape::SteelAngle {
             leg_a: d.leg_a,
@@ -720,6 +724,36 @@ mod tests {
         } else {
             panic!("expected SteelH");
         }
+    }
+
+    /// 角形鋼管の角部外半径 r は draft.r から SectionShape::SteelBox.corner_r
+    /// へそのまま配線される（未入力時は既定値 0 で角部直角扱い）。
+    #[test]
+    fn test_build_shape_steel_box_wires_corner_r() {
+        let d = SectionEditorDraft {
+            kind: ShapeKind::SteelBox,
+            h: 300.0,
+            b: 300.0,
+            t: 12.0,
+            r: 30.0,
+            ..SectionEditorDraft::default()
+        };
+        let s = build_shape(&d);
+        if let SectionShape::SteelBox {
+            height,
+            width,
+            thick,
+            corner_r,
+        } = s
+        {
+            assert_eq!(height, 300.0);
+            assert_eq!(width, 300.0);
+            assert_eq!(thick, 12.0);
+            assert_eq!(corner_r, 30.0);
+        } else {
+            panic!("expected SteelBox");
+        }
+        assert_eq!(SectionEditorDraft::default().r, 0.0, "r の既定値は 0");
     }
 
     #[test]

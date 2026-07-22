@@ -67,6 +67,7 @@ pub(super) fn check_cold_formed(
                     height,
                     width,
                     thick,
+                    ..
                 })
                 | Some(SectionShape::CftBox {
                     height,

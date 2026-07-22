@@ -1118,6 +1118,65 @@ fn test_import_symmetric_build_h_is_steel_h() {
     );
 }
 
+/// 標準モード: 角形鋼管柱の角部外半径 r（`StbSecRoll-BOX` の r 属性）が
+/// `SectionShape::SteelBox.corner_r` として完全往復する。
+#[test]
+fn test_standard_roundtrip_steel_box_corner_r() {
+    let mut m = frame_nodes();
+    let shape = SectionShape::SteelBox {
+        height: 300.0,
+        width: 300.0,
+        thick: 12.0,
+        corner_r: 30.0,
+    };
+    m.sections
+        .push(shape.to_section(SectionId(0), "BOX1".into()));
+    m.elements.push(member(0, true, 0)); // 柱
+
+    let xml = export_stbridge(&m).unwrap();
+    assert!(xml.contains("r=\"30\""), "角部外半径 r が出力される: {xml}");
+    let back = import_stbridge(&xml).expect("import");
+    assert!(back.validate().is_ok(), "{:?}", back.validate());
+    assert_eq!(
+        back.sections[0].shape, m.sections[0].shape,
+        "角形鋼管の角部外半径 r が完全往復"
+    );
+}
+
+/// import: `r` 属性が無い `StbSecRoll-BOX` は角部直角（corner_r=0.0）として読む。
+#[test]
+fn test_import_box_without_r_attr_is_corner_r_zero() {
+    let xml = r#"<?xml version="1.0"?>
+<ST_BRIDGE version="2.0.0"><StbModel>
+  <StbNodes>
+    <StbNode id="0" X="0" Y="0" Z="0"/>
+    <StbNode id="1" X="0" Y="0" Z="3000"/>
+  </StbNodes>
+  <StbSections>
+    <StbSecColumn_S id="0" name="BOX">
+      <StbSecSteelFigureColumn_S><StbSecSteelColumn_S_Same shape="BOX-300"/></StbSecSteelFigureColumn_S>
+    </StbSecColumn_S>
+    <StbSecSteel>
+      <StbSecRoll-BOX name="BOX-300" type="ELSE" A="300" B="300" t="12"/>
+    </StbSecSteel>
+  </StbSections>
+  <StbMembers>
+    <StbColumn id="0" id_node_bottom="0" id_node_top="1" id_section="0"/>
+  </StbMembers>
+</StbModel></ST_BRIDGE>"#;
+    let m = import_stbridge(xml).expect("import");
+    assert_eq!(
+        m.sections[0].shape,
+        Some(SectionShape::SteelBox {
+            height: 300.0,
+            width: 300.0,
+            thick: 12.0,
+            corner_r: 0.0,
+        }),
+        "r 属性が無ければ角部直角（corner_r=0.0）"
+    );
+}
+
 /// 標準モード: CFT 角形柱が `StbSecColumn_CFT`＋形鋼ライブラリとして往復する。
 #[test]
 fn test_standard_roundtrip_cft_box() {

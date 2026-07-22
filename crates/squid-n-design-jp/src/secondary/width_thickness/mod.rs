@@ -68,6 +68,7 @@ mod tests {
             height: 200.0,
             width: 150.0,
             thick: 9.0,
+            corner_r: 0.0,
         };
         let wt = max_width_thickness(&shape).unwrap();
         assert!(
@@ -161,6 +162,7 @@ mod tests {
             height: 200.0,
             width: 150.0,
             thick: -9.0,
+            corner_r: 0.0,
         };
         assert!(max_width_thickness(&shape).is_none());
     }
@@ -243,6 +245,7 @@ mod tests {
             height: 300.0,
             width: 300.0,
             thick: 10.0,
+            corner_r: 0.0,
         };
         let rank = s_member_rank_by_kihon(&shape, SteelMemberUse::Column, "BCR295").expect("Some");
         assert_eq!(rank, MemberRank::FA);
@@ -256,6 +259,7 @@ mod tests {
             height: 430.0,
             width: 430.0,
             thick: 10.0,
+            corner_r: 0.0,
         };
         let rank = s_member_rank_by_kihon(&shape, SteelMemberUse::Column, "BCR295").expect("Some");
         assert_eq!(rank, MemberRank::FC);
@@ -269,6 +273,7 @@ mod tests {
             height: 431.0,
             width: 431.0,
             thick: 10.0,
+            corner_r: 0.0,
         };
         let rank = s_member_rank_by_kihon(&shape, SteelMemberUse::Column, "BCR295").expect("Some");
         assert_eq!(rank, MemberRank::FD);
@@ -284,6 +289,7 @@ mod tests {
             height: 400.0,
             width: 1000.0, // 幅は d の算定に使わないことを示すため、あえて全く違う値にする
             thick: 12.0,
+            corner_r: 0.0,
         };
         let rank = s_member_rank_by_kihon(&shape, SteelMemberUse::Column, "STKR400").expect("Some");
         assert_eq!(rank, MemberRank::FB);
@@ -330,6 +336,7 @@ mod tests {
             height: 400.0,
             width: 400.0,
             thick: 12.0,
+            corner_r: 0.0,
         };
         let column_box_rank =
             s_member_rank_by_kihon(&box_shape, SteelMemberUse::Column, "STKR400").unwrap();
@@ -345,6 +352,7 @@ mod tests {
             height: 400.0,
             width: 400.0,
             thick: 12.0,
+            corner_r: 0.0,
         };
         let cft_box = SectionShape::CftBox {
             height: 400.0,

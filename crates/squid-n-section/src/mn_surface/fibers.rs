@@ -332,6 +332,7 @@ pub fn plastic_fibers(
             height,
             width,
             thick,
+            ..
         } => {
             mesh_box_plates(&mut fibers, height, width, thick, target, steel);
         }

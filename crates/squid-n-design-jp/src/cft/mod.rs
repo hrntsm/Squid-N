@@ -22,8 +22,8 @@
 //!    終局曲げ耐力 Mu(N)（[`crate::ultimate::cft_mu_nm`]、柱分類対応）を用い、
 //!    柱頭・柱脚同一断面の仮定で `ΣcMy = 2·Mu(N)` とする（[`cft_q_design`]）。
 //! 2. CFT 柱の鋼管部分の許容圧縮応力度 `s_fc` は座屈を考慮する
-//!    （λ = lk/i を**鋼管単体**の断面二次半径で評価。充填コンクリートの
-//!    剛性寄与を無視するため安全側。[`cft_common_steel`] 参照）。
+//!    （λ = max(lk_y/i_y, lk_z/i_z) を**鋼管単体**の断面二次半径で評価。
+//!    充填コンクリートの剛性寄与を無視するため安全側。[`cft_common_steel`] 参照）。
 //! 3. CFT 柱のせん断は強軸・弱軸を対称的に扱うため、RC 柱検定
 //!    （`rc/`）と同様に「b/D 入れ替え」の近似を用いる。
 //! 4. CFT 円形柱の (N,M) 相関は閉形式を用いず、縁応力一定の弾性三角形
@@ -36,7 +36,7 @@
 
 use crate::rc::concrete_allowable_compression_class;
 use crate::steel::{steel_f_value_prefix, steel_fc, steel_fs, steel_ft};
-use crate::{CheckResult, DesignCheck, DesignCtx, LoadTerm, MemberForcesAt};
+use crate::{effective_slenderness, CheckResult, DesignCheck, DesignCtx, LoadTerm, MemberForcesAt};
 use squid_n_core::model::{Material, Section};
 use squid_n_core::section_shape::SectionShape;
 
@@ -216,16 +216,6 @@ fn cft_common_steel(f_value: f64, term: LoadTerm, lambda: f64) -> (f64, f64, f64
     (s_ft, s_fs, s_fc)
 }
 
-/// 鋼管単体の最小断面二次半径 i_min と座屈長さ lk から細長比 λ を求める。
-/// i_min・lk のいずれかが 0 以下なら λ=0（座屈無視）。
-fn cft_lambda(i_min: f64, lk: f64) -> f64 {
-    if i_min > 1e-9 && lk > 0.0 {
-        lk / i_min
-    } else {
-        0.0
-    }
-}
-
 fn cft_box_steel_props(height: f64, width: f64, thick: f64) -> (f64, f64, f64) {
     let shape = SectionShape::CftBox {
         height,
@@ -286,18 +276,22 @@ fn cft_box_check(
 
     let f_value = steel_f_value_prefix(&mat.name, thick).unwrap_or(235.0);
     let (sa, sz_z, sz_y) = cft_box_steel_props(height, width, thick);
-    // 鋼管単体の最小断面二次半径（弱軸）で細長比を評価（安全側）。
+    // 鋼管単体の断面二次モーメントを強軸・弱軸個別に評価し、各軸の座屈長さ
+    // lk_y/lk_z と対にして λ=max(λ_y,λ_z) を求める（安全側。充填コンクリート
+    // の剛性寄与を無視するため実際より λ が大きく算定される）。
     let shape = SectionShape::CftBox {
         height,
         width,
         thick,
     };
-    let i_min = if sa > 1e-9 {
-        (shape.calc_iy().min(shape.calc_iz()) / sa).max(0.0).sqrt()
-    } else {
-        0.0
-    };
-    let lambda = cft_lambda(i_min, ctx.lk.unwrap_or(ctx.length));
+    let lambda = effective_slenderness(
+        shape.calc_iy(),
+        shape.calc_iz(),
+        sa,
+        ctx.length,
+        ctx.lk_y,
+        ctx.lk_z,
+    );
     let (s_ft, s_fs, s_fc) = cft_common_steel(f_value, ctx.term, lambda);
     let s_nt = sa * s_ft;
     let s_nc = sa * s_fc;
@@ -348,11 +342,13 @@ fn cft_box_check(
             width,
             thick,
         };
-        let lk = ctx.lk.unwrap_or(ctx.length);
-        let mu_z =
-            crate::ultimate::cft_mu_nm(&shape, fc_raw, f_value, n_design, lk, false).unwrap_or(0.0);
-        let mu_y =
-            crate::ultimate::cft_mu_nm(&shape, fc_raw, f_value, n_design, lk, true).unwrap_or(0.0);
+        // weak_axis=false（強軸側）は lk_y、weak_axis=true（弱軸側）は lk_z を用いる。
+        let lk_y = ctx.lk_y.unwrap_or(ctx.length);
+        let lk_z = ctx.lk_z.unwrap_or(ctx.length);
+        let mu_z = crate::ultimate::cft_mu_nm(&shape, fc_raw, f_value, n_design, lk_y, false)
+            .unwrap_or(0.0);
+        let mu_y = crate::ultimate::cft_mu_nm(&shape, fc_raw, f_value, n_design, lk_z, true)
+            .unwrap_or(0.0);
         (2.0 * mu_z, 2.0 * mu_y)
     } else {
         (0.0, 0.0)
@@ -413,14 +409,11 @@ fn cft_pipe_check(
 
     let f_value = steel_f_value_prefix(&mat.name, thick).unwrap_or(235.0);
     let (sa, sz) = cft_pipe_steel_props(outer_dia, thick);
-    // 鋼管単体の断面二次半径で細長比を評価（安全側）。
+    // 鋼管単体の断面二次モーメントで細長比を評価（安全側）。円形は等方性の
+    // ため iy=iz だが、lk_y/lk_z が異なれば λ=max(λ_y,λ_z) は方向により変わる。
     let shape = SectionShape::CftPipe { outer_dia, thick };
-    let i_min = if sa > 1e-9 {
-        (shape.calc_iy() / sa).max(0.0).sqrt()
-    } else {
-        0.0
-    };
-    let lambda = cft_lambda(i_min, ctx.lk.unwrap_or(ctx.length));
+    let iy = shape.calc_iy();
+    let lambda = effective_slenderness(iy, iy, sa, ctx.length, ctx.lk_y, ctx.lk_z);
     let (s_ft, s_fs, s_fc) = cft_common_steel(f_value, ctx.term, lambda);
     let s_nt = sa * s_ft;
     let s_nc = sa * s_fc;
@@ -455,7 +448,11 @@ fn cft_pipe_check(
     // 方向によらず同値）。ctx.seismic_qd が None なら解析せん断力のまま。
     let sum_c_my = if ctx.seismic_qd.is_some() {
         let shape = SectionShape::CftPipe { outer_dia, thick };
-        let lk = ctx.lk.unwrap_or(ctx.length);
+        // 円形は方向によらず同値のため、安全側に大きい方の座屈長さを採用する。
+        let lk = ctx
+            .lk_y
+            .unwrap_or(ctx.length)
+            .max(ctx.lk_z.unwrap_or(ctx.length));
         2.0 * crate::ultimate::cft_mu_nm(&shape, fc_raw, f_value, n_design, lk, false)
             .unwrap_or(0.0)
     } else {

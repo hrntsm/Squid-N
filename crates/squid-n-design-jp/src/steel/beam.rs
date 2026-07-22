@@ -9,7 +9,7 @@
 //! （長期のみ）も併せて算定する。
 
 use crate::material_strength::{steel_fc, steel_fs, steel_ft};
-use crate::{CheckResult, DesignCtx, LoadTerm, MemberForcesAt, SteelFbRule};
+use crate::{effective_slenderness, CheckResult, DesignCtx, LoadTerm, MemberForcesAt, SteelFbRule};
 use squid_n_core::model::{Material, Section};
 use squid_n_core::section_shape::SectionShape;
 
@@ -86,15 +86,8 @@ pub(crate) fn check_beam(
     let fs_val = steel_fs(f, term);
 
     // 座屈を考慮した許容圧縮応力度 fc（column.rs と同じ流儀）。
-    // λ = lk/i_min、lk = ctx.lk.unwrap_or(ctx.length)、i_min = √(min(iy,iz)/A)。
-    let i_min_sq = sec.iy.min(sec.iz).max(0.0) / area;
-    let i_min = i_min_sq.sqrt();
-    let lk = ctx.lk.unwrap_or(ctx.length);
-    let lambda = if lk > 1e-9 && i_min > 1e-9 {
-        lk / i_min
-    } else {
-        0.0
-    };
+    // λ = max(lk_y/i_y, lk_z/i_z)（強軸・弱軸を個別の座屈長さで評価）。
+    let lambda = effective_slenderness(sec.iy, sec.iz, area, ctx.length, ctx.lk_y, ctx.lk_z);
     let fc_val = steel_fc(f, lambda, term);
 
     // 許容曲げ応力度 fb: H形強軸のみ横座屈考慮（旧基準/新基準の切替）、他は ft。
@@ -304,11 +297,12 @@ fn steel_warping_constant(sec: &Section, tf: f64) -> f64 {
 ///
 /// - H形: `Ay=tw・(H−2tf)`（ウェブ有効せい×ウェブ厚）、
 ///   `Az=2・B・tf/1.5`（上下フランジ断面積を応力分布係数 1.5 で低減）。
-/// - 角形鋼管: 角部を外側半径 `r=2.5t`（冷間成形角形鋼管の角部に一般的な
-///   半径の仮定値。実際の角部半径は製造方法・製品により異なるが、詳細が
-///   不明な場合の代表値として採用する）の 1/4 円弧とみなし、直線部＋角部
-///   円弧の断面積を合算する: `Ay=2{t・max(H−2r,0)+π・t・(2r−t)/4}`。
-///   `Az` は `H` を `B` に置き換えた同式。
+/// - 角形鋼管: 角部外半径 r は断面定義時の入力値（`SteelBox.corner_r`）を
+///   用いる。`r>0` は角部を 1/4 円弧とみなし直線部＋角部円弧の断面積を
+///   合算する: `Ay=2{t・max(H−2r,0)+π・t・(2r−t)/4}`（`Az` は `H` を `B` に
+///   置き換えた同式）。`r=0`（未入力・名前推定フォールバック・角部半径を
+///   持たない CftBox）は角部を直角とみなし `Ay=2t・max(H−2t,0)`（`Az` は
+///   同様に `B`）。
 /// - 円形鋼管: `Ay=Az=π・t・(D−t)/2`（薄肉円管のせん断有効断面積。
 ///   `D=sec.depth` は外径）。
 /// - その他: `Ay=as_y>0 ? as_y : area`、`Az=as_z>0 ? as_z : area`。
@@ -322,13 +316,26 @@ fn beam_shear_area(shape: ShapeCategory, sec: &Section, tf: f64, tw: f64) -> (f6
             (ay, az)
         }
         ShapeCategory::Box => {
-            // 角形鋼管は tf=tw=t（shape_of 参照）。
+            // 角形鋼管は tf=tw=t（shape_of 参照）。角部外半径 r は断面入力値。
             let t = tw;
-            let r = 2.5 * t;
-            let corner = (std::f64::consts::PI * t * (2.0 * r - t) / 4.0).max(0.0);
-            let ay = (2.0 * (t * (h - 2.0 * r).max(0.0) + corner)).max(0.0);
-            let az = (2.0 * (t * (b - 2.0 * r).max(0.0) + corner)).max(0.0);
-            (ay, az)
+            let r = match &sec.shape {
+                Some(SectionShape::SteelBox { corner_r, .. }) => corner_r.max(0.0),
+                _ => 0.0,
+            };
+            let (ay, az) = if r > 1e-9 {
+                let corner = (std::f64::consts::PI * t * (2.0 * r - t) / 4.0).max(0.0);
+                (
+                    2.0 * (t * (h - 2.0 * r).max(0.0) + corner),
+                    2.0 * (t * (b - 2.0 * r).max(0.0) + corner),
+                )
+            } else {
+                // 角部直角（未入力・CftBox・名前推定フォールバック）。
+                (
+                    2.0 * t * (h - 2.0 * t).max(0.0),
+                    2.0 * t * (b - 2.0 * t).max(0.0),
+                )
+            };
+            (ay.max(0.0), az.max(0.0))
         }
         ShapeCategory::Pipe => {
             let t = tw;
@@ -842,9 +849,56 @@ mod tests {
         );
     }
 
-    /// 角形鋼管のせん断有効断面積: r=2.5t の式の手計算照合。
+    /// 角形鋼管のせん断有効断面積: 断面入力の角部外半径 corner_r を用いた
+    /// 式の手計算照合（r=30mm を明示入力）。
     #[test]
     fn test_beam_check_shear_box_corner_radius_hand_calc() {
+        use squid_n_core::ids::SectionId;
+        use squid_n_core::section_shape::SectionShape;
+        let shape = SectionShape::SteelBox {
+            height: 300.0,
+            width: 300.0,
+            thick: 12.0,
+            corner_r: 30.0,
+        };
+        let sec = shape.to_section(SectionId(0), "BOX-300x300x12".to_string());
+        let mat_v = mat("SN400");
+        let forces = MemberForcesAt {
+            pos: 0.5,
+            n: 0.0,
+            qy: 150_000.0,
+            qz: 0.0,
+            my: 0.0,
+            mz: 0.0,
+        };
+        let ctx = DesignCtx {
+            term: LoadTerm::Long,
+            kind: MemberKind::Beam,
+            length: 0.0,
+            ..Default::default()
+        };
+        let result = SteelDesign.check(&forces, &sec, &mat_v, &ctx);
+
+        let t = 12.0_f64;
+        let h = 300.0_f64;
+        let r = 30.0_f64;
+        let corner = std::f64::consts::PI * t * (2.0 * r - t) / 4.0;
+        let ay = 2.0 * (t * (h - 2.0 * r).max(0.0) + corner);
+        let tau_y = 150_000.0_f64 / ay;
+        let fs = steel_fs(235.0, LoadTerm::Long);
+        let expected = tau_y / fs;
+        assert!(
+            (result.ratio - expected).abs() < 1e-9,
+            "ratio={} expected={}",
+            result.ratio,
+            expected
+        );
+    }
+
+    /// 角形鋼管の角部外半径が未入力（r=0。名前推定フォールバック含む）の場合は
+    /// 角部を直角とみなし Ay=2t(H−2t) となる。
+    #[test]
+    fn test_beam_check_shear_box_r_zero_falls_back_to_sharp_corner() {
         let mut sec = rect_section(300.0, 300.0, "BOX-300x300x12");
         sec.thickness = Some(12.0);
         let mat_v = mat("SN400");
@@ -866,9 +920,7 @@ mod tests {
 
         let t = 12.0_f64;
         let h = 300.0_f64;
-        let r = 2.5 * t;
-        let corner = std::f64::consts::PI * t * (2.0 * r - t) / 4.0;
-        let ay = 2.0 * (t * (h - 2.0 * r).max(0.0) + corner);
+        let ay = 2.0 * t * (h - 2.0 * t);
         let tau_y = 150_000.0_f64 / ay;
         let fs = steel_fs(235.0, LoadTerm::Long);
         let expected = tau_y / fs;

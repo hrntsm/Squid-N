@@ -20,6 +20,7 @@ fn test_steel_box() {
         height: 200.0,
         width: 200.0,
         thick: 12.0,
+        corner_r: 0.0,
     };
     let sec = shape.to_section(SectionId(0), "BOX-200x200x12".into());
     assert!(sec.area > 0.0);

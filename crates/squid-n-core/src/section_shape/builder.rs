@@ -38,6 +38,7 @@ impl SectionShape {
                 height,
                 width,
                 thick,
+                ..
             }
             | SectionShape::CftBox {
                 height,

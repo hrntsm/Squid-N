@@ -58,7 +58,15 @@ pub enum SectionShape {
         flange_thick: f64,
     },
     /// Steel rectangular hollow section / box (角形鋼管).
-    SteelBox { height: f64, width: f64, thick: f64 },
+    SteelBox {
+        height: f64,
+        width: f64,
+        thick: f64,
+        /// 角部外半径 r [mm]（せん断有効断面積の算定に用いる）。
+        /// 0 は角部を直角とみなす（未入力・溶接組立箱形相当）。
+        #[serde(default)]
+        corner_r: f64,
+    },
     /// Steel L‑angle (山形鋼).
     SteelAngle { leg_a: f64, leg_b: f64, thick: f64 },
     /// Steel C‑channel (溝形鋼).

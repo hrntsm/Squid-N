@@ -198,6 +198,8 @@ pub(crate) fn compute_design_check_job(
             _ => None,
         };
         // 柱の座屈長さ lk = K・h（app.rs run_design_check と同じ規則）。
+        // K は現状 1 方向の剛度比から算定しており両軸同値（lk_y=lk_z）。
+        // 軸別 K の精緻化は将来課題。
         let lk = if kind == squid_n_design_jp::MemberKind::Column {
             squid_n_design_jp::steel::buckling::steel_column_k(model, elem).map(|k| k * length)
         } else {
@@ -215,7 +217,8 @@ pub(crate) fn compute_design_check_job(
             kind,
             length,
             lb: None,
-            lk,
+            lk_y: lk,
+            lk_z: lk,
             shear_span,
             shear_span_y,
             rc_damage_control: true,

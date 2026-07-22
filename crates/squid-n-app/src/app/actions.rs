@@ -1920,6 +1920,8 @@ impl App {
             // 柱の座屈長さ lk = K・h（鋼構造塑性設計指針、水平移動が拘束されない
             // 場合。K は節点まわり剛度比 G から算定）。柱以外は None（lk=部材長）。
             // RC 柱の検定は lk を使わないため、柱一律で設定して問題ない。
+            // K は現状 1 方向の剛度比から算定しており両軸同値（lk_y=lk_z）。
+            // 軸別 K の精緻化は将来課題。
             let lk = if kind == squid_n_design_jp::MemberKind::Column {
                 squid_n_design_jp::steel::buckling::steel_column_k_with_index(
                     &self.model,
@@ -1976,7 +1978,8 @@ impl App {
                 kind,
                 length,
                 lb: None,
-                lk,
+                lk_y: lk,
+                lk_z: lk,
                 shear_span,
                 shear_span_y,
                 rc_damage_control: self.analysis_cfg.rc_damage_control,

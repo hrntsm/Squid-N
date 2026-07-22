@@ -425,6 +425,7 @@ fn test_edit_section_shape_roundtrip() {
         height: 200.0,
         width: 200.0,
         thick: 12.0,
+        corner_r: 0.0,
     };
     let cmd = EditSectionShape {
         section: SectionId(0),
@@ -507,6 +508,7 @@ fn test_edit_section_shape_invalid_id_noop() {
         height: 200.0,
         width: 200.0,
         thick: 12.0,
+        corner_r: 0.0,
     };
     let cmd = EditSectionShape {
         section: SectionId(99),

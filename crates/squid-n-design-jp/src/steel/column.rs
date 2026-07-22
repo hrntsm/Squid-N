@@ -2,7 +2,7 @@
 //! 鉄骨造柱の許容応力度検定）。
 
 use crate::material_strength::{steel_fc, steel_fs, steel_ft};
-use crate::{CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
+use crate::{effective_slenderness, CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
 use squid_n_core::model::Section;
 
 use super::section::{steel_fb_h, steel_i_t, steel_lateral_buckling_c};
@@ -34,16 +34,15 @@ pub(crate) fn check_column(
     let ft_val = steel_ft(f, term);
     let fs_val = steel_fs(f, term);
 
-    // 有効細長比 λ = lk/i_min（i_min は iy/iz の小さい方）。
-    let i_min_sq = sec.iy.min(sec.iz).max(0.0) / area;
-    let i_min = i_min_sq.sqrt();
-    let lk = ctx.lk.unwrap_or(ctx.length);
-    let buckling_note = if lk <= 1e-9 {
+    // 有効細長比 λ = max(lk_y/i_y, lk_z/i_z)（強軸・弱軸を個別の座屈長さで評価）。
+    let lk_y_resolved = ctx.lk_y.unwrap_or(ctx.length);
+    let lk_z_resolved = ctx.lk_z.unwrap_or(ctx.length);
+    let buckling_note = if lk_y_resolved <= 1e-9 && lk_z_resolved <= 1e-9 {
         "（座屈長さ0のため座屈無視 λ=0）"
     } else {
         ""
     };
-    let lambda = if i_min > 1e-9 { lk / i_min } else { 0.0 };
+    let lambda = effective_slenderness(sec.iy, sec.iz, area, ctx.length, ctx.lk_y, ctx.lk_z);
     // 座屈を考慮した許容圧縮応力度 fc（鋼構造設計規準 1973、λ に応じた低減）。
     let fc_val = steel_fc(f, lambda, term);
 
@@ -307,5 +306,88 @@ mod tests {
         let ft = steel_ft(235.0, LoadTerm::Long);
         let expected = (100_000.0 / sec.area) / ft;
         assert!((result.ratio - expected).abs() < 1e-6);
+    }
+
+    // -------------------------------------------------------------
+    // 座屈長さの軸別化（lk_y/lk_z）
+    // -------------------------------------------------------------
+
+    /// lk_y=lk_z=None（=length 共通）の場合、λ=max(lk_y/i_y, lk_z/i_z) が
+    /// 従来の λ=length/i_min（i_min=√(min(Iy,Iz)/A)）と一致することを、
+    /// fc（λ に応じて単調減少）を介して確認する。
+    #[test]
+    fn test_column_lambda_both_axes_none_matches_legacy_i_min() {
+        let sec = rect_section(300.0, 200.0, "H-300x200x8x12");
+        let mat_v = mat("SN400");
+        let forces = MemberForcesAt {
+            pos: 0.0,
+            n: -100_000.0,
+            qy: 0.0,
+            qz: 0.0,
+            my: 0.0,
+            mz: 0.0,
+        };
+        let ctx = DesignCtx {
+            term: LoadTerm::Long,
+            kind: MemberKind::Column,
+            length: 4000.0,
+            ..Default::default()
+        };
+        let result = SteelDesign.check(&forces, &sec, &mat_v, &ctx);
+
+        let area = sec.area;
+        let i_min = (sec.iy.min(sec.iz) / area).sqrt();
+        let lambda = 4000.0 / i_min;
+        let fc = steel_fc(235.0, lambda, LoadTerm::Long);
+        let expected = (100_000.0 / area) / fc;
+        assert!(
+            (result.ratio - expected).abs() < 1e-9,
+            "ratio={} expected(legacy i_min)={}",
+            result.ratio,
+            expected
+        );
+    }
+
+    /// lk_z（弱軸）のみを長くすると弱軸細長比が支配し fc が下がる（検定比が
+    /// 上がる）ことを確認する。矩形断面 B=300 > D=100 とし、iz（弱軸=B方向）
+    /// を十分小さくして弱軸が支配しやすい断面とする。
+    #[test]
+    fn test_column_lk_z_only_governs_weak_axis_slenderness() {
+        let sec = rect_section(100.0, 300.0, "H-300x100x8x12");
+        let mat_v = mat("SN400");
+        let forces = MemberForcesAt {
+            pos: 0.0,
+            n: -50_000.0,
+            qy: 0.0,
+            qz: 0.0,
+            my: 0.0,
+            mz: 0.0,
+        };
+        let ctx_base = DesignCtx {
+            term: LoadTerm::Long,
+            kind: MemberKind::Column,
+            length: 3000.0,
+            lk_y: Some(3000.0),
+            lk_z: Some(3000.0),
+            ..Default::default()
+        };
+        let base = SteelDesign.check(&forces, &sec, &mat_v, &ctx_base);
+
+        let ctx_long_z = DesignCtx {
+            term: LoadTerm::Long,
+            kind: MemberKind::Column,
+            length: 3000.0,
+            lk_y: Some(3000.0),
+            lk_z: Some(9000.0), // 弱軸のみ座屈長さを 3 倍に
+            ..Default::default()
+        };
+        let long_z = SteelDesign.check(&forces, &sec, &mat_v, &ctx_long_z);
+
+        assert!(
+            long_z.ratio > base.ratio,
+            "lk_z を伸ばすと検定比が上がるはず: base={} long_z={}",
+            base.ratio,
+            long_z.ratio
+        );
     }
 }

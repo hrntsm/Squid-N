@@ -34,10 +34,13 @@ pub(super) fn steel_shape_from(tag: &str, a: &HashMap<String, String>) -> Option
         }
         t if t.ends_with("-BOX") => {
             let thick = a_(&["t", "t1"])?;
+            // 角部外半径 r（StbSecRoll-BOX の r 属性）。未指定は角部直角（0.0）。
+            let corner_r = a_(&["r"]).unwrap_or(0.0);
             Some(SectionShape::SteelBox {
                 height: a_(&["A"])?,
                 width: a_(&["B"])?,
                 thick,
+                corner_r,
             })
         }
         // 鋼管。Squid 方言の `StbSecPipe` に加え、実 ST-Bridge の形鋼ライブラリ名

@@ -33,6 +33,7 @@ pub(super) fn check_s_panel(
                 height,
                 width,
                 thick,
+                ..
             })
             | Some(SectionShape::CftBox {
                 height,

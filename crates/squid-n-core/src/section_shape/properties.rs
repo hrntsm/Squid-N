@@ -20,6 +20,7 @@ impl SectionShape {
                 height,
                 width,
                 thick,
+                ..
             } => width * height - (width - 2.0 * thick) * (height - 2.0 * thick),
             SectionShape::SteelAngle {
                 leg_a,
@@ -109,6 +110,7 @@ impl SectionShape {
                 height,
                 width,
                 thick,
+                ..
             } => Some(
                 width * height * height / 4.0
                     - (width - 2.0 * thick) * (height - 2.0 * thick).powi(2) / 4.0,
@@ -136,6 +138,7 @@ impl SectionShape {
                 height,
                 width,
                 thick,
+                ..
             } => {
                 let hi = height - 2.0 * thick;
                 (width * height.powi(3) - (width - 2.0 * thick) * hi.powi(3)) / 12.0
@@ -286,6 +289,7 @@ impl SectionShape {
                 height,
                 width,
                 thick,
+                ..
             } => {
                 let wi = width - 2.0 * thick;
                 (height * width.powi(3) - (height - 2.0 * thick) * wi.powi(3)) / 12.0
@@ -423,6 +427,7 @@ impl SectionShape {
                 height,
                 width,
                 thick,
+                ..
             } => {
                 let a0 = (height - thick) * (width - thick);
                 let perim = 2.0 * (height + width - 2.0 * thick);
