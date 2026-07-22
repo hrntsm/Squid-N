@@ -14,8 +14,8 @@ use squid_n_core::model::{Material, Section};
 use squid_n_core::section_shape::SectionShape;
 
 use super::section::{
-    resolve_lb, steel_fb_h, steel_fb_h_new, steel_h_z_with_loss, steel_lateral_buckling_c,
-    steel_lateral_buckling_i_af, steel_p_lambda_b,
+    resolve_lb, steel_c_factor, steel_fb_h, steel_fb_h_new, steel_h_z_with_loss,
+    steel_lateral_buckling_i_af, steel_p_lambda_b, steel_warping_constant,
 };
 use super::{nonzero, safe_denom, section_modulus, shape_of, ShapeCategory};
 
@@ -103,14 +103,11 @@ pub(crate) fn check_beam(
                     .map(|a| resolve_lb(forces.pos, ctx.length, a.lb_direct, a.lateral_brace_count))
                     .unwrap_or(ctx.length)
             });
-            // C 係数は「座屈区間端部」のモーメント比によるが、実装が保持するのは
-            // 部材端モーメントのみ。横補剛で lb が部材の部分区間となる場合は
-            // 区間端モーメント比が不明なため、安全側の C=1.0 とする。
-            let c = if lb < ctx.length - 1e-9 {
-                1.0
-            } else {
-                steel_lateral_buckling_c(ctx)
-            };
+            // C 係数の解決（直接入力 > 部分区間なら安全側 1.0 > 自動算定）。
+            // 「座屈区間端部」のモーメント比によるが、実装が保持するのは部材端
+            // モーメントのみ。横補剛で lb が部材の部分区間となる場合は区間端
+            // モーメント比が不明なため、直接入力が無ければ安全側の C=1.0 とする。
+            let c = steel_c_factor(ctx, lb < ctx.length - 1e-9);
             match ctx.steel_fb_rule {
                 SteelFbRule::Old => {
                     let (i_t, af) = steel_lateral_buckling_i_af(sec, tf, tw);
@@ -244,46 +241,6 @@ Mises比={:.4}",
         ok: ratio <= 1.0,
         basis,
         detail,
-    }
-}
-
-// ---------------------------------------------------------------------
-// 新基準 fb 用の曲げねじり定数 Iw
-// ---------------------------------------------------------------------
-
-/// 曲げねじり定数 Iw [mm⁶]（新基準 fb 用）。
-///
-/// - `SteelBuiltH`（非対称組立 H）: 上下フランジの寸法から個別に
-///   `I_u=t_u・b_u³/12`、`I_l=t_l・b_l³/12` を求め、`hf=H−(t_u+t_l)/2`
-///   （上下フランジ図心間距離）として `Iw=hf²・I_u・I_l/(I_u+I_l)`
-///   （上下フランジの曲げ剛性比に応じてねじり中心が偏心する非対称 H 用の式）。
-/// - それ以外（`SteelH` および shape 無しのフォールバック）: `Iz・(H−tf)²/4`
-///   （上下フランジ対称、`Iz` はフランジ図心間の距離の半分だけ離れた 2 枚の
-///   フランジが負担するとみなす近似式）。
-fn steel_warping_constant(sec: &Section, tf: f64) -> f64 {
-    match &sec.shape {
-        Some(SectionShape::SteelBuiltH {
-            height,
-            upper_width,
-            upper_thick,
-            lower_width,
-            lower_thick,
-            ..
-        }) => {
-            let hf = height - (upper_thick + lower_thick) / 2.0;
-            let i_u = upper_thick * upper_width.powi(3) / 12.0;
-            let i_l = lower_thick * lower_width.powi(3) / 12.0;
-            let denom = i_u + i_l;
-            if denom > 1e-12 {
-                hf * hf * i_u * i_l / denom
-            } else {
-                0.0
-            }
-        }
-        _ => {
-            let h = sec.depth;
-            sec.iz * (h - tf).powi(2) / 4.0
-        }
     }
 }
 
@@ -484,6 +441,7 @@ mod tests {
                 lateral_brace_count: None,
                 lk_y_direct: None,
                 lk_z_direct: None,
+                c_direct: None,
             }),
             ..Default::default()
         };
@@ -530,6 +488,7 @@ mod tests {
                 lateral_brace_count: Some(5),
                 lk_y_direct: None,
                 lk_z_direct: None,
+                c_direct: None,
             }),
             ..Default::default()
         };
@@ -539,6 +498,197 @@ mod tests {
             "braced ratio={} >= base ratio={}",
             braced.ratio,
             base.ratio
+        );
+    }
+
+    // -------------------------------------------------------------
+    // 横座屈修正係数 C の直接入力（SteelDesignAttr.c_direct）
+    // -------------------------------------------------------------
+
+    /// c_direct=1.5 を与えると、端部モーメント（異符号・自動算定なら
+    /// C=2.3）に関わらず fb1 の C=1.5 が採用され、fb・検定比が自動算定時と
+    /// 異なることを確認する。
+    #[test]
+    fn test_check_beam_c_direct_overrides_auto() {
+        use squid_n_core::ids::ElemId;
+        use squid_n_core::model::SteelDesignAttr;
+        let sec = h_section(400.0, 200.0, 8.0, 13.0);
+        let m = mat("SN400B");
+        let forces = MemberForcesAt {
+            pos: 0.5,
+            n: 0.0,
+            qy: 0.0,
+            qz: 0.0,
+            my: 0.0,
+            mz: 5e7,
+        };
+        // 異符号の端部モーメント→自動算定なら C=2.3（上限）。
+        let ctx_auto = DesignCtx {
+            term: LoadTerm::Long,
+            kind: MemberKind::Beam,
+            length: 6000.0,
+            end_moments_z: Some((1.0, -1.0)),
+            ..Default::default()
+        };
+        let auto = SteelDesign.check(&forces, &sec, &m, &ctx_auto);
+
+        let ctx_direct = DesignCtx {
+            term: LoadTerm::Long,
+            kind: MemberKind::Beam,
+            length: 6000.0,
+            end_moments_z: Some((1.0, -1.0)),
+            steel_attr: Some(SteelDesignAttr {
+                elem: ElemId(0),
+                joint_flange_loss: 0.0,
+                joint_web_loss: 0.0,
+                scallop_web_loss: 0.0,
+                lb_direct: None,
+                lateral_brace_count: None,
+                lk_y_direct: None,
+                lk_z_direct: None,
+                c_direct: Some(1.5),
+            }),
+            ..Default::default()
+        };
+        let direct = SteelDesign.check(&forces, &sec, &m, &ctx_direct);
+
+        // C=1.5 < C=2.3（自動算定）→ fb が小さくなり検定比は大きくなる。
+        assert!(
+            direct.ratio > auto.ratio,
+            "direct ratio={} <= auto ratio={}",
+            direct.ratio,
+            auto.ratio
+        );
+
+        let f = 235.0;
+        let (i_t, af) = steel_lateral_buckling_i_af(&sec, 13.0, 8.0);
+        let fb_direct_expected = steel_fb_h(f, LoadTerm::Long, 6000.0, i_t, 400.0, af, 1.5);
+        assert!(
+            direct
+                .detail
+                .contains(&format!("fb={:.4}", fb_direct_expected)),
+            "detail={}",
+            direct.detail
+        );
+    }
+
+    /// 横補剛により lb が部材の部分区間となる場合（自動算定なら安全側 C=1.0
+    /// に落ちる）でも、c_direct の直接入力があればそちらが優先され C=1.0 に
+    /// 落ちないことを確認する。
+    #[test]
+    fn test_check_beam_c_direct_prevents_partial_lb_fallback_to_1_0() {
+        use squid_n_core::ids::ElemId;
+        use squid_n_core::model::SteelDesignAttr;
+        let sec = h_section(400.0, 200.0, 8.0, 13.0);
+        let m = mat("SN400B");
+        let forces = MemberForcesAt {
+            pos: 0.5,
+            n: 0.0,
+            qy: 0.0,
+            qz: 0.0,
+            my: 0.0,
+            mz: 5e7,
+        };
+        // 横補剛 n=1 → lb=6000/2=3000 < length=6000（部分区間）。
+        let ctx_no_direct = DesignCtx {
+            term: LoadTerm::Long,
+            kind: MemberKind::Beam,
+            length: 6000.0,
+            steel_attr: Some(SteelDesignAttr {
+                elem: ElemId(0),
+                joint_flange_loss: 0.0,
+                joint_web_loss: 0.0,
+                scallop_web_loss: 0.0,
+                lb_direct: None,
+                lateral_brace_count: Some(1),
+                lk_y_direct: None,
+                lk_z_direct: None,
+                c_direct: None,
+            }),
+            ..Default::default()
+        };
+        let no_direct = SteelDesign.check(&forces, &sec, &m, &ctx_no_direct);
+        let f = 235.0;
+        let (i_t, af) = steel_lateral_buckling_i_af(&sec, 13.0, 8.0);
+        let lb = 3000.0;
+        let fb_c1_expected = steel_fb_h(f, LoadTerm::Long, lb, i_t, 400.0, af, 1.0);
+        assert!(
+            no_direct
+                .detail
+                .contains(&format!("fb={:.4}", fb_c1_expected)),
+            "部分区間では C=1.0 が採用されるはず: detail={}",
+            no_direct.detail
+        );
+
+        let ctx_direct = DesignCtx {
+            term: LoadTerm::Long,
+            kind: MemberKind::Beam,
+            length: 6000.0,
+            steel_attr: Some(SteelDesignAttr {
+                elem: ElemId(0),
+                joint_flange_loss: 0.0,
+                joint_web_loss: 0.0,
+                scallop_web_loss: 0.0,
+                lb_direct: None,
+                lateral_brace_count: Some(1),
+                lk_y_direct: None,
+                lk_z_direct: None,
+                c_direct: Some(2.0),
+            }),
+            ..Default::default()
+        };
+        let direct = SteelDesign.check(&forces, &sec, &m, &ctx_direct);
+        let fb_c2_expected = steel_fb_h(f, LoadTerm::Long, lb, i_t, 400.0, af, 2.0);
+        assert!(
+            direct.detail.contains(&format!("fb={:.4}", fb_c2_expected)),
+            "直接入力の C=2.0 が採用され C=1.0 に落ちないはず: detail={}",
+            direct.detail
+        );
+    }
+
+    /// c_direct ≤ 0 は無効な入力として無視され、自動算定（この場合は
+    /// end_moments_z が None のため C=1.0）にフォールバックすることを
+    /// 確認する。
+    #[test]
+    fn test_check_beam_c_direct_non_positive_falls_back_to_auto() {
+        use squid_n_core::ids::ElemId;
+        use squid_n_core::model::SteelDesignAttr;
+        let sec = h_section(400.0, 200.0, 8.0, 13.0);
+        let m = mat("SN400B");
+        let forces = MemberForcesAt {
+            pos: 0.5,
+            n: 0.0,
+            qy: 0.0,
+            qz: 0.0,
+            my: 0.0,
+            mz: 5e7,
+        };
+        let ctx = DesignCtx {
+            term: LoadTerm::Long,
+            kind: MemberKind::Beam,
+            length: 6000.0,
+            steel_attr: Some(SteelDesignAttr {
+                elem: ElemId(0),
+                joint_flange_loss: 0.0,
+                joint_web_loss: 0.0,
+                scallop_web_loss: 0.0,
+                lb_direct: None,
+                lateral_brace_count: None,
+                lk_y_direct: None,
+                lk_z_direct: None,
+                c_direct: Some(-2.0),
+            }),
+            ..Default::default()
+        };
+        let result = SteelDesign.check(&forces, &sec, &m, &ctx);
+
+        let f = 235.0;
+        let (i_t, af) = steel_lateral_buckling_i_af(&sec, 13.0, 8.0);
+        let fb_expected = steel_fb_h(f, LoadTerm::Long, 6000.0, i_t, 400.0, af, 1.0);
+        assert!(
+            result.detail.contains(&format!("fb={:.4}", fb_expected)),
+            "c_direct<=0 は無視され C=1.0（自動算定）になるはず: detail={}",
+            result.detail
         );
     }
 

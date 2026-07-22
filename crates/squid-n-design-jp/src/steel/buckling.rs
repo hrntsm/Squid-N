@@ -13,18 +13,26 @@
 //! - 混合構造（RC/SRC 部材が節点に接する場合）はその部材の剛性をヤング係数比
 //!   により補正する → 本実装は `Σ(E・I/L)` の比で G を計算するため、各部材の
 //!   実ヤング係数がそのまま補正として効く。
-//! - 梁の結合状態・支点の状態は考慮しない（本実装の簡略化）。
+//! - 梁の結合状態・支点の状態は、軸別評価版（下記）のみ節点側の梁端の
+//!   ピン接合を考慮する。それ以外（方向無差別簡略版・支点の状態・梁の
+//!   遠端の結合状態）は考慮しない（本実装の簡略化）。
 //!
 //! # 軸別評価（[`steel_column_k_axes_with_index`]）
 //! 強軸まわり K_y・弱軸まわり K_z を個別に評価する版は、節点に接する部材の
 //! 角度を [`squid_n_element::transform::LocalFrame`] の局所軸から求め、次の
 //! 重み付けで G を軸ごとに集計する:
 //! - 梁: 梁材軸の水平投影と評価方向（たわみ方向）のなす角の余弦の 2 乗
-//!   `cos²θ` を `E・iy/L` に乗じる（面内（鉛直面）曲げは強軸 `iy` とする
-//!   仮定は維持し、角度のみ重み付けする）。
+//!   `cos²θ` を `E・iy/L'` に乗じる（面内（鉛直面）曲げは強軸 `iy` とする
+//!   仮定は維持し、角度のみ重み付けする）。当該節点側の梁端が
+//!   `EndCondition::Pinned` の場合、その梁は節点回転を拘束しないため
+//!   Σ梁 に算入しない（`SemiRigid` は従来通り剛接合とみなす。梁の遠端の
+//!   結合状態は考慮しない）。
 //! - 柱（対象柱自身を含む）: その柱自身の強軸たわみ方向と評価方向のなす角
 //!   `cos²β` により `I_eff = iy・cos²β + iz・(1−cos²β)` へ断面二次モーメントを
 //!   投影する。
+//! - `L'` は柱・梁とも剛域控除後の内法長 `L' = 節点間長さ − rigid_zone.length_i
+//!   − rigid_zone.length_j`（[`clear_length`]。`L' ≤ 0` になる場合は節点間の
+//!   幾何学的長さにフォールバックする）。
 //!
 //! 評価方向の水平投影が縮退する（部材がほぼ鉛直で水平方向が定まらない）軸は、
 //! 方向を区別しない従来の集計（[`g_ratio_at_with_index`]、下記の方向無差別
@@ -35,10 +43,14 @@
 //!   [`steel_column_k_axes_with_index`] を使うこと）。
 //! - 断面二次モーメントは強軸 `Section.iy` を全部材で用いる（加力方向別の
 //!   使い分けはしない。部材角度を考慮しないため同水準の近似）。
+//! - 梁の結合状態は考慮しない（ピン接合の梁も剛接合として算入する）。
+//! - 剛域による材長補正は行わず、節点間の幾何学的長さをそのまま用いる
+//!   （互換維持のため軸別評価版のみ精緻化する）。
 //!
 //! # 両版に共通する簡略化
 //! - `EndCondition::SemiRigid` はピンとみなさず G の計算値をそのまま用いる。
-//! - 剛域・特殊形状による材長補正は行わず、節点間の幾何学的長さを用いる。
+//! - 支点（節点の境界条件）の状態は考慮しない。
+//! - 斜材（水平・鉛直いずれでもない部材）は無視する。
 
 use squid_n_core::ids::NodeId;
 use squid_n_core::model::{ElementData, ElementKind, EndCondition, Material, Model, Section};
@@ -145,6 +157,24 @@ fn member_horizontal_axis(model: &Model, elem: &ElementData, axis: usize) -> Opt
     let (p0, p1) = node_coords(model, elem)?;
     let frame = LocalFrame::from_nodes(p0, p1, elem.local_axis.ref_vector);
     horizontal_unit(frame.rot[axis])
+}
+
+/// 部材 `elem` の `node_id` 側の端番号（`elem.nodes` の 0/1）。
+/// 見つからない場合は `None`（`node_id` が `elem` の端点でない）。
+fn end_index_at(elem: &ElementData, node_id: NodeId) -> Option<usize> {
+    elem.nodes.iter().take(2).position(|n| *n == node_id)
+}
+
+/// 剛域控除後の内法長 `L' = len − rigid_zone.length_i − rigid_zone.length_j`
+/// （squid_n_element の可とう長と同じ式）。`L' ≤ 0` になる場合は
+/// 幾何学的長さ `len` にフォールバックする。
+fn clear_length(elem: &ElementData, len: f64) -> f64 {
+    let l = len - elem.rigid_zone.length_i - elem.rigid_zone.length_j;
+    if l > 0.0 {
+        l
+    } else {
+        len
+    }
 }
 
 /// 節点ID → その節点に接続する線材（`ElementKind::Beam`）要素への参照インデックス。
@@ -275,15 +305,18 @@ pub fn steel_column_k(model: &Model, elem: &ElementData) -> Option<f64> {
 /// 重み付け版）。
 ///
 /// `d_a` は評価対象のたわみ方向（対象柱自身の `ey`（強軸）または `ez`（弱軸）の
-/// 水平投影単位ベクトル）。`G_a = Σ(E・I_eff/L)_柱 / Σ(E・iy・cos²θ/L)_梁`:
+/// 水平投影単位ベクトル）。`G_a = Σ(E・I_eff/L')_柱 / Σ(E・iy・cos²θ/L')_梁`
+/// （`L'` は剛域控除後の内法長。[`clear_length`]）:
 ///
 /// - 柱（対象柱自身を含む。|ez| ≥ 0.8）: その柱自身の強軸たわみ方向の水平投影
 ///   `d_c` を求め、`cos²β = (d_c・d_a)²` により `I_eff = iy・cos²β + iz・(1−cos²β)`
 ///   を負担剛度とする。`d_c` が縮退（求まらない）場合は `cos²β=1`（`iy` を採用）。
 /// - 梁（|ez| ≤ 0.2）: 梁材軸の水平投影単位ベクトル `e_h` と `d_a` のなす角の
-///   余弦の 2 乗 `cos²θ = (e_h・d_a)²` を重みとして `E・iy/L` に乗じる（面内
+///   余弦の 2 乗 `cos²θ = (e_h・d_a)²` を重みとして `E・iy/L'` に乗じる（面内
 ///   （鉛直面）曲げは強軸 `iy` とする従来仮定を維持）。`e_h` が縮退する場合は
 ///   寄与 0（水平方向を定義できない部材は回転拘束に寄与しないとみなす）。
+///   当該節点側の端が `Pinned` の梁は、その梁端が節点回転を拘束しないため
+///   Σ梁 に算入しない（`SemiRigid` は従来通り剛接合とみなす）。
 /// - 斜材（0.2 < |ez| < 0.8）は従来通り無視する。
 ///
 /// 当該柱端が `Pinned`、または節点に接する梁が無い（Σ梁 ≤ 0）場合は G=10。
@@ -304,9 +337,10 @@ fn g_ratio_axis_at(
     let mut sum_col = 0.0_f64;
     let mut sum_beam = 0.0_f64;
     for other in index.beams_at(*node_id) {
-        let Some((len, ez)) = line_geometry(model, other) else {
+        let Some((raw_len, ez)) = line_geometry(model, other) else {
             continue;
         };
+        let len = clear_length(other, raw_len);
         if ez >= 0.8 {
             let Some((sec, mat)) = section_material(model, other) else {
                 continue;
@@ -325,6 +359,12 @@ fn g_ratio_axis_at(
             let i_eff = iy * cos2 + iz * (1.0 - cos2);
             sum_col += mat.young * i_eff / len;
         } else if ez <= 0.2 {
+            // ピン接合の梁端（当該節点側）は節点回転を拘束しないため不算入。
+            if let Some(end_idx) = end_index_at(other, *node_id) {
+                if matches!(other.end_cond.get(end_idx), Some(EndCondition::Pinned)) {
+                    continue;
+                }
+            }
             let Some(ei_l) = flexural_stiffness(model, other, len) else {
                 continue;
             };
@@ -763,5 +803,55 @@ mod tests {
             (k_z - expected_kz).abs() < 1e-9,
             "k_z={k_z}, expected={expected_kz}"
         );
+    }
+
+    /// 節点側の梁端が `Pinned` の場合、その梁は Σ梁 に不算入となり G=10 相当
+    /// （柱側のみで梁側 Σ=0 のため）になることを、軸別評価版
+    /// （[`g_ratio_axis_at`] を通る [`steel_column_k_axes_with_index`]）で確認する。
+    /// 下端の梁 `line_elem(1, 0, 2)` の節点0側（`end_cond[0]`）を Pinned にする。
+    #[test]
+    fn steel_column_k_axes_pinned_beam_end_excluded_from_sum() {
+        let mut model = portal_model(4000.0, 8000.0);
+        model.elements[1].end_cond[0] = EndCondition::Pinned;
+        let index = BeamNodeIndex::build(&model);
+        let (k_y, k_z) = steel_column_k_axes_with_index(&model, &index, &model.elements[0])
+            .expect("柱として判定される");
+        // 下端: 梁が不算入となり Σ梁=0 → G=10。上端は従来通り G=2。
+        let expected_ky = sway_buckling_k(10.0, 2.0);
+        // 平面ポータルモデルは Y 方向（弱軸）に梁が無いため元々両端 G=10 のまま。
+        let expected_kz = sway_buckling_k(10.0, 10.0);
+        assert!(
+            (k_y - expected_ky).abs() < 1e-9,
+            "k_y={k_y}, expected={expected_ky}"
+        );
+        assert!(
+            (k_z - expected_kz).abs() < 1e-9,
+            "k_z={k_z}, expected={expected_kz}"
+        );
+    }
+
+    /// 梁に剛域を与えると内法長 L' が短くなり Σ梁（E・I/L'）が増大 → G が
+    /// 減少（K も減少）することを、軸別評価版で確認する。下端の梁
+    /// （長さ8000）に length_i=2000 を与え、L'=6000 になる場合と比較する。
+    #[test]
+    fn steel_column_k_axes_rigid_zone_shortens_clear_length() {
+        let mut model = portal_model(4000.0, 8000.0);
+        model.elements[1].rigid_zone = RigidZone {
+            length_i: 2000.0,
+            ..RigidZone::default()
+        };
+        let index = BeamNodeIndex::build(&model);
+        let (k_y, _k_z) = steel_column_k_axes_with_index(&model, &index, &model.elements[0])
+            .expect("柱として判定される");
+        // 下端 G_y = (E・iy/4000)/(E・iy/(8000-2000)) = 6000/4000 = 1.5（剛域控除前は 2.0）。
+        // 上端は剛域を与えていないため従来通り G=2。
+        let expected = sway_buckling_k(1.5, 2.0);
+        assert!(
+            (k_y - expected).abs() < 1e-6,
+            "k_y={k_y}, expected={expected}"
+        );
+        // 剛域控除前（L=8000 のまま）の G=2 より小さいことを確認（L' 短縮で G 減少）。
+        let baseline = sway_buckling_k(2.0, 2.0);
+        assert!(k_y < baseline, "k_y={k_y}, baseline={baseline}");
     }
 }

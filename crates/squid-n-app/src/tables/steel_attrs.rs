@@ -1,6 +1,7 @@
 //! S 造部材の断面検定用属性（`Model.steel_design_attrs` = `SteelDesignAttr`:
 //! 継手フランジ／ウェブ欠損率・スカラップ欠損率、横座屈長さ lb の直接入力、
-//! 等間隔横補剛本数、座屈長さ lk_y/lk_z の直接入力）の編集 UI。
+//! 等間隔横補剛本数、座屈長さ lk_y/lk_z の直接入力、横座屈修正係数 C の
+//! 直接入力）の編集 UI。
 //! 対象は `ElementKind::Beam` の部材のみ（本ソフトでは柱も梁もブレースも
 //! `ElementKind::Beam` で表現するフレーム部材のため、実質すべての一般部材が
 //! 対象。座屈長さ lk_y/lk_z の直接入力は柱以外の部材にも有効）。
@@ -43,6 +44,8 @@ pub struct SteelAttrDraft {
     pub lk_y_direct: String,
     /// 弱軸まわり座屈長さ lk_z の直接入力 [mm]（空欄=自動算定）。
     pub lk_z_direct: String,
+    /// 横座屈修正係数 C の直接入力（空欄=自動算定）。
+    pub c_direct: String,
 }
 
 /// 欠損率入力（βf/βw/αw共通）をパースする。空欄は 0（欠損なし）とする
@@ -129,6 +132,14 @@ fn opt_len_desc(v: Option<f64>) -> String {
     }
 }
 
+/// 横座屈修正係数 C 直接入力の表示文字列（小数第2位まで）。
+fn opt_c_desc(v: Option<f64>) -> String {
+    match v {
+        Some(x) => format!("{x:.2}"),
+        None => "自動".to_string(),
+    }
+}
+
 /// 等間隔横補剛本数の表示文字列。
 fn opt_count_desc(v: Option<u32>) -> String {
     match v {
@@ -140,8 +151,9 @@ fn opt_count_desc(v: Option<u32>) -> String {
 pub fn steel_attrs_table(ui: &mut egui::Ui, app: &mut App) {
     ui.label(
         "S造部材の断面検定用属性（継手・スカラップ欠損率、横座屈長さ lb の直接入力、\
-         等間隔横補剛本数、座屈長さ lk_y/lk_z の直接入力）を設定します。\
-         lk_y/lk_z の直接入力は柱の自動算定（K・部材長）より優先されます。",
+         等間隔横補剛本数、座屈長さ lk_y/lk_z の直接入力、横座屈修正係数 C の直接入力）\
+         を設定します。lk_y/lk_z の直接入力は柱の自動算定（K・部材長）より優先されます。\
+         C の直接入力は自動算定（材端モーメント比・上限2.3）より優先されます。",
     );
     ui.separator();
 
@@ -170,7 +182,7 @@ pub fn steel_attrs_table(ui: &mut egui::Ui, app: &mut App) {
             ui.horizontal(|ui| {
                 ui.label(format!(
                     "部材#{}: βf={:.1}% βw={:.1}% αw={:.1}% / lb={} / 横補剛n={} / \
-                     lk_y={} lk_z={}",
+                     lk_y={} lk_z={} / C={}",
                     attr.elem.0,
                     attr.joint_flange_loss,
                     attr.joint_web_loss,
@@ -179,6 +191,7 @@ pub fn steel_attrs_table(ui: &mut egui::Ui, app: &mut App) {
                     opt_count_desc(attr.lateral_brace_count),
                     opt_len_desc(attr.lk_y_direct),
                     opt_len_desc(attr.lk_z_direct),
+                    opt_c_desc(attr.c_direct),
                 ));
                 if ui
                     .button("✏")
@@ -222,6 +235,8 @@ pub fn steel_attrs_table(ui: &mut egui::Ui, app: &mut App) {
             .lk_z_direct
             .map(|v| format!("{v:.0}"))
             .unwrap_or_default();
+        app.steel_attr_draft.c_direct =
+            attr.c_direct.map(|v| format!("{v:.2}")).unwrap_or_default();
     }
     if let Some(elem) = pending_remove {
         app.undo
@@ -273,6 +288,7 @@ pub fn steel_attrs_table(ui: &mut egui::Ui, app: &mut App) {
                 lateral_brace_count: None,
                 lk_y_direct: None,
                 lk_z_direct: None,
+                c_direct: None,
             });
             app.steel_attr_draft.joint_flange_loss = format!("{:.1}", attr.joint_flange_loss);
             app.steel_attr_draft.joint_web_loss = format!("{:.1}", attr.joint_web_loss);
@@ -296,6 +312,8 @@ pub fn steel_attrs_table(ui: &mut egui::Ui, app: &mut App) {
                 .lk_z_direct
                 .map(|v| format!("{v:.0}"))
                 .unwrap_or_default();
+            app.steel_attr_draft.c_direct =
+                attr.c_direct.map(|v| format!("{v:.2}")).unwrap_or_default();
             app.steel_attr_draft.synced_for = Some(eid);
         }
     }
@@ -357,6 +375,15 @@ pub fn steel_attrs_table(ui: &mut egui::Ui, app: &mut App) {
         "空欄=自動算定(柱はK・部材長、柱以外は部材長)。指定した場合は柱の自動算定より優先されます。",
     );
 
+    ui.horizontal(|ui| {
+        ui.label("C 係数直接入力（空欄=自動）:");
+        ui.add(egui::TextEdit::singleline(&mut app.steel_attr_draft.c_direct).desired_width(60.0));
+    })
+    .response
+    .on_hover_text(
+        "空欄=自動算定(材端モーメント比M2/M1・上限2.3)。指定した場合は自動算定・上限2.3を行わず入力値をそのまま採用します。",
+    );
+
     let parsed_flange = parse_loss_percent(&app.steel_attr_draft.joint_flange_loss, "βf");
     let parsed_web = parse_loss_percent(&app.steel_attr_draft.joint_web_loss, "βw");
     let parsed_scallop = parse_loss_percent(&app.steel_attr_draft.scallop_web_loss, "αw");
@@ -368,6 +395,7 @@ pub fn steel_attrs_table(ui: &mut egui::Ui, app: &mut App) {
     let parsed_brace_count = parse_brace_count(&app.steel_attr_draft.lateral_brace_count);
     let parsed_lk_y = parse_lk_direct(&app.steel_attr_draft.lk_y_direct, "lk_y");
     let parsed_lk_z = parse_lk_direct(&app.steel_attr_draft.lk_z_direct, "lk_z");
+    let parsed_c = parse_lk_direct(&app.steel_attr_draft.c_direct, "C係数");
 
     for (label, r) in [
         ("βf", parsed_flange.as_ref().err()),
@@ -377,6 +405,7 @@ pub fn steel_attrs_table(ui: &mut egui::Ui, app: &mut App) {
         ("横補剛本数", parsed_brace_count.as_ref().err()),
         ("lk_y", parsed_lk_y.as_ref().err()),
         ("lk_z", parsed_lk_z.as_ref().err()),
+        ("C係数", parsed_c.as_ref().err()),
     ] {
         if let Some(e) = r {
             ui.colored_label(crate::theme::ERROR_RED, format!("{label}の入力エラー: {e}"));
@@ -390,7 +419,8 @@ pub fn steel_attrs_table(ui: &mut egui::Ui, app: &mut App) {
         && parsed_lb.is_ok()
         && parsed_brace_count.is_ok()
         && parsed_lk_y.is_ok()
-        && parsed_lk_z.is_ok();
+        && parsed_lk_z.is_ok()
+        && parsed_c.is_ok();
     ui.horizontal(|ui| {
         if ui
             .add_enabled(can_apply, egui::Button::new("✔ 適用"))
@@ -408,6 +438,7 @@ pub fn steel_attrs_table(ui: &mut egui::Ui, app: &mut App) {
                 Ok(lateral_brace_count),
                 Ok(lk_y_direct),
                 Ok(lk_z_direct),
+                Ok(c_direct),
             ) = (
                 app.steel_attr_draft.elem,
                 parsed_flange,
@@ -417,6 +448,7 @@ pub fn steel_attrs_table(ui: &mut egui::Ui, app: &mut App) {
                 parsed_brace_count,
                 parsed_lk_y,
                 parsed_lk_z,
+                parsed_c,
             ) {
                 let attr = SteelDesignAttr {
                     elem,
@@ -427,6 +459,7 @@ pub fn steel_attrs_table(ui: &mut egui::Ui, app: &mut App) {
                     lateral_brace_count,
                     lk_y_direct,
                     lk_z_direct,
+                    c_direct,
                 };
                 if attr.is_empty() {
                     app.undo
@@ -541,6 +574,16 @@ mod tests {
         assert!(parse_lk_direct("abc", "lk_y").is_err());
     }
 
+    /// C 係数直接入力も lk_y/lk_z と同じ正値パーサを再利用できること
+    /// （空欄=自動、正の値はそのまま、0以下・非数値はエラー）。
+    #[test]
+    fn test_parse_c_direct_reuses_parse_lk_direct() {
+        assert_eq!(parse_lk_direct("", "C係数").unwrap(), None);
+        assert_eq!(parse_lk_direct("1.5", "C係数").unwrap(), Some(1.5));
+        assert!(parse_lk_direct("0", "C係数").is_err());
+        assert!(parse_lk_direct("-1.0", "C係数").is_err());
+    }
+
     /// 表示用整形（lb 直接入力・座屈長さ・横補剛本数）が None/Some で
     /// 期待通りの文字列になること。
     #[test]
@@ -554,5 +597,7 @@ mod tests {
         assert_eq!(opt_len_desc(Some(3500.0)), "3500");
         assert_eq!(opt_count_desc(None), "なし");
         assert_eq!(opt_count_desc(Some(3)), "3");
+        assert_eq!(opt_c_desc(None), "自動");
+        assert_eq!(opt_c_desc(Some(1.5)), "1.50");
     }
 }

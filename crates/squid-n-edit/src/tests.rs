@@ -2136,6 +2136,7 @@ fn test_set_steel_design_attr_add_replace_and_remove_roundtrip() {
         lateral_brace_count: None,
         lk_y_direct: None,
         lk_z_direct: None,
+        c_direct: None,
     };
     stack.run(
         &mut model,
@@ -2161,6 +2162,7 @@ fn test_set_steel_design_attr_add_replace_and_remove_roundtrip() {
         lateral_brace_count: Some(3),
         lk_y_direct: Some(3500.0),
         lk_z_direct: Some(1750.0),
+        c_direct: Some(1.5),
     };
     stack.run(
         &mut model,

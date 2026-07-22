@@ -242,6 +242,10 @@ pub struct SteelDesignAttr {
     /// 弱軸まわり座屈長さの直接入力 lk_z [mm]（None=自動算定）
     #[serde(default)]
     pub lk_z_direct: Option<f64>,
+    /// 横座屈修正係数 C の直接入力（None=自動算定）。
+    /// 入力がある場合は自動算定（M2/M1 比・上限 2.3）を行わず入力値を採用する。
+    #[serde(default)]
+    pub c_direct: Option<f64>,
 }
 
 impl SteelDesignAttr {
@@ -256,6 +260,7 @@ impl SteelDesignAttr {
             && self.lateral_brace_count.is_none()
             && self.lk_y_direct.is_none()
             && self.lk_z_direct.is_none()
+            && self.c_direct.is_none()
     }
 }
 

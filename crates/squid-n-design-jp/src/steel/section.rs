@@ -169,6 +169,30 @@ pub(crate) fn steel_lateral_buckling_c(ctx: &DesignCtx) -> f64 {
     c.min(2.3)
 }
 
+/// 横座屈修正係数 C の解決（beam.rs・column.rs で共通のロジックに統一）。
+///
+/// 1. [`DesignCtx::steel_attr`] に `c_direct`（正値）の直接入力があれば、
+///    その値をそのまま採用する（参考資料の「入力がある場合は入力値を採用」。
+///    自動算定の上限 `2.3` はこの場合適用しない）。
+/// 2. 直接入力が無い場合、`lb_is_partial=true`（横補剛等により座屈区間が
+///    部材の部分区間となり区間端モーメント比が不明）であれば安全側の `1.0`。
+/// 3. それ以外は従来の自動算定 [`steel_lateral_buckling_c`]（`ctx.end_moments_z`/
+///    `ctx.mid_moment_z` から `M2/M1` により算定）。
+///
+/// `c_direct` が `0` 以下の場合は無効な入力（未入力相当）として無視し、
+/// 2./3. にフォールバックする。
+pub(crate) fn steel_c_factor(ctx: &DesignCtx, lb_is_partial: bool) -> f64 {
+    if let Some(c) = ctx.steel_attr.as_ref().and_then(|a| a.c_direct) {
+        if c > 1e-9 {
+            return c;
+        }
+    }
+    if lb_is_partial {
+        return 1.0;
+    }
+    steel_lateral_buckling_c(ctx)
+}
+
 // ---------------------------------------------------------------------
 // 許容曲げ応力度 fb（新基準・AIJ 鋼構造許容応力度設計規準 2019）
 // ---------------------------------------------------------------------
@@ -279,6 +303,42 @@ pub(crate) fn steel_p_lambda_b(ctx: &DesignCtx) -> f64 {
     0.6 + 0.3 * m2_over_m1
 }
 
+/// 曲げねじり定数 Iw [mm⁶]（新基準 fb 用。beam.rs・column.rs で共用）。
+///
+/// - `SteelBuiltH`（非対称組立 H）: 上下フランジの寸法から個別に
+///   `I_u=t_u・b_u³/12`、`I_l=t_l・b_l³/12` を求め、`hf=H−(t_u+t_l)/2`
+///   （上下フランジ図心間距離）として `Iw=hf²・I_u・I_l/(I_u+I_l)`
+///   （上下フランジの曲げ剛性比に応じてねじり中心が偏心する非対称 H 用の式）。
+/// - それ以外（`SteelH` および shape 無しのフォールバック）: `Iz・(H−tf)²/4`
+///   （上下フランジ対称、`Iz` はフランジ図心間の距離の半分だけ離れた 2 枚の
+///   フランジが負担するとみなす近似式）。
+pub(crate) fn steel_warping_constant(sec: &Section, tf: f64) -> f64 {
+    match &sec.shape {
+        Some(SectionShape::SteelBuiltH {
+            height,
+            upper_width,
+            upper_thick,
+            lower_width,
+            lower_thick,
+            ..
+        }) => {
+            let hf = height - (upper_thick + lower_thick) / 2.0;
+            let i_u = upper_thick * upper_width.powi(3) / 12.0;
+            let i_l = lower_thick * lower_width.powi(3) / 12.0;
+            let denom = i_u + i_l;
+            if denom > 1e-12 {
+                hf * hf * i_u * i_l / denom
+            } else {
+                0.0
+            }
+        }
+        _ => {
+            let h = sec.depth;
+            sec.iz * (h - tf).powi(2) / 4.0
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // 断面欠損（継手部・スカラップ）と横座屈長さ
 // （鋼構造設計規準「鉄骨の断面検定における断面性能」）
@@ -365,6 +425,8 @@ pub fn resolve_lb(
 mod tests {
     use super::*;
     use crate::material_strength::steel_ft;
+    use squid_n_core::ids::ElemId;
+    use squid_n_core::model::SteelDesignAttr;
 
     // -------------------------------------------------------------
     // fb（横座屈考慮）
@@ -501,6 +563,94 @@ mod tests {
             c_diff,
             c_same
         );
+    }
+
+    // -------------------------------------------------------------
+    // 横座屈修正係数 C の解決（steel_c_factor: 直接入力 > 部分区間なら1.0 >
+    // 自動算定）
+    // -------------------------------------------------------------
+
+    /// c_direct（正値）があれば、自動算定結果や上限 2.3 を無視してその値を
+    /// そのまま採用する（自動算定なら異符号端モーメントで C=2.3 になる状況
+    /// でも、c_direct=1.5 が優先されること）。
+    #[test]
+    fn test_c_factor_direct_input_overrides_auto() {
+        let ctx = DesignCtx {
+            end_moments_z: Some((100.0, -100.0)), // 自動算定なら C=2.3（上限）
+            steel_attr: Some(SteelDesignAttr {
+                elem: ElemId(0),
+                joint_flange_loss: 0.0,
+                joint_web_loss: 0.0,
+                scallop_web_loss: 0.0,
+                lb_direct: None,
+                lateral_brace_count: None,
+                lk_y_direct: None,
+                lk_z_direct: None,
+                c_direct: Some(1.5),
+            }),
+            ..Default::default()
+        };
+        // 自動算定結果（2.3）とは異なることも併せて確認する。
+        let auto = steel_lateral_buckling_c(&ctx);
+        assert!((auto - 2.3).abs() < 1e-9, "auto={auto}");
+        assert_eq!(steel_c_factor(&ctx, false), 1.5);
+        // 部分区間（横補剛あり）でも直接入力が優先され C=1.0 に落ちないこと。
+        assert_eq!(steel_c_factor(&ctx, true), 1.5);
+    }
+
+    /// c_direct が無い場合、部分区間（lb_is_partial=true。横補剛により座屈
+    /// 区間が部材の部分区間となり区間端モーメント比が不明）では安全側の
+    /// C=1.0 とする（自動算定なら異なる値になる状況でも 1.0 に落ちること）。
+    #[test]
+    fn test_c_factor_partial_lb_without_direct_is_1_0() {
+        let ctx = DesignCtx {
+            end_moments_z: Some((100.0, -100.0)), // 自動算定なら C=2.3
+            ..Default::default()
+        };
+        assert_eq!(steel_c_factor(&ctx, true), 1.0);
+        // 部分区間でなければ従来通り自動算定（2.3）になること。
+        let auto = steel_c_factor(&ctx, false);
+        assert!((auto - 2.3).abs() < 1e-9, "auto={auto}");
+    }
+
+    /// c_direct ≤ 0 は無効な入力（未入力相当）として無視し、2./3. の規定へ
+    /// フォールバックすること。
+    #[test]
+    fn test_c_factor_direct_non_positive_falls_back() {
+        let ctx_zero = DesignCtx {
+            steel_attr: Some(SteelDesignAttr {
+                elem: ElemId(0),
+                joint_flange_loss: 0.0,
+                joint_web_loss: 0.0,
+                scallop_web_loss: 0.0,
+                lb_direct: None,
+                lateral_brace_count: None,
+                lk_y_direct: None,
+                lk_z_direct: None,
+                c_direct: Some(0.0),
+            }),
+            ..Default::default()
+        };
+        // c_direct=0 は無視され、lb_is_partial=true なら安全側 1.0。
+        assert_eq!(steel_c_factor(&ctx_zero, true), 1.0);
+        // lb_is_partial=false なら自動算定（end_moments_z=None → 1.0）。
+        assert_eq!(steel_c_factor(&ctx_zero, false), 1.0);
+
+        let ctx_neg = DesignCtx {
+            steel_attr: Some(SteelDesignAttr {
+                elem: ElemId(0),
+                joint_flange_loss: 0.0,
+                joint_web_loss: 0.0,
+                scallop_web_loss: 0.0,
+                lb_direct: None,
+                lateral_brace_count: None,
+                lk_y_direct: None,
+                lk_z_direct: None,
+                c_direct: Some(-1.5),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(steel_c_factor(&ctx_neg, true), 1.0);
     }
 
     /// C が増加すると fb1 の分母 `C·Λ²` が大きくなり、fb（=fb1 が支配的な

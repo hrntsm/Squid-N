@@ -2,10 +2,12 @@
 //! 鉄骨造柱の許容応力度検定）。
 
 use crate::material_strength::{steel_fc, steel_fs, steel_ft};
-use crate::{effective_slenderness, CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
-use squid_n_core::model::Section;
+use crate::{effective_slenderness, CheckResult, DesignCtx, LoadTerm, MemberForcesAt, SteelFbRule};
+use squid_n_core::model::{Material, Section};
 
-use super::section::{steel_fb_h, steel_i_t, steel_lateral_buckling_c};
+use super::section::{
+    steel_c_factor, steel_fb_h, steel_fb_h_new, steel_i_t, steel_p_lambda_b, steel_warping_constant,
+};
 use super::{nonzero, safe_denom, section_modulus, shape_of, shear_area, ShapeCategory};
 
 /// 鉄骨造柱の断面検定（鋼構造設計規準）。
@@ -16,6 +18,7 @@ use super::{nonzero, safe_denom, section_modulus, shape_of, shear_area, ShapeCat
 pub(crate) fn check_column(
     forces: &MemberForcesAt,
     sec: &Section,
+    mat: &Material,
     ctx: &DesignCtx,
     f: f64,
     term: LoadTerm,
@@ -46,16 +49,30 @@ pub(crate) fn check_column(
     // 座屈を考慮した許容圧縮応力度 fc（鋼構造設計規準 1973、λ に応じた低減）。
     let fc_val = steel_fc(f, lambda, term);
 
-    // 強軸 fb（H形のみ横座屈考慮。lb は柱の階高 = ctx.length）。
-    // 修正係数 C は梁と同様 ctx.end_moments_z/mid_moment_z から求める
-    // （柱も端部モーメント比により fb1 が変化する）。
-    let c = steel_lateral_buckling_c(ctx);
+    // 強軸 fb（H形のみ横座屈考慮。lb は柱の階高 = ctx.length。旧基準/新基準の
+    // 切替は梁と同様 ctx.steel_fb_rule による）。修正係数 C は梁と同様
+    // ctx.end_moments_z/mid_moment_z から求める（柱も端部モーメント比により
+    // fb1 が変化する。SteelDesignAttr.c_direct による直接入力にも対応）。
+    let c = steel_c_factor(ctx, false);
     let fb_strong = match shape {
-        ShapeCategory::H => {
-            let af = b * tf;
-            let i_t = steel_i_t(b, tf, h, tw);
-            steel_fb_h(f, term, ctx.length, i_t, h, af, c)
-        }
+        ShapeCategory::H => match ctx.steel_fb_rule {
+            SteelFbRule::Old => {
+                let af = b * tf;
+                let i_t = steel_i_t(b, tf, h, tw);
+                steel_fb_h(f, term, ctx.length, i_t, h, af, c)
+            }
+            SteelFbRule::New => {
+                let iz = sec.iz;
+                let iw = steel_warping_constant(sec, tf);
+                let j = sec.j;
+                let e = mat.young;
+                let g = mat.shear.unwrap_or(e / (2.0 * (1.0 + mat.poisson)));
+                let p_lambda_b = steel_p_lambda_b(ctx);
+                steel_fb_h_new(
+                    f, term, ctx.length, iz, iw, j, e, g, z_strong, c, p_lambda_b,
+                )
+            }
+        },
         _ => ft_val,
     };
     let fb_weak = ft_val;
@@ -154,7 +171,7 @@ fbY={:.4} N/mm², λ={:.3}, τ={:.4} N/mm², fs={:.4} N/mm², 軸曲げ比={:.4}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::steel::test_support::{mat, rect_section};
+    use crate::steel::test_support::{h_section, mat, rect_section};
     use crate::steel::SteelDesign;
     use crate::{DesignCheck, MemberKind};
 
@@ -388,6 +405,96 @@ mod tests {
             "lk_z を伸ばすと検定比が上がるはず: base={} long_z={}",
             base.ratio,
             long_z.ratio
+        );
+    }
+
+    // -------------------------------------------------------------
+    // 新基準 fb（AIJ-ASD19）の柱への配線
+    // -------------------------------------------------------------
+
+    /// steel_fb_rule 未指定（既定 Old）では従来値（steel_fb_h・
+    /// steel_i_t 直接利用）と一致する（柱の Old 分岐は無変更）。
+    #[test]
+    fn test_column_check_fb_rule_default_matches_old() {
+        let sec = h_section(400.0, 200.0, 8.0, 13.0);
+        let mat_v = mat("SN400B");
+        let forces = MemberForcesAt {
+            pos: 0.0,
+            n: -50_000.0,
+            qy: 0.0,
+            qz: 0.0,
+            my: 0.0,
+            mz: 5e7,
+        };
+        let ctx = DesignCtx {
+            term: LoadTerm::Long,
+            kind: MemberKind::Column,
+            length: 3500.0,
+            ..Default::default()
+        };
+        assert_eq!(ctx.steel_fb_rule, SteelFbRule::Old);
+        let result = SteelDesign.check(&forces, &sec, &mat_v, &ctx);
+
+        let f = 235.0;
+        let af = 200.0 * 13.0;
+        let i_t = steel_i_t(200.0, 13.0, 400.0, 8.0);
+        let c = steel_c_factor(&ctx, false);
+        let fb_expected = steel_fb_h(f, LoadTerm::Long, 3500.0, i_t, 400.0, af, c);
+        assert!(
+            result.detail.contains(&format!("fbX={:.4}", fb_expected)),
+            "detail={}",
+            result.detail
+        );
+    }
+
+    /// 新基準 fb（`SteelFbRule::New`）: H形柱の fbX が `steel_fb_h_new` の
+    /// 手計算と一致することを確認する（柱の階高 `ctx.length` を lb として
+    /// 用いる）。
+    #[test]
+    fn test_column_check_fb_rule_new_matches_hand_calc() {
+        let sec = h_section(400.0, 200.0, 8.0, 13.0);
+        let mat_v = mat("SN400B");
+        let forces = MemberForcesAt {
+            pos: 0.0,
+            n: -50_000.0,
+            qy: 0.0,
+            qz: 0.0,
+            my: 0.0,
+            mz: 5e7,
+        };
+        let ctx = DesignCtx {
+            term: LoadTerm::Long,
+            kind: MemberKind::Column,
+            length: 3500.0,
+            steel_fb_rule: SteelFbRule::New,
+            ..Default::default()
+        };
+        let result = SteelDesign.check(&forces, &sec, &mat_v, &ctx);
+
+        let f = 235.0;
+        let z_strong = sec.iy / (sec.depth / 2.0);
+        let iw = steel_warping_constant(&sec, 13.0);
+        let e = mat_v.young;
+        let g = e / (2.0 * (1.0 + mat_v.poisson));
+        let p_lambda_b = steel_p_lambda_b(&ctx);
+        let c = steel_c_factor(&ctx, false);
+        let fb_expected = steel_fb_h_new(
+            f,
+            LoadTerm::Long,
+            3500.0,
+            sec.iz,
+            iw,
+            sec.j,
+            e,
+            g,
+            z_strong,
+            c,
+            p_lambda_b,
+        );
+        assert!(
+            result.detail.contains(&format!("fbX={:.4}", fb_expected)),
+            "detail={}",
+            result.detail
         );
     }
 }
