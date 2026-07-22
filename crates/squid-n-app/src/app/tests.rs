@@ -41,6 +41,40 @@ fn test_report_error_updates_last_error_and_log() {
     assert_eq!(last.message, "テストエラー");
 }
 
+/// エラー報告は下ドックを開くだけでなくログタブへ切り替える
+/// （診断・テーブル表示中でもエラー本文が見えるように）。
+#[cfg(feature = "gui")]
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn test_report_error_switches_bottom_tab_to_log() {
+    let mut app = App::default();
+    app.bottom_tab = BottomTab::Diagnostics;
+    app.bottom_dock_open = false;
+    app.report_error("テストエラー");
+    assert!(app.bottom_dock_open);
+    assert_eq!(app.bottom_tab, BottomTab::Log);
+}
+
+/// モデル差し替えで作成モードと選択バッファが解除される
+/// （旧モデルの節点 id が残ると意図しない部材が生成されうるため）。
+#[cfg(feature = "gui")]
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn test_load_model_resets_draw_modes() {
+    let mut app = App::default();
+    app.beam_draw_mode = true;
+    app.beam_draw_first = Some(squid_n_core::ids::NodeId(3));
+    app.wall_draw_mode = true;
+    app.wall_draw_nodes.push(squid_n_core::ids::NodeId(1));
+    app.slab_draw_nodes.push(squid_n_core::ids::NodeId(2));
+    app.load_model(crate::sample::portal_frame());
+    assert!(!app.beam_draw_mode);
+    assert!(app.beam_draw_first.is_none());
+    assert!(!app.wall_draw_mode);
+    assert!(app.wall_draw_nodes.is_empty());
+    assert!(app.slab_draw_nodes.is_empty());
+}
+
 /// 一本部材指定（beam_groups）: 2 分割梁のグループ合成値
 /// （全長・端部/中央モーメント・せん断スパン代表値）の手計算照合。
 #[test]

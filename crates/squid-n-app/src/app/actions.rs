@@ -23,7 +23,10 @@ impl App {
         self.last_error = Some(msg);
         #[cfg(feature = "gui")]
         {
+            // 別タブ（診断・テーブル）が表示中でもエラー本文が見えるよう、
+            // ドックを開くだけでなくログタブへ切り替える。
             self.bottom_dock_open = true;
+            self.bottom_tab = BottomTab::Log;
         }
     }
 
@@ -57,8 +60,23 @@ impl App {
         self.last_notice = None;
         self.auto_load_sync_hash = None;
         self.staleness = Staleness::default();
+        #[cfg(feature = "gui")]
+        self.reset_draw_modes();
         self.sync_node_edit();
         self.refresh_beam_loads();
+    }
+
+    /// 作成モード（梁・壁・スラブ）とその選択バッファをすべて解除する。
+    /// モデル差し替え時は選択中の節点 id が新モデルでは別の節点（または範囲外）を
+    /// 指すため、残したままにすると意図しない部材が生成されうる。
+    #[cfg(feature = "gui")]
+    pub(crate) fn reset_draw_modes(&mut self) {
+        self.beam_draw_mode = false;
+        self.beam_draw_first = None;
+        self.wall_draw_mode = false;
+        self.wall_draw_nodes.clear();
+        self.slab_draw_mode = false;
+        self.slab_draw_nodes.clear();
     }
 
     /// プロジェクトを指定パスへ保存する。成功時は project_path と未保存フラグを更新。
@@ -1750,6 +1768,12 @@ impl App {
                 #[cfg(not(feature = "gui"))]
                 let _ = job;
 
+                // ジョブ完了は新しい状態の起点なので、ジョブ実行中に発生した無関係の
+                // エラー表示（例: ファイル保存失敗）をここでクリアしてから結果を適用する。
+                // こうしないと成功判定（下の last_error.is_none()）が古いエラーに
+                // 引きずられ、成功したのに完了ログ・自動遷移が行われない
+                // （エラー自体はイベントログに残っており失われない）。
+                self.last_error = None;
                 match result {
                     JobResult::Pushover(res) => self.apply_pushover_result(res),
                     JobResult::TimeHistory(res) => self.apply_time_history_result(res),

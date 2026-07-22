@@ -1484,6 +1484,13 @@ impl eframe::App for App {
                 .request_repaint_after(std::time::Duration::from_millis(100));
         }
 
+        // 作成パレットが見えていない間は作成モードを強制解除する。モードのトグル・
+        // 進捗表示・クリア処理はパレット内にしかないため、非表示のままモードが残ると
+        // 3D クリックで意図しない部材が無言で生成される（可視性と発動可能性を一致させる）。
+        if !(self.left_dock_open && self.left_panel == LeftPanel::DrawTools) {
+            self.reset_draw_modes();
+        }
+
         // 上部ツールバー: ファイルメニュー + 工程タブ（自由遷移）+ Undo/Redo
         egui::Panel::top("top_toolbar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1551,7 +1558,9 @@ impl eframe::App for App {
                         _ => "",
                     };
                     let label_str = format!("{} {}", label, stale_marker);
-                    if ui.selectable_label(selected, label_str).clicked() {
+                    // プリセットは工程が実際に変わったときのみ適用する。選択中タブの
+                    // 再クリックで手動調整したドック配置が巻き戻らないようにするため。
+                    if ui.selectable_label(selected, label_str).clicked() && !selected {
                         self.active_tab = *tab;
                         self.apply_tab_preset(*tab);
                     }
@@ -1711,7 +1720,10 @@ impl eframe::App for App {
                             if self.log.entries.is_empty() {
                                 ui.colored_label(crate::theme::GRAY_600, "ログはまだありません");
                             } else {
+                                // id_salt: 4タブは同一パネル内で切り替わるため、明示しないと
+                                // ScrollArea の Id が衝突しスクロール位置がタブ間で共有される。
                                 egui::ScrollArea::vertical()
+                                    .id_salt("bottom_log")
                                     .auto_shrink([false, false])
                                     .stick_to_bottom(true)
                                     .show(ui, |ui| {
@@ -1743,11 +1755,13 @@ impl eframe::App for App {
                         }
                         BottomTab::Model => {
                             egui::ScrollArea::both()
+                                .id_salt("bottom_model")
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| self.model_tab_panel(ui));
                         }
                         BottomTab::Loads => {
                             egui::ScrollArea::both()
+                                .id_salt("bottom_loads")
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| crate::tables::loads::loads_table(ui, self));
                         }
@@ -1759,6 +1773,7 @@ impl eframe::App for App {
                                 );
                             } else {
                                 egui::ScrollArea::vertical()
+                                    .id_salt("bottom_diag")
                                     .auto_shrink([false, false])
                                     .show(ui, |ui| {
                                         // インデックスで回す（クリック時に selection/nav を
