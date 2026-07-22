@@ -437,6 +437,9 @@ pub struct App {
     /// CMQ 図で表示する成分（C: モーメント／Q: せん断）
     #[cfg(feature = "gui")]
     pub cmq_component: crate::viewer::CmqComponent,
+    /// N/Q/M 図の表示切替（false=単色塗り／true=値に応じたコンター色分け）
+    #[cfg(feature = "gui")]
+    pub diagram_contour: bool,
     /// 変形図・モード形の倍率スライダー値
     #[cfg(feature = "gui")]
     pub deform_scale: f32,
@@ -588,6 +591,8 @@ impl Default for App {
             view_mode: crate::viewer::ViewMode::default(),
             #[cfg(feature = "gui")]
             cmq_component: crate::viewer::CmqComponent::default(),
+            #[cfg(feature = "gui")]
+            diagram_contour: false,
             #[cfg(feature = "gui")]
             deform_scale: 100.0,
             #[cfg(feature = "gui")]

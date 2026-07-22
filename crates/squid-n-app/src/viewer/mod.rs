@@ -5,6 +5,7 @@ mod viewcube;
 use squid_n_core::dof::{Dof, Dof6Mask};
 use squid_n_core::ids::SectionId;
 
+mod diagram;
 mod solid;
 
 /// 3D ビュー上での支持条件の分類。`Dof6Mask` のビットパターンを意味的にまとめる。
@@ -463,6 +464,12 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
             ui.selectable_value(&mut cmq_component, CmqComponent::C, "C(モーメント)");
             ui.selectable_value(&mut cmq_component, CmqComponent::M, "M(中央)");
             ui.selectable_value(&mut cmq_component, CmqComponent::Q, "Q(せん断)");
+        });
+    }
+    // N/Q/M 図: 単色塗り／コンター（値に応じた色分け）を切替
+    if matches!(mode, ViewMode::N | ViewMode::Q | ViewMode::M) {
+        ui.horizontal(|ui| {
+            ui.toggle_value(&mut app.diagram_contour, "コンター");
         });
     }
     if mode == ViewMode::Mode {
@@ -1109,7 +1116,7 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
 
     // --- 応力図（N/Q/M）: 部材ローカルに沿って描画 ---
     if matches!(mode, ViewMode::N | ViewMode::Q | ViewMode::M) {
-        draw_force_diagram(&painter, app, mode, &coords3, center3, &cam, scale, center);
+        diagram::draw_force_diagram(&painter, app, mode, &coords3, center3, &cam, scale, center);
     }
     if mode == ViewMode::Cmq {
         draw_cmq_diagram(&painter, app, &coords3, center3, &cam, scale, center);
@@ -1208,121 +1215,6 @@ fn project_offset(
         screen_center,
     );
     egui::pos2(p[0], p[1])
-}
-
-/// 部材ローカルに沿って N/Q/M 図を描く。
-///
-/// 図は要素ローカル y 軸方向（曲げ平面内）へワールド空間で張り出してから投影する。
-/// スクリーン上の部材線の法線ではなくワールドの要素軸を使うため、ビューを回転
-/// しても図の張り出し面は要素座標系に追従する（曲げ平面を真横から見ると線に潰れる）。
-#[allow(clippy::too_many_arguments)]
-fn draw_force_diagram(
-    painter: &egui::Painter,
-    app: &App,
-    mode: ViewMode,
-    coords3: &[[f64; 3]],
-    center3: [f64; 3],
-    cam: &CameraState,
-    scale: f32,
-    screen_center: [f32; 2],
-) {
-    let force_idx = match mode {
-        ViewMode::N => 0, // N
-        ViewMode::Q => 1, // Qy
-        ViewMode::M => 5, // Mz
-        _ => return,
-    };
-    let label = match mode {
-        ViewMode::N => "N",
-        ViewMode::Q => "Q",
-        ViewMode::M => "M",
-        _ => "",
-    };
-
-    let Some(results) = &app.results else {
-        return;
-    };
-    let max_abs = results
-        .member_forces
-        .iter()
-        .flat_map(|(_, mf)| mf.at.iter().map(|(_, f)| f[force_idx].abs()))
-        .fold(0.0_f64, f64::max);
-    if max_abs < 1e-12 {
-        return;
-    }
-    // 最大値で 60px 相当のワールド長（一様スケール正射影なので px/scale=ワールド長）
-    let amp_world = 60.0 / max_abs / scale as f64;
-
-    for (elem_id, mf) in &results.member_forces {
-        let elem = app.model.elements.iter().find(|e| e.id == *elem_id);
-        let Some(elem) = elem else { continue };
-        if elem.nodes.len() < 2 {
-            continue;
-        }
-        let n0 = elem.nodes[0].index();
-        let n1 = elem.nodes[1].index();
-        if n0 >= coords3.len() || n1 >= coords3.len() {
-            continue;
-        }
-        let p_i = coords3[n0];
-        let p_j = coords3[n1];
-        if member_len3(p_i, p_j) < 1e-9 {
-            continue; // ゼロ長部材（同一節点間）は材軸が定まらず図を描けない
-        }
-        let ey = diagram_offset_dir(p_i, p_j, elem.local_axis.ref_vector);
-        let p0 = {
-            let p = project(p_i, center3, cam, scale, screen_center);
-            egui::pos2(p[0], p[1])
-        };
-        let p1 = {
-            let p = project(p_j, center3, cam, scale, screen_center);
-            egui::pos2(p[0], p[1])
-        };
-
-        // 評価位置の内力をローカル y 方向（負側=梁下側）へプロット
-        let mut diagram_pts: Vec<egui::Pos2> = Vec::new();
-        for (xi, forces) in &mf.at {
-            let val = forces[force_idx];
-            let base3 = [
-                p_i[0] + (p_j[0] - p_i[0]) * xi,
-                p_i[1] + (p_j[1] - p_i[1]) * xi,
-                p_i[2] + (p_j[2] - p_i[2]) * xi,
-            ];
-            diagram_pts.push(project_offset(
-                base3,
-                ey,
-                -val * amp_world,
-                center3,
-                cam,
-                scale,
-                screen_center,
-            ));
-        }
-        if diagram_pts.len() >= 2 {
-            // 図形（折れ線→ポリゴン）
-            let mut poly = Vec::with_capacity(diagram_pts.len() + 2);
-            poly.push(p0);
-            poly.extend(diagram_pts);
-            poly.push(p1);
-            painter.add(egui::Shape::convex_polygon(
-                poly,
-                theme::translucent(theme::DATA_BLUE, 60),
-                egui::Stroke::new(1.5_f32, theme::DATA_BLUE),
-            ));
-        }
-    }
-
-    // 凡例
-    painter.text(
-        egui::pos2(
-            painter.clip_rect().min.x + 10.0,
-            painter.clip_rect().min.y + 10.0,
-        ),
-        egui::Align2::LEFT_TOP,
-        format!("{}図 (max={:.2})", label, max_abs),
-        egui::FontId::proportional(14.0),
-        theme::GRAY_700,
-    );
 }
 
 /// CMQ 図の描画対象となる主架構の大梁か（`ElementKind::Beam` かつ、実部材化された
