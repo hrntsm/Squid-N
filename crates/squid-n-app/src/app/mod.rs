@@ -35,6 +35,27 @@ pub enum ModelTab {
     MemberDetails,
 }
 
+/// 下ドックのタブ。ログに加え、横幅を要する編集テーブルを収容する
+/// （横長テーブルは幅の狭い左ドックより下ドックの方が視認性が良い）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BottomTab {
+    #[default]
+    Log,
+    /// モデル編集テーブル（節点・部材・断面…の ModelTab サブタブ群）
+    Model,
+    /// 荷重編集テーブル
+    Loads,
+}
+
+/// 左ドックのパネル。Zed のように下部バーのアイコンで切り替える。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LeftPanel {
+    #[default]
+    Navigator,
+    /// 作成パレット（梁・壁・スラブ作成モードと断面割当）
+    DrawTools,
+}
+
 /// 結果タブ内の切替（3D 各種図・時刻歴グラフ・プッシュオーバー曲線）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ResultsView {
@@ -481,12 +502,18 @@ pub struct App {
     /// 左ドック（ナビゲータ／編集パネル）の表示状態
     #[cfg(feature = "gui")]
     pub left_dock_open: bool,
+    /// 左ドックの表示パネル（ナビゲータ／作成パレット）
+    #[cfg(feature = "gui")]
+    pub left_panel: LeftPanel,
     /// 右ドック（インスペクタ）の表示状態
     #[cfg(feature = "gui")]
     pub right_dock_open: bool,
-    /// 下ドック（ログ）の表示状態
+    /// 下ドック（ログ／編集テーブル）の表示状態
     #[cfg(feature = "gui")]
     pub bottom_dock_open: bool,
+    /// 下ドックの表示タブ（ログ／モデル編集／荷重編集）
+    #[cfg(feature = "gui")]
+    pub bottom_tab: BottomTab,
     /// 結果タブ内の表示切替（3D / 時刻歴）
     #[cfg(feature = "gui")]
     pub results_view: ResultsView,
@@ -645,9 +672,13 @@ impl Default for App {
             #[cfg(feature = "gui")]
             left_dock_open: true,
             #[cfg(feature = "gui")]
+            left_panel: LeftPanel::default(),
+            #[cfg(feature = "gui")]
             right_dock_open: true,
             #[cfg(feature = "gui")]
             bottom_dock_open: false,
+            #[cfg(feature = "gui")]
+            bottom_tab: BottomTab::default(),
             #[cfg(feature = "gui")]
             results_view: ResultsView::default(),
             #[cfg(feature = "gui")]
@@ -1510,8 +1541,8 @@ impl eframe::App for App {
                 self.status_bar(ui);
             });
 
-        // 左：ナビゲータ（常時）＋ モデル/荷重タブ選択中はその設定編集を併設。
-        // モデル作成状況は中央の3Dビューで常時確認できるようにし、設定操作はここに集約する。
+        // 左：パネル切替式（ナビゲータ／作成パレット）。Zed のようにステータスバーの
+        // アイコンで切り替える（切替自体は status_bar が行う）。
         if self.left_dock_open {
             egui::Panel::left("left_dock")
                 .resizable(true)
@@ -1520,18 +1551,9 @@ impl eframe::App for App {
                 .show_inside(ui, |ui| {
                     egui::ScrollArea::both()
                         .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            self.navigator_panel(ui);
-                            if matches!(self.active_tab, Tab::Model | Tab::Loads) {
-                                ui.add_space(8.0);
-                                ui.separator();
-                                ui.add_space(4.0);
-                                match self.active_tab {
-                                    Tab::Model => self.model_tab_panel(ui),
-                                    Tab::Loads => crate::tables::loads::loads_table(ui, self),
-                                    _ => unreachable!(),
-                                }
-                            }
+                        .show(ui, |ui| match self.left_panel {
+                            LeftPanel::Navigator => self.navigator_panel(ui),
+                            LeftPanel::DrawTools => self.draw_tools_panel(ui),
                         });
                 });
         }
@@ -1547,58 +1569,93 @@ impl eframe::App for App {
                 });
         }
 
-        // 下（中央領域内）：セッション内イベントログ。
+        // 下（中央領域内）：タブ切替（ログ／モデル編集／荷重編集）。
+        // 横長テーブルは幅の狭い左ドックより下ドックの方が視認性が良いため、
+        // モデル/荷重の編集テーブルもここに収容する。
         // 左右ドックより後に show_inside することで、中央領域の下部（左右ドックの間）に出す。
         if self.bottom_dock_open {
             egui::Panel::bottom("bottom_dock")
                 .resizable(true)
-                .default_size(160.0)
-                .size_range(80.0..=400.0)
+                .default_size(200.0)
+                .size_range(80.0..=520.0)
                 .show_inside(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(format!("ログ ({})", self.log.entries.len()));
+                        let log_label = format!("ログ ({})", self.log.entries.len());
+                        if ui
+                            .selectable_label(self.bottom_tab == BottomTab::Log, log_label)
+                            .clicked()
+                        {
+                            self.bottom_tab = BottomTab::Log;
+                        }
+                        if ui
+                            .selectable_label(self.bottom_tab == BottomTab::Model, "モデル")
+                            .clicked()
+                        {
+                            self.bottom_tab = BottomTab::Model;
+                        }
+                        if ui
+                            .selectable_label(self.bottom_tab == BottomTab::Loads, "荷重")
+                            .clicked()
+                        {
+                            self.bottom_tab = BottomTab::Loads;
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("✕").clicked() {
                                 self.bottom_dock_open = false;
                             }
-                            if ui.button("クリア").clicked() {
+                            if self.bottom_tab == BottomTab::Log && ui.button("クリア").clicked()
+                            {
                                 self.log.entries.clear();
                             }
                         });
                     });
                     ui.separator();
-                    if self.log.entries.is_empty() {
-                        ui.colored_label(crate::theme::GRAY_600, "ログはまだありません");
-                        return;
-                    }
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            for entry in &self.log.entries {
-                                let color = match entry.level {
-                                    LogLevel::Error => crate::theme::ERROR_RED,
-                                    LogLevel::Notice => crate::theme::BEST_YELLOW,
-                                    LogLevel::Info => crate::theme::GRAY_700,
-                                };
-                                // 改行を含むメッセージ（複数行の警告など）は1行に畳んで
-                                // truncate し、全文はホバーで表示する
-                                // （ステータスバーの last_error 表示と同じ流儀）。
-                                let one_line = entry.message.replace('\n', " ");
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(format!(
-                                            "[{}] {}",
-                                            entry.timestamp_label(),
-                                            one_line
-                                        ))
-                                        .color(color),
-                                    )
-                                    .truncate(),
-                                )
-                                .on_hover_text(&entry.message);
+                    match self.bottom_tab {
+                        BottomTab::Log => {
+                            if self.log.entries.is_empty() {
+                                ui.colored_label(crate::theme::GRAY_600, "ログはまだありません");
+                            } else {
+                                egui::ScrollArea::vertical()
+                                    .auto_shrink([false, false])
+                                    .stick_to_bottom(true)
+                                    .show(ui, |ui| {
+                                        for entry in &self.log.entries {
+                                            let color = match entry.level {
+                                                LogLevel::Error => crate::theme::ERROR_RED,
+                                                LogLevel::Notice => crate::theme::BEST_YELLOW,
+                                                LogLevel::Info => crate::theme::GRAY_700,
+                                            };
+                                            // 改行を含むメッセージ（複数行の警告など）は1行に畳んで
+                                            // truncate し、全文はホバーで表示する
+                                            // （ステータスバーの last_error 表示と同じ流儀）。
+                                            let one_line = entry.message.replace('\n', " ");
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(format!(
+                                                        "[{}] {}",
+                                                        entry.timestamp_label(),
+                                                        one_line
+                                                    ))
+                                                    .color(color),
+                                                )
+                                                .truncate(),
+                                            )
+                                            .on_hover_text(&entry.message);
+                                        }
+                                    });
                             }
-                        });
+                        }
+                        BottomTab::Model => {
+                            egui::ScrollArea::both()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| self.model_tab_panel(ui));
+                        }
+                        BottomTab::Loads => {
+                            egui::ScrollArea::both()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| crate::tables::loads::loads_table(ui, self));
+                        }
+                    }
                 });
         }
 

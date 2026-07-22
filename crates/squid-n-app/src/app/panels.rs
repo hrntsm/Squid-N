@@ -2,6 +2,20 @@
 
 use super::*;
 
+/// ステータスバーのドック/パネル切替アイコンの共通クリック挙動（Zed 風）。
+/// 対象ドックが開いていて対象パネルが既にアクティブなら閉じて `false` を返す。
+/// それ以外はドックを開いて `true` を返す（呼び出し側は `true` のときのみ
+/// 対象パネル/タブをアクティブにする）。
+fn toggle_dock_icon(dock_open: &mut bool, is_active: bool) -> bool {
+    if *dock_open && is_active {
+        *dock_open = false;
+        false
+    } else {
+        *dock_open = true;
+        true
+    }
+}
+
 impl App {
     /// 「開く…」ダイアログを表示して読み込む。
     pub(crate) fn open_project_dialog(&mut self) {
@@ -245,26 +259,193 @@ impl App {
         });
     }
 
-    /// モデルタブ：サブタブ切替で節点/部材/断面/材料を編集するテーブルを表示。
-    pub(crate) fn model_tab_panel(&mut self, ui: &mut egui::Ui) {
+    /// 左ドック「作成」パネル：梁・壁・スラブ作成モードの切替と断面割当 UI。
+    /// いずれもビューア（3D クリック）と連動する状態（`beam_draw_mode` 等）を操作する。
+    pub(crate) fn draw_tools_panel(&mut self, ui: &mut egui::Ui) {
+        ui.strong("作成");
+        ui.separator();
+
+        // --- 梁作成モード ---
+        // ON 中はクリックで節点を選び、2 点目で梁を生成する（OFF 中は部材クリック=断面割当）。
         ui.horizontal(|ui| {
-            if ui
-                .button("📄 新規")
-                .on_hover_text("現在のモデルを破棄して空のモデルを作成します")
-                .clicked()
-            {
-                self.load_model(squid_n_core::model::Model::default());
+            let beam_was_on = self.beam_draw_mode;
+            ui.toggle_value(&mut self.beam_draw_mode, "梁作成モード");
+            // 梁作成を ON にしたら壁・スラブ作成は OFF（排他）
+            if self.beam_draw_mode && !beam_was_on {
+                self.wall_draw_mode = false;
+                self.slab_draw_mode = false;
             }
-            if ui
-                .button("🏠 サンプル読込")
-                .on_hover_text("現在のモデルを破棄して門型ラーメンのサンプルを読み込みます")
-                .clicked()
-            {
-                self.load_model(crate::sample::portal_frame());
+            if self.beam_draw_mode {
+                match self.beam_draw_first {
+                    None => {
+                        ui.label("始点の節点をクリック");
+                    }
+                    Some(nid) => {
+                        ui.label(format!("始点 N{} 選択中 → 終点の節点をクリック", nid.0));
+                        if ui.button("キャンセル").clicked() {
+                            self.beam_draw_first = None;
+                        }
+                    }
+                }
             }
         });
-        ui.separator();
+        // モード OFF 時は始点選択をクリア
+        if !self.beam_draw_mode {
+            self.beam_draw_first = None;
+        }
+
+        // --- 壁作成モード ---
+        // ON 中はクリックで柱・梁に囲まれた 4 節点を順に選び、4 点目で壁を生成する。
         ui.horizontal(|ui| {
+            let wall_was_on = self.wall_draw_mode;
+            ui.toggle_value(&mut self.wall_draw_mode, "壁作成モード");
+            // 壁作成を ON にしたら梁・スラブ作成は OFF（排他）
+            if self.wall_draw_mode && !wall_was_on {
+                self.beam_draw_mode = false;
+                self.slab_draw_mode = false;
+            }
+            if self.wall_draw_mode {
+                let picked: Vec<String> = self
+                    .wall_draw_nodes
+                    .iter()
+                    .map(|n| format!("N{}", n.0))
+                    .collect();
+                ui.label(format!(
+                    "節点を4つクリック ({}/4){}",
+                    self.wall_draw_nodes.len(),
+                    if picked.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", picked.join(", "))
+                    }
+                ));
+                if !self.wall_draw_nodes.is_empty() && ui.button("キャンセル").clicked() {
+                    self.wall_draw_nodes.clear();
+                }
+            }
+        });
+        // モード OFF 時は選択をクリア
+        if !self.wall_draw_mode {
+            self.wall_draw_nodes.clear();
+        }
+
+        // --- スラブ作成モード ---
+        // ON 中はクリックで境界節点を外周順に選び、3〜N 節点そろったら「確定」で生成する。
+        ui.horizontal(|ui| {
+            let slab_was_on = self.slab_draw_mode;
+            ui.toggle_value(&mut self.slab_draw_mode, "スラブ作成モード");
+            // スラブ作成を ON にしたら梁・壁作成は OFF（排他）
+            if self.slab_draw_mode && !slab_was_on {
+                self.beam_draw_mode = false;
+                self.wall_draw_mode = false;
+            }
+            if self.slab_draw_mode {
+                // 節点削除などで陳腐化した参照（範囲外 id）を毎フレーム除去し、
+                // 存在しない節点を境界に含むスラブの生成を防ぐ。
+                let node_count = self.model.nodes.len() as u32;
+                self.slab_draw_nodes.retain(|n| n.0 < node_count);
+                let picked: Vec<String> = self
+                    .slab_draw_nodes
+                    .iter()
+                    .map(|n| format!("N{}", n.0))
+                    .collect();
+                ui.label(format!(
+                    "境界節点を外周順にクリック ({}){}",
+                    self.slab_draw_nodes.len(),
+                    if picked.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", picked.join(", "))
+                    }
+                ));
+                if self.slab_draw_nodes.len() >= 3 && ui.button("確定").clicked() {
+                    let boundary = self.slab_draw_nodes.clone();
+                    self.undo.run(
+                        &mut self.model,
+                        Box::new(squid_n_edit::AddSlab {
+                            boundary,
+                            joists: Vec::new(),
+                            loads: Vec::new(),
+                            method: squid_n_core::model::DistributionMethod::TriTrapezoid,
+                            usage: None,
+                        }),
+                    );
+                    self.staleness.mark_edited();
+                    self.slab_draw_nodes.clear();
+                }
+                if !self.slab_draw_nodes.is_empty() && ui.button("キャンセル").clicked() {
+                    self.slab_draw_nodes.clear();
+                }
+            }
+        });
+        // モード OFF 時は選択をクリア
+        if !self.slab_draw_mode {
+            self.slab_draw_nodes.clear();
+        }
+
+        // --- 断面割当 UI ---
+        // focus_member を先にコピーして、後段の可変借用と競合しないようにする
+        let focus_id: Option<squid_n_core::ids::ElemId> = self.nav.focus_member;
+        // 存在確認もここで行い、ローカルに有効性と現在断面を取得
+        let elem_info: Option<(squid_n_core::ids::ElemId, Option<SectionId>)> =
+            focus_id.and_then(|eid| {
+                self.model
+                    .elements
+                    .iter()
+                    .find(|e| e.id == eid)
+                    .map(|e| (e.id, e.section))
+            });
+
+        let mut pending_assign: Option<Option<SectionId>> = None;
+
+        if let Some((elem_id, current_section)) = elem_info {
+            ui.horizontal(|ui| {
+                ui.label(format!("選択中の梁 #{}", elem_id.0));
+                ui.label("断面:");
+                let selected_text = current_section
+                    .map(|sid| format!("S{}", sid.0))
+                    .unwrap_or_else(|| "―".to_string());
+                egui::ComboBox::from_id_salt("viewer_assign_section")
+                    .selected_text(selected_text)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(current_section.is_none(), "―")
+                            .clicked()
+                        {
+                            pending_assign = Some(None);
+                        }
+                        for sec in &self.model.sections {
+                            if ui
+                                .selectable_label(
+                                    current_section == Some(sec.id),
+                                    format!("S{}", sec.id.0),
+                                )
+                                .clicked()
+                            {
+                                pending_assign = Some(Some(sec.id));
+                            }
+                        }
+                    });
+            });
+            // クロージャ外で発行（借用ルール）
+            if let Some(section) = pending_assign {
+                self.undo.run(
+                    &mut self.model,
+                    Box::new(squid_n_edit::SetElementSection {
+                        elem: elem_id,
+                        section,
+                    }),
+                );
+                self.staleness.mark_edited();
+            }
+        } else {
+            ui.label("ビューアで梁をクリックすると選択できます");
+        }
+    }
+
+    /// モデルタブ：サブタブ切替で節点/部材/断面/材料を編集するテーブルを表示。
+    pub(crate) fn model_tab_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
             let subs = [
                 ("節点", ModelTab::Nodes),
                 ("境界条件", ModelTab::BoundaryConditions),
@@ -1674,20 +1855,52 @@ impl App {
         #[allow(deprecated)]
         ui.allocate_ui_at_rect(left_rect, |ui| {
             ui.horizontal(|ui| {
-                // ドック開閉トグル（Zed 風。selectable_label で開閉状態を示す）
+                // ドック/パネル切替アイコン（Zed 風）。対象ドックが開いていて対象パネルが
+                // アクティブなら閉じる。それ以外は開いてそのパネルをアクティブにする。
+                let is_nav_active = self.left_dock_open && self.left_panel == LeftPanel::Navigator;
                 if ui
-                    .selectable_label(self.left_dock_open, "🗂")
-                    .on_hover_text("左パネルの表示/非表示")
+                    .selectable_label(is_nav_active, "🗂")
+                    .on_hover_text("ナビゲータ")
                     .clicked()
+                    && toggle_dock_icon(&mut self.left_dock_open, is_nav_active)
                 {
-                    self.left_dock_open = !self.left_dock_open;
+                    self.left_panel = LeftPanel::Navigator;
                 }
+                let is_draw_active = self.left_dock_open && self.left_panel == LeftPanel::DrawTools;
                 if ui
-                    .selectable_label(self.bottom_dock_open, "📜")
-                    .on_hover_text("ログパネルの表示/非表示")
+                    .selectable_label(is_draw_active, "✏")
+                    .on_hover_text("作成パレット")
                     .clicked()
+                    && toggle_dock_icon(&mut self.left_dock_open, is_draw_active)
                 {
-                    self.bottom_dock_open = !self.bottom_dock_open;
+                    self.left_panel = LeftPanel::DrawTools;
+                }
+                let is_log_active = self.bottom_dock_open && self.bottom_tab == BottomTab::Log;
+                if ui
+                    .selectable_label(is_log_active, "📜")
+                    .on_hover_text("ログ")
+                    .clicked()
+                    && toggle_dock_icon(&mut self.bottom_dock_open, is_log_active)
+                {
+                    self.bottom_tab = BottomTab::Log;
+                }
+                let is_model_active = self.bottom_dock_open && self.bottom_tab == BottomTab::Model;
+                if ui
+                    .selectable_label(is_model_active, "📋")
+                    .on_hover_text("モデル表")
+                    .clicked()
+                    && toggle_dock_icon(&mut self.bottom_dock_open, is_model_active)
+                {
+                    self.bottom_tab = BottomTab::Model;
+                }
+                let is_loads_active = self.bottom_dock_open && self.bottom_tab == BottomTab::Loads;
+                if ui
+                    .selectable_label(is_loads_active, "⚡")
+                    .on_hover_text("荷重表")
+                    .clicked()
+                    && toggle_dock_icon(&mut self.bottom_dock_open, is_loads_active)
+                {
+                    self.bottom_tab = BottomTab::Loads;
                 }
                 ui.separator();
                 // プロジェクトファイル名 + 未保存マーカー
