@@ -28,13 +28,17 @@ impl BeamElement {
             // i 端側は節点力 f_local[0]（引張時に -N）、j 端側は f_local[6]（+N）。
             // 旧実装の f0·(1-ξ)+f6·ξ は両端で符号が逆の節点力を線形補間しており、
             // 中央で N=0 となる誤りだったため、せん断と同じ端別採用に修正。
+            //
+            // モーメント Mx/My/Mz も同様に断面内力（j 端側の式と連続な内力場）で
+            // 統一する。i 端側では節点モーメント f3/f4/f5 は断面内力と符号が
+            // 逆のため反転して用いる（反転しないと ξ=0.5 で図がジャンプする）。
             let (n, qy, qz, mx, my, mz) = if xi < 0.5 {
                 let n = -f_local[0];
                 let qy = f_local[1];
                 let qz = f_local[2];
-                let mx = f_local[3];
-                let my = f_local[4] - f_local[2] * xi * self.length;
-                let mz = f_local[5] + f_local[1] * xi * self.length;
+                let mx = -f_local[3];
+                let my = -f_local[4] - f_local[2] * xi * self.length;
+                let mz = -f_local[5] + f_local[1] * xi * self.length;
                 (n, qy, qz, mx, my, mz)
             } else {
                 let n = f_local[6];

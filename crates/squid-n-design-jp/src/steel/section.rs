@@ -73,13 +73,9 @@ pub fn steel_fb_h(f: f64, term: LoadTerm, lb: f64, i: f64, h: f64, af: f64, c: f
 ///   絶対値が大きい方、`M2`: 小さい方（[`DesignCtx::end_moments_z`]）。
 /// - `M2/M1` の符号は「複曲率（部材が S 字に曲がる、反曲点あり）なら正、
 ///   単曲率（一様な向きに曲がる）なら負」という鋼構造設計規準の定義に従う。
-///   **squid-n の内力符号規約では、部材両端の `mz` の符号が同じ場合が
-///   複曲率、異なる場合が単曲率に対応する**（鋼構造設計規準でいう「端部モーメ
-///   ントが逆符号＝複曲率」は、部材の各端の局所座標系が反転している一般的
-///   な有限要素の符号規約を経ると「同符号」として観測されるため）。
-///   すなわちモーメント図 `mz(0)`, `mz(1)` が同符号＝軸をまたがず単調＝
-///   実際には反曲点を持つ複曲率、異符号＝軸をまたぐ＝実際には反曲点の無い
-///   単曲率、という対応になる。
+///   **squid-n の内力（断面力）符号規約では、`mz` は部材全長で連続な内力場
+///   のため、両端の `mz` が異符号＝モーメント図が軸をまたぐ＝反曲点を持つ
+///   複曲率、同符号＝軸をまたがない＝反曲点の無い単曲率に対応する**。
 /// - 座屈区間中央部（[`DesignCtx::mid_moment_z`]）の絶対値が両端部の絶対値
 ///   より大きい場合は、区間内の最大曲げが端部にないため安全側の `C=1.0`
 ///   とする。
@@ -108,9 +104,14 @@ pub(crate) fn steel_lateral_buckling_c(ctx: &DesignCtx) -> f64 {
     }
 
     let ratio_abs = m2 / m1;
-    // 同符号（squid-n 規約で複曲率）なら正、異符号（単曲率）なら負。
-    let same_sign = abs_i <= 1e-9 || abs_j <= 1e-9 || m_i * m_j > 0.0;
-    let m2_over_m1 = if same_sign { ratio_abs } else { -ratio_abs };
+    // 異符号（反曲点あり＝複曲率）なら正、同符号（単曲率）なら負。
+    // 片端がほぼゼロなら ratio_abs=0 で符号は結果に影響しない。
+    let double_curvature = m_i * m_j < 0.0;
+    let m2_over_m1 = if double_curvature {
+        ratio_abs
+    } else {
+        -ratio_abs
+    };
 
     let c = 1.75 + 1.05 * m2_over_m1 + 0.3 * m2_over_m1 * m2_over_m1;
     c.min(2.3)
@@ -245,24 +246,24 @@ mod tests {
     // 横座屈修正係数 C
     // -------------------------------------------------------------
 
-    /// 複曲率（squid-n 規約で端部モーメント同符号）・等モーメント逆向き相当
+    /// 複曲率（端部モーメント異符号＝反曲点あり）・等モーメント逆向き相当
     /// （M2/M1=+1）で C=1.75+1.05+0.3=3.1 → 上限 2.3 にクランプされる。
     #[test]
     fn test_c_factor_double_curvature_equal_clamps_to_2_3() {
         let ctx = DesignCtx {
-            end_moments_z: Some((100.0, 100.0)),
+            end_moments_z: Some((100.0, -100.0)),
             ..Default::default()
         };
         let c = steel_lateral_buckling_c(&ctx);
         assert!((c - 2.3).abs() < 1e-9, "c={}", c);
     }
 
-    /// 単曲率（端部モーメント異符号）・一様分布相当（M2/M1=-1）で
+    /// 単曲率（端部モーメント同符号＝反曲点なし）・一様分布相当（M2/M1=-1）で
     /// C=1.75-1.05+0.3=1.0。
     #[test]
     fn test_c_factor_single_curvature_uniform_is_1_0() {
         let ctx = DesignCtx {
-            end_moments_z: Some((100.0, -100.0)),
+            end_moments_z: Some((100.0, 100.0)),
             ..Default::default()
         };
         let c = steel_lateral_buckling_c(&ctx);
@@ -303,26 +304,27 @@ mod tests {
         assert!((c - 1.0).abs() < 1e-9, "c={}", c);
     }
 
-    /// 符号判定の検証: squid-n の内力符号規約では mz(0)/mz(1) が同符号なら
-    /// 複曲率扱い（C が大きくなる）、異符号なら単曲率扱い（C が小さくなる）。
-    /// |M2/M1| が同じでも符号が異なれば C の値が変わることを確認する。
+    /// 符号判定の検証: squid-n の内力（断面力）符号規約では mz(0)/mz(1) が
+    /// 異符号なら複曲率扱い（C が大きくなる）、同符号なら単曲率扱い
+    /// （C が小さくなる）。|M2/M1| が同じでも符号が異なれば C の値が変わる
+    /// ことを確認する。
     #[test]
-    fn test_c_factor_same_sign_gt_diff_sign_for_same_ratio() {
-        let ctx_same = DesignCtx {
-            end_moments_z: Some((100.0, 30.0)), // 同符号（複曲率扱い）
-            ..Default::default()
-        };
+    fn test_c_factor_diff_sign_gt_same_sign_for_same_ratio() {
         let ctx_diff = DesignCtx {
-            end_moments_z: Some((100.0, -30.0)), // 異符号（単曲率扱い）
+            end_moments_z: Some((100.0, -30.0)), // 異符号（複曲率扱い）
             ..Default::default()
         };
-        let c_same = steel_lateral_buckling_c(&ctx_same);
+        let ctx_same = DesignCtx {
+            end_moments_z: Some((100.0, 30.0)), // 同符号（単曲率扱い）
+            ..Default::default()
+        };
         let c_diff = steel_lateral_buckling_c(&ctx_diff);
+        let c_same = steel_lateral_buckling_c(&ctx_same);
         assert!(
-            c_same > c_diff,
-            "同符号(複曲率)の方が C が大きいはず: c_same={} c_diff={}",
-            c_same,
-            c_diff
+            c_diff > c_same,
+            "異符号(複曲率)の方が C が大きいはず: c_diff={} c_same={}",
+            c_diff,
+            c_same
         );
     }
 

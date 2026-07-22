@@ -269,10 +269,11 @@ pub fn fixed_internal_local(
     f[2] = ff[2] + sz_i;
 
     if xi < 0.5 {
-        // i 端基準（beam: mz=f5+f1·x, my=f4−f2·x）
-        f[3] = ff[3];
-        f[5] = ff[5] + ff[1] * x - mom_i(&comps_y);
-        f[4] = ff[4] - ff[2] * x + mom_i(&comps_z);
+        // i 端基準（beam: mz=−f5+f1·x, my=−f4−f2·x）。節点モーメントは断面内力と
+        // 符号が逆のため反転し、スパン荷重の自由体項も j 側と対称な符号で加える。
+        f[3] = -ff[3];
+        f[5] = -ff[5] + ff[1] * x + mom_i(&comps_y);
+        f[4] = -ff[4] - ff[2] * x - mom_i(&comps_z);
     } else {
         // j 端基準（beam: mz=f11+f7·xr, my=f10−f8·xr）
         f[3] = ff[9];
@@ -356,6 +357,35 @@ mod tests {
         let fem = p * l / 8.0;
         assert!((q[5].abs() - fem).abs() < 1e-6, "q5={} fem={}", q[5], fem);
         assert!((q[1].abs() - p / 2.0).abs() < 1e-6, "q1={}", q[1]);
+    }
+
+    /// 両端固定梁の UDL に対する固定端内力場が、i/j 分岐（ξ=0.5）をまたいで
+    /// 連続かつ符号付き理論解と一致すること。下向き荷重（下端引張正の規約）で
+    /// M(ξ) = wL²(6ξ−6ξ²−1)/12（端部 −wL²/12・中央 +wL²/24）、
+    /// Q(ξ) = wL(1−2ξ)/2。
+    /// （旧実装は i 端側分岐の符号が j 側と不整合で、ξ=0.5 の前後で値が
+    /// ジャンプしていた。）
+    #[test]
+    fn udl_clamped_internal_field_continuous_and_signed() {
+        let l = 1000.0;
+        let w = 2.0;
+        let frame = horiz_frame();
+        let loads = vec![udl(w, l)];
+        for &xi in &[0.0, 0.25, 0.45, 0.5, 0.55, 0.75, 1.0] {
+            let f = fixed_internal_local(&loads, &frame, l, xi);
+            let m_expected = w * l * l * (6.0 * xi - 6.0 * xi * xi - 1.0) / 12.0;
+            let q_expected = w * l * (1.0 - 2.0 * xi) / 2.0;
+            assert!(
+                (f[5] - m_expected).abs() < 1e-2,
+                "xi={xi} Mz={} expected={m_expected}",
+                f[5]
+            );
+            assert!(
+                (f[1] - q_expected).abs() < 1e-6,
+                "xi={xi} Qy={} expected={q_expected}",
+                f[1]
+            );
+        }
     }
 
     #[test]

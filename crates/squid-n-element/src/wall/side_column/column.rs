@@ -110,9 +110,9 @@ impl InPlaneReleasedColumn {
                 let n = -f_local[0];
                 let qy = f_local[1];
                 let qz = f_local[2];
-                let mx = f_local[3];
-                let my = f_local[4] - f_local[2] * xi * length;
-                let mz = f_local[5] + f_local[1] * xi * length;
+                let mx = -f_local[3];
+                let my = -f_local[4] - f_local[2] * xi * length;
+                let mz = -f_local[5] + f_local[1] * xi * length;
                 (n, qy, qz, mx, my, mz)
             } else {
                 let n = f_local[6];

@@ -324,4 +324,45 @@ mod tests {
         let data = make_column_data([0, 2]);
         assert!(wall_side_column_release(&data, &model).is_none());
     }
+
+    /// recover_forces（縮約剛性版）の内力場が i/j 分岐（ξ=0.5）をまたいで
+    /// 連続・整合であること（`BeamElement::recover_forces` と同じ規約）。
+    /// N/Qy/Qz/Mx は一定、Mz/My は dMz/dx = Qy・dMy/dx = −Qz の線形場になる。
+    #[test]
+    fn test_released_recover_forces_field_continuous() {
+        for axis in [ReleaseAxis::LocalY, ReleaseAxis::LocalZ] {
+            let mut col = make_test_column(axis);
+            col.inner.eval_sections = vec![0.0, 0.25, 0.45, 0.5, 0.55, 0.75, 1.0];
+            let u = [
+                0.1, 2.0, -1.5, 0.004, 0.002, -0.003, //
+                -0.2, -1.0, 0.5, -0.002, 0.004, 0.001,
+            ];
+            let mf = col.recover_forces(&u).unwrap();
+            let l = col.inner.length;
+            let f0 = mf.at.first().unwrap().1;
+            for &(xi, f) in &mf.at {
+                for (k, name) in [(0, "N"), (1, "Qy"), (2, "Qz"), (3, "Mx")] {
+                    let tol = 1e-6 * f0[k].abs().max(1.0);
+                    assert!(
+                        (f[k] - f0[k]).abs() < tol,
+                        "axis={axis:?} xi={xi} {name}={} が一定でない (端={})",
+                        f[k],
+                        f0[k]
+                    );
+                }
+                let mz_expected = f0[5] + f0[1] * xi * l;
+                let my_expected = f0[4] - f0[2] * xi * l;
+                assert!(
+                    (f[5] - mz_expected).abs() < 1e-6 * mz_expected.abs().max(1.0),
+                    "axis={axis:?} xi={xi} Mz={} expected={mz_expected}",
+                    f[5]
+                );
+                assert!(
+                    (f[4] - my_expected).abs() < 1e-6 * my_expected.abs().max(1.0),
+                    "axis={axis:?} xi={xi} My={} expected={my_expected}",
+                    f[4]
+                );
+            }
+        }
+    }
 }

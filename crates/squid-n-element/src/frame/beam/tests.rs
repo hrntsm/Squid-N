@@ -2438,3 +2438,73 @@ fn test_beam_trial_displacement_tracking() {
     assert!(beam.committed_disp.iter().all(|v| *v == 0.0));
     assert!(beam.trial_disp.iter().all(|v| *v == 0.0));
 }
+
+/// recover_forces の内力場が i/j 分岐（ξ=0.5）をまたいで連続・整合であること。
+/// スパン荷重なしでは N/Qy/Qz/Mx は全断面で一定、Mz/My は
+/// dMz/dx = Qy・dMy/dx = −Qz を満たす単一の線形場になる。
+/// （旧実装は i 端側分岐で節点モーメントの符号を反転せず出力しており、
+/// 端部モーメント非ゼロの部材で M 図が ξ=0.5 でジャンプしていた。）
+#[test]
+fn test_recover_forces_moment_field_continuous_across_half() {
+    let mut beam = make_test_beam();
+    beam.j = 1.0e8; // ねじり剛性を与えて Mx も検証する
+    beam.eval_sections = vec![0.0, 0.25, 0.45, 0.5, 0.55, 0.75, 1.0];
+    // 全自由度を励起する任意の端部変位（局所=グローバルの恒等軸）
+    let u = [
+        0.1, 2.0, -1.5, 0.004, 0.002, -0.003, //
+        -0.2, -1.0, 0.5, -0.002, 0.004, 0.001,
+    ];
+    let mf = beam.recover_forces(&u);
+    let l = beam.length;
+    let f0 = mf.at.first().unwrap().1;
+    for &(xi, f) in &mf.at {
+        // N・Qy・Qz・Mx は一定
+        for (k, name) in [(0, "N"), (1, "Qy"), (2, "Qz"), (3, "Mx")] {
+            let tol = 1e-6 * f0[k].abs().max(1.0);
+            assert!(
+                (f[k] - f0[k]).abs() < tol,
+                "xi={xi} {name}={} が一定でない (端={})",
+                f[k],
+                f0[k]
+            );
+        }
+        // Mz(ξ) = Mz(0) + Qy·ξL、My(ξ) = My(0) − Qz·ξL の線形場
+        let mz_expected = f0[5] + f0[1] * xi * l;
+        let my_expected = f0[4] - f0[2] * xi * l;
+        let tol_mz = 1e-6 * mz_expected.abs().max(1.0);
+        let tol_my = 1e-6 * my_expected.abs().max(1.0);
+        assert!(
+            (f[5] - mz_expected).abs() < tol_mz,
+            "xi={xi} Mz={} expected={mz_expected}",
+            f[5]
+        );
+        assert!(
+            (f[4] - my_expected).abs() < tol_my,
+            "xi={xi} My={} expected={my_expected}",
+            f[4]
+        );
+    }
+}
+
+/// 純曲げ（両端逆向き回転 θ, −θ・並進ゼロ）では Qy=0 で Mz が全断面一定になる。
+/// たわみ形 v=θx(1−x/L) は v''=−2θ/L（上に凸＝上端引張）で、下端引張正の
+/// 断面力規約では Mz = EI·v'' = −2EIθ/L（負）となる符号まで検証する。
+#[test]
+fn test_recover_forces_pure_bending_constant_negative_moment() {
+    let mut beam = make_test_beam();
+    beam.eval_sections = vec![0.0, 0.25, 0.45, 0.5, 0.55, 0.75, 1.0];
+    let theta = 1.0e-3;
+    let mut u = [0.0; 12];
+    u[5] = theta; // rz_i
+    u[11] = -theta; // rz_j
+    let mf = beam.recover_forces(&u);
+    let expected = -2.0 * beam.e * beam.iz * theta / beam.length;
+    for &(xi, f) in &mf.at {
+        assert!(
+            (f[5] - expected).abs() < expected.abs() * 1e-6,
+            "xi={xi} Mz={} expected={expected}",
+            f[5]
+        );
+        assert!(f[1].abs() < 1e-6, "xi={xi} 純曲げで Qy={} が生じた", f[1]);
+    }
+}
