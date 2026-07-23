@@ -44,35 +44,60 @@ impl Default for SlabDraft {
     }
 }
 
-/// 用途選択で提示するプリセット（令別表第1）。`None` は「なし（積載寄与なし）」。
-/// `Custom` は UI からは扱わない（モデル/シリアライズでは利用可）。
+/// 用途選択で提示するプリセット（令別表第1／国交省営繕基準・令和3年度版）。
+/// `None` は「なし（積載寄与なし）」。`Custom` は UI からは扱わない
+/// （モデル/シリアライズでは利用可）。並びは国交省営繕基準の表に概ね沿う。
 const USAGE_PRESETS: &[Option<SlabUsage>] = &[
     None,
     Some(SlabUsage::Residential),
     Some(SlabUsage::Office),
+    Some(SlabUsage::ResearchRoom),
     Some(SlabUsage::Classroom),
     Some(SlabUsage::Store),
     Some(SlabUsage::AssemblyFixed),
     Some(SlabUsage::AssemblyOther),
     Some(SlabUsage::Corridor),
+    Some(SlabUsage::RegistryArchive),
+    Some(SlabUsage::GeneralArchive),
+    Some(SlabUsage::MobileArchive),
+    Some(SlabUsage::LabChemistry),
+    Some(SlabUsage::LabPhysics),
+    Some(SlabUsage::ComputerRoom),
+    Some(SlabUsage::MachineRoom),
+    Some(SlabUsage::Gymnasium),
     Some(SlabUsage::Garage),
+    Some(SlabUsage::Balcony),
     Some(SlabUsage::RoofResidential),
     Some(SlabUsage::RoofStore),
+    Some(SlabUsage::RoofUnused),
+    Some(SlabUsage::RoofSteelGym),
 ];
 
 fn usage_label(u: Option<SlabUsage>) -> &'static str {
     match u {
         None => "なし",
         Some(SlabUsage::Residential) => "住宅の居室・寝室・病室",
-        Some(SlabUsage::Office) => "事務室",
+        Some(SlabUsage::Office) => "事務室・会議室・食堂",
+        Some(SlabUsage::ResearchRoom) => "研究室",
         Some(SlabUsage::Classroom) => "教室",
         Some(SlabUsage::Store) => "百貨店・店舗の売場",
         Some(SlabUsage::AssemblyFixed) => "集会室・客席（固定席）",
         Some(SlabUsage::AssemblyOther) => "集会室・客席（その他）",
         Some(SlabUsage::Corridor) => "廊下・玄関・階段",
+        Some(SlabUsage::RegistryArchive) => "法務局登記書庫",
+        Some(SlabUsage::GeneralArchive) => "一般書庫・倉庫等",
+        Some(SlabUsage::MobileArchive) => "移動書架書庫・電算室空調機室・用具庫等",
+        Some(SlabUsage::LabChemistry) => "一般実験室（化学系）",
+        Some(SlabUsage::LabPhysics) => "一般実験室（物理系）",
+        Some(SlabUsage::ComputerRoom) => "電算室",
+        Some(SlabUsage::MachineRoom) => "機械室",
+        Some(SlabUsage::Gymnasium) => "体育館・武道場等",
         Some(SlabUsage::Garage) => "自動車車庫・通路",
-        Some(SlabUsage::RoofResidential) => "屋上・バルコニー（住宅系）",
-        Some(SlabUsage::RoofStore) => "屋上・バルコニー（学校・百貨店系）",
+        Some(SlabUsage::Balcony) => "片持バルコニー・庇等",
+        Some(SlabUsage::RoofResidential) => "屋上（学校・百貨店の類を除く）",
+        Some(SlabUsage::RoofStore) => "屋上（学校・百貨店の類）",
+        Some(SlabUsage::RoofUnused) => "屋上（通常人が使用しない）",
+        Some(SlabUsage::RoofSteelGym) => "屋上（鉄骨造体育館・武道場等／短期）",
         Some(SlabUsage::Custom { .. }) => "任意入力",
     }
 }
@@ -124,7 +149,7 @@ pub fn slabs_table(ui: &mut egui::Ui, app: &mut App) {
         .column(Column::initial(140.0))
         .column(Column::initial(90.0))
         .column(Column::initial(90.0))
-        .column(Column::initial(180.0))
+        .column(Column::initial(230.0))
         .column(Column::initial(60.0))
         .column(Column::auto())
         .header(20.0, |mut h| {

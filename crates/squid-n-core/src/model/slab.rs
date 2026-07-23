@@ -29,17 +29,22 @@ pub enum LoadPurpose {
     Seismic,
 }
 
-/// 室の用途（令別表第1 の積載荷重プリセット）。`live_load` で用途別の積載荷重
-/// [N/mm²] を返す。`Custom` は 3 欄を直接持つ（内部単位 N/mm²）。
+/// 室の用途（積載荷重プリセット）。`live_load` で用途別の積載荷重 [N/mm²] を返す。
+/// `Custom` は 3 欄（床版・小梁計算用／大梁・柱・基礎計算用／地震力計算用）を
+/// 直接持つ（内部単位 N/mm²）。
 ///
-/// 出典: 建築基準法施行令 第85条第1項・令別表第1。値は N/m² を内部単位 N/mm²
-/// （×1e-6）へ換算して返す。
+/// 出典: 建築基準法施行令 第85条第1項・令別表第1、および国土交通省官庁営繕部
+/// 「建築構造設計基準」令和3年度版（同資料は令85条を準用しつつ、官庁施設に特有の
+/// 室用途〔書庫・実験室・電算室・機械室・体育館等〕を追加する）。値は N/m² を
+/// 内部単位 N/mm²（×1e-6）へ換算して返す。
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SlabUsage {
     /// 住宅の居室、住宅以外の建築物における寝室又は病室。
     Residential,
-    /// 事務室。
+    /// 事務室、会議室及び食堂。
     Office,
+    /// 研究室（値は事務室に同じ。実況に応じて算定する）。
+    ResearchRoom,
     /// 教室。
     Classroom,
     /// 百貨店又は店舗の売場。
@@ -50,13 +55,36 @@ pub enum SlabUsage {
     AssemblyOther,
     /// 廊下・玄関・階段（劇場・集会場・売場等に連絡するもの）。
     Corridor,
+    /// 法務局登記書庫（法務省型鋼製書架 W型8段6連を配置した場合）。
+    RegistryArchive,
+    /// 一般書庫、倉庫等（通常の階高の室に満載の書架を配置した場合）。
+    GeneralArchive,
+    /// 移動書架を設置する書庫、電算室の空調機室、用具庫等（一般書庫の1.5倍程度）。
+    MobileArchive,
+    /// 一般実験室（化学系）。
+    LabChemistry,
+    /// 一般実験室（物理系）。
+    LabPhysics,
+    /// 電算室（床版・小梁計算用は電算室用既製床の耐荷重、他は令85条の店舗の売場を準用）。
+    ComputerRoom,
+    /// 機械室（床版・小梁計算用は機械の平均的な重量、他は令85条の店舗の売場を準用）。
+    MachineRoom,
+    /// 体育館、武道場等（令85条の劇場等〔その他〕を準用）。
+    Gymnasium,
     /// 自動車車庫及び自動車通路。
     Garage,
-    /// 屋上広場又はバルコニー（住宅系＝令別表第1(一)の数値）。
+    /// 片持形式のバルコニー、庇等（令85条のバルコニーを準用）。
+    Balcony,
+    /// 屋上広場（常時人が使用する場合。学校・百貨店の類を除く）。
     RoofResidential,
-    /// 屋上広場又はバルコニー（学校・百貨店系＝令別表第1(四)の数値）。
+    /// 屋上広場（常時人が使用する場合。学校・百貨店の類）。
     RoofStore,
-    /// 任意入力（床用・骨組用・地震用、いずれも N/mm²）。
+    /// 屋上（通常人が使用しない場合）。
+    RoofUnused,
+    /// 屋上（鉄骨造体育館、武道場等）。短期荷重として扱い、床版・小梁計算用のみ
+    /// 作業荷重を見込む。大梁・柱・基礎計算用および地震力計算用は 0。
+    RoofSteelGym,
+    /// 任意入力（床版・小梁計算用／大梁・柱・基礎計算用／地震力計算用、いずれも N/mm²）。
     Custom {
         floor: f64,
         frame: f64,
@@ -67,19 +95,31 @@ pub enum SlabUsage {
 impl SlabUsage {
     /// 用途別の積載荷重 [N/mm²]（令別表第1）。
     pub fn live_load(self, purpose: LoadPurpose) -> f64 {
-        // プリセットは令別表第1 の [N/m²]。内部単位 N/mm² へ ×1e-6。
+        // プリセットは令別表第1／国交省営繕基準の [N/m²]。内部単位 N/mm² へ ×1e-6。
         // 返り値の並びは (床用, 骨組用, 地震用)。
         let (floor, frame, seismic) = match self {
             SlabUsage::Residential => (1800.0, 1300.0, 600.0),
             SlabUsage::Office => (2900.0, 1800.0, 800.0),
+            SlabUsage::ResearchRoom => (2900.0, 1800.0, 800.0),
             SlabUsage::Classroom => (2300.0, 2100.0, 1100.0),
             SlabUsage::Store => (2900.0, 2400.0, 1300.0),
             SlabUsage::AssemblyFixed => (2900.0, 2600.0, 1600.0),
             SlabUsage::AssemblyOther => (3500.0, 3200.0, 2100.0),
             SlabUsage::Corridor => (3500.0, 3200.0, 2100.0),
+            SlabUsage::RegistryArchive => (5900.0, 4900.0, 3900.0),
+            SlabUsage::GeneralArchive => (7800.0, 6900.0, 4900.0),
+            SlabUsage::MobileArchive => (11800.0, 10300.0, 7400.0),
+            SlabUsage::LabChemistry => (3900.0, 2400.0, 1600.0),
+            SlabUsage::LabPhysics => (4900.0, 3900.0, 2500.0),
+            SlabUsage::ComputerRoom => (4900.0, 2400.0, 1300.0),
+            SlabUsage::MachineRoom => (4900.0, 2400.0, 1300.0),
+            SlabUsage::Gymnasium => (3500.0, 3200.0, 2100.0),
             SlabUsage::Garage => (5400.0, 3900.0, 2000.0),
+            SlabUsage::Balcony => (1800.0, 1300.0, 600.0),
             SlabUsage::RoofResidential => (1800.0, 1300.0, 600.0),
             SlabUsage::RoofStore => (2900.0, 2400.0, 1300.0),
+            SlabUsage::RoofUnused => (980.0, 600.0, 400.0),
+            SlabUsage::RoofSteelGym => (980.0, 0.0, 0.0),
             // Custom は内部単位 N/mm² をそのまま返す（×1e-6 しない）。
             SlabUsage::Custom {
                 floor,
@@ -234,18 +274,51 @@ mod tests {
         assert!((r.live_load(LoadPurpose::Floor) - 1800e-6).abs() < 1e-12);
         assert!((r.live_load(LoadPurpose::Frame) - 1300e-6).abs() < 1e-12);
         assert!((r.live_load(LoadPurpose::Seismic) - 600e-6).abs() < 1e-12);
+        // 国交省営繕基準（令和3年度版）で追加した室用途の値（[N/m²]）。
+        let cases: &[(SlabUsage, f64, f64, f64)] = &[
+            (SlabUsage::ResearchRoom, 2900.0, 1800.0, 800.0),
+            (SlabUsage::RegistryArchive, 5900.0, 4900.0, 3900.0),
+            (SlabUsage::GeneralArchive, 7800.0, 6900.0, 4900.0),
+            (SlabUsage::MobileArchive, 11800.0, 10300.0, 7400.0),
+            (SlabUsage::LabChemistry, 3900.0, 2400.0, 1600.0),
+            (SlabUsage::LabPhysics, 4900.0, 3900.0, 2500.0),
+            (SlabUsage::ComputerRoom, 4900.0, 2400.0, 1300.0),
+            (SlabUsage::MachineRoom, 4900.0, 2400.0, 1300.0),
+            (SlabUsage::Gymnasium, 3500.0, 3200.0, 2100.0),
+            (SlabUsage::Balcony, 1800.0, 1300.0, 600.0),
+            (SlabUsage::RoofUnused, 980.0, 600.0, 400.0),
+            (SlabUsage::RoofSteelGym, 980.0, 0.0, 0.0),
+        ];
+        for &(u, floor, frame, seismic) in cases {
+            assert!((u.live_load(LoadPurpose::Floor) - floor * 1e-6).abs() < 1e-12);
+            assert!((u.live_load(LoadPurpose::Frame) - frame * 1e-6).abs() < 1e-12);
+            assert!((u.live_load(LoadPurpose::Seismic) - seismic * 1e-6).abs() < 1e-12);
+        }
+
         // 積載は 床用 ≥ 骨組用 ≥ 地震用 の順（全用途で成り立つ）。
         for u in [
             SlabUsage::Residential,
             SlabUsage::Office,
+            SlabUsage::ResearchRoom,
             SlabUsage::Classroom,
             SlabUsage::Store,
             SlabUsage::AssemblyFixed,
             SlabUsage::AssemblyOther,
             SlabUsage::Corridor,
+            SlabUsage::RegistryArchive,
+            SlabUsage::GeneralArchive,
+            SlabUsage::MobileArchive,
+            SlabUsage::LabChemistry,
+            SlabUsage::LabPhysics,
+            SlabUsage::ComputerRoom,
+            SlabUsage::MachineRoom,
+            SlabUsage::Gymnasium,
             SlabUsage::Garage,
+            SlabUsage::Balcony,
             SlabUsage::RoofResidential,
             SlabUsage::RoofStore,
+            SlabUsage::RoofUnused,
+            SlabUsage::RoofSteelGym,
         ] {
             let f = u.live_load(LoadPurpose::Floor);
             let g = u.live_load(LoadPurpose::Frame);
