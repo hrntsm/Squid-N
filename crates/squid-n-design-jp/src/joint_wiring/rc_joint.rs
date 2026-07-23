@@ -2,7 +2,7 @@
 
 use super::common::{rc_dt, MemberInfo};
 use crate::rc::joint::{rc_joint_shear_check, JointShape, RcJointInput};
-use crate::CheckResult;
+use crate::{CheckComponent, CheckKind, CheckResult};
 use squid_n_core::ids::NodeId;
 use squid_n_core::section_shape::SectionShape;
 
@@ -154,6 +154,10 @@ pub(super) fn check_rc_joint(
                          Vju={:.1} N, T={:.1} N, T′={:.1} N, Qcu={:.1} N, Qdu={:.1} N, 余裕率={:.3}",
                         u.kappa, phi, u.fj, bj, col.sec.depth, u.vju, t_top, t_bottom, qcu, u.qdu, u.margin
                     ),
+                    components: vec![CheckComponent {
+                        kind: CheckKind::Shear,
+                        ratio,
+                    }],
                 },
             ));
     }

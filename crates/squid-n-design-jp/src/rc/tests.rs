@@ -610,6 +610,10 @@ fn test_fc_missing_fallback() {
     assert!(result.ok);
     assert_eq!(result.ratio, 0.0);
     assert!(result.basis.contains("Fc"));
+    assert!(
+        result.components.is_empty(),
+        "Fc 未設定の退化ケースは components が空のはず"
+    );
 }
 
 #[test]
@@ -645,6 +649,10 @@ fn test_shape_missing_fallback() {
     assert!(result.ok);
     assert_eq!(result.ratio, 0.0);
     assert!(result.basis.contains("配筋情報なし"));
+    assert!(
+        result.components.is_empty(),
+        "配筋情報なしの退化ケースは components が空のはず"
+    );
 }
 
 #[test]

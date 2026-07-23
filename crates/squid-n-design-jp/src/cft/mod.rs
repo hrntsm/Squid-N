@@ -36,7 +36,10 @@
 
 use crate::rc::concrete_allowable_compression_class;
 use crate::steel::{steel_f_value_prefix, steel_fc, steel_fs, steel_ft};
-use crate::{effective_slenderness, CheckResult, DesignCheck, DesignCtx, LoadTerm, MemberForcesAt};
+use crate::{
+    effective_slenderness, CheckComponent, CheckKind, CheckResult, DesignCheck, DesignCtx,
+    LoadTerm, MemberForcesAt,
+};
 use squid_n_core::model::{Material, Section};
 use squid_n_core::section_shape::SectionShape;
 
@@ -387,11 +390,23 @@ fn cft_box_check(
         forces.qz
     );
 
+    let components = vec![
+        CheckComponent {
+            kind: CheckKind::AxialBending,
+            ratio: ratio_axial.max(ratio_biaxial),
+        },
+        CheckComponent {
+            kind: CheckKind::Shear,
+            ratio: ratio_shear,
+        },
+    ];
+
     CheckResult {
         ratio,
         ok: ratio <= 1.0 && ratio.is_finite(),
         basis,
         detail,
+        components,
     }
 }
 
@@ -472,11 +487,23 @@ fn cft_pipe_check(
         cnc, s_nc, s_nt, n_design, ma, forces.mz, forces.my, s_qa, forces.qy, forces.qz
     );
 
+    let components = vec![
+        CheckComponent {
+            kind: CheckKind::AxialBending,
+            ratio: ratio_axial.max(ratio_biaxial),
+        },
+        CheckComponent {
+            kind: CheckKind::Shear,
+            ratio: ratio_shear,
+        },
+    ];
+
     CheckResult {
         ratio,
         ok: ratio <= 1.0 && ratio.is_finite(),
         basis,
         detail,
+        components,
     }
 }
 
@@ -504,6 +531,7 @@ impl DesignCheck for CftDesign {
                 ok: true,
                 basis: "CFT検定: Fc未設定".to_string(),
                 detail: "Material.fc が None/0 のため検定をスキップしました。".to_string(),
+                components: Vec::new(),
             };
         }
 
@@ -522,6 +550,7 @@ impl DesignCheck for CftDesign {
                 basis: "CFT検定: 断面形状不一致".to_string(),
                 detail: "Section.shape が CftBox/CftPipe ではないため検定をスキップしました。"
                     .to_string(),
+                components: Vec::new(),
             },
         }
     }

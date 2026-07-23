@@ -2,7 +2,10 @@
 //! 鉄骨造柱の許容応力度検定）。
 
 use crate::material_strength::{steel_fc, steel_fs, steel_ft};
-use crate::{effective_slenderness, CheckResult, DesignCtx, LoadTerm, MemberForcesAt, SteelFbRule};
+use crate::{
+    effective_slenderness, CheckComponent, CheckKind, CheckResult, DesignCtx, LoadTerm,
+    MemberForcesAt, SteelFbRule,
+};
 use squid_n_core::model::{Material, Section};
 
 use super::section::{
@@ -160,11 +163,23 @@ fbY={:.4} N/mm², λ={:.3}, τ={:.4} N/mm², fs={:.4} N/mm², 軸曲げ比={:.4}
         ratio_shear
     );
 
+    let components = vec![
+        CheckComponent {
+            kind: CheckKind::AxialBending,
+            ratio: ratio_axial_bend,
+        },
+        CheckComponent {
+            kind: CheckKind::Shear,
+            ratio: ratio_shear,
+        },
+    ];
+
     CheckResult {
         ratio,
         ok: ratio <= 1.0,
         basis,
         detail,
+        components,
     }
 }
 
@@ -217,6 +232,23 @@ mod tests {
         assert!(sigma_c > 0.0 && sigma_bx > 0.0 && sigma_by > 0.0 && fc > 0.0 && ft > 0.0);
         // 軸+曲げ比は少なくとも σc/fc 単独の比より大きい（曲げ項が加算されるため）。
         assert!(result.ratio >= sigma_c / fc - 1e-9);
+
+        // components に AxialBending・Shear が入り、その最大値が ratio と一致する。
+        assert_eq!(result.components.len(), 2);
+        assert!(result
+            .components
+            .iter()
+            .any(|c| c.kind == crate::CheckKind::AxialBending));
+        assert!(result
+            .components
+            .iter()
+            .any(|c| c.kind == crate::CheckKind::Shear));
+        let max_component = result
+            .components
+            .iter()
+            .map(|c| c.ratio)
+            .fold(0.0_f64, f64::max);
+        assert_eq!(max_component, result.ratio);
     }
 
     #[test]

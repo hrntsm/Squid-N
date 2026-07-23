@@ -10,7 +10,7 @@ use super::{ratio_or_large, src_rect_axis_props, src_shear_check, steel_h_props,
 use crate::material_strength::rebar_sigma_y;
 use crate::rc::{concrete_allowable_shear_class, rebar_allowable_shear, rebar_allowable_tension};
 use crate::steel::{steel_f_value_prefix, steel_fs, steel_ft};
-use crate::{CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
+use crate::{CheckComponent, CheckKind, CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
 use squid_n_core::model::Material;
 use squid_n_core::rc_capacity::{rc_mu_simple, RcCapacityInput};
 use squid_n_core::section_shape::RcRebar;
@@ -144,6 +144,16 @@ pub(crate) fn src_beam_check(
         ok: ratio <= 1.0 && ratio.is_finite(),
         basis,
         detail,
+        components: vec![
+            CheckComponent {
+                kind: CheckKind::Bending,
+                ratio: ratio_m,
+            },
+            CheckComponent {
+                kind: CheckKind::Shear,
+                ratio: shear.ratio,
+            },
+        ],
     }
 }
 
@@ -186,5 +196,22 @@ mod tests {
         let result = design.check(&forces, &sec, &mat, &ctx);
         assert!((result.ratio - 0.5).abs() < 1e-6, "ratio={}", result.ratio);
         assert!(result.basis.contains("SRC規準"));
+
+        // components に Bending・Shear が入り、最大値が ratio と一致する。
+        assert_eq!(result.components.len(), 2);
+        assert!(result
+            .components
+            .iter()
+            .any(|c| c.kind == crate::CheckKind::Bending));
+        assert!(result
+            .components
+            .iter()
+            .any(|c| c.kind == crate::CheckKind::Shear));
+        let max_component = result
+            .components
+            .iter()
+            .map(|c| c.ratio)
+            .fold(0.0_f64, f64::max);
+        assert_eq!(max_component, result.ratio);
     }
 }

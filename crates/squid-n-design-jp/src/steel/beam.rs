@@ -9,7 +9,10 @@
 //! （長期のみ）も併せて算定する。
 
 use crate::material_strength::{steel_fc, steel_fs, steel_ft};
-use crate::{effective_slenderness, CheckResult, DesignCtx, LoadTerm, MemberForcesAt, SteelFbRule};
+use crate::{
+    effective_slenderness, CheckComponent, CheckKind, CheckResult, DesignCtx, LoadTerm,
+    MemberForcesAt, SteelFbRule,
+};
 use squid_n_core::model::{Material, Section};
 use squid_n_core::section_shape::SectionShape;
 
@@ -236,11 +239,27 @@ Mises比={:.4}",
         detail.push_str(&format!(", たわみS={:.4} mm (S/l={})", s, ratio_str));
     }
 
+    // 曲げ系（組合せ・単独曲げ・von Mises 合成応力度）を Bending、
+    // せん断（強軸/弱軸）を Shear にまとめる（max の等価性は結合律で担保）。
+    let ratio_bending = ratio_comb.max(ratio_my).max(ratio_mz).max(mises_ratio);
+    let ratio_shear = ratio_vy.max(ratio_vz);
+    let components = vec![
+        CheckComponent {
+            kind: CheckKind::Bending,
+            ratio: ratio_bending,
+        },
+        CheckComponent {
+            kind: CheckKind::Shear,
+            ratio: ratio_shear,
+        },
+    ];
+
     CheckResult {
         ratio,
         ok: ratio <= 1.0,
         basis,
         detail,
+        components,
     }
 }
 
@@ -731,6 +750,23 @@ mod tests {
         );
         assert!(result.ok);
         assert!(result.detail.contains("18.7500"));
+        // 曲げ単独ケースでも components に Bending・Shear が入り、
+        // その最大値が ratio と一致する。
+        assert_eq!(result.components.len(), 2);
+        assert!(result
+            .components
+            .iter()
+            .any(|c| c.kind == crate::CheckKind::Bending));
+        assert!(result
+            .components
+            .iter()
+            .any(|c| c.kind == crate::CheckKind::Shear));
+        let max_component = result
+            .components
+            .iter()
+            .map(|c| c.ratio)
+            .fold(0.0_f64, f64::max);
+        assert_eq!(max_component, result.ratio);
     }
 
     #[test]

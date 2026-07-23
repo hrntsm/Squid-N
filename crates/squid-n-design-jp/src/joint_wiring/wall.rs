@@ -4,7 +4,7 @@ use super::common::{rc_dt, ForcesAt, MemberInfo};
 use crate::rc::wall::{rc_wall_shear_check, RcWallInput, WallSideColumn};
 use crate::rc::wall_nonlinear::{wall_shear_trilinear, WallShearTrilinearInput};
 use crate::wall_opening::{equivalent_opening, is_seismic_wall, opening_ratio_r0, WallJudgeInput};
-use crate::{CheckResult, LoadTerm};
+use crate::{CheckComponent, CheckKind, CheckResult, LoadTerm};
 use squid_n_core::ids::{ElemId, NodeId};
 use squid_n_core::model::{ElementKind, Model};
 use squid_n_core::section_shape::SectionShape;
@@ -287,6 +287,10 @@ pub(super) fn check_walls(
                     ok: ratio <= 1.0,
                     basis: "技術基準解説書 耐震壁せん断非線形(Qc/βu/Qu)".to_string(),
                     detail,
+                    components: vec![CheckComponent {
+                        kind: CheckKind::Shear,
+                        ratio,
+                    }],
                 },
             ));
         }

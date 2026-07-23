@@ -14,7 +14,7 @@
 //! `Lk = L − 2・L1` で求める（`L1` はブレース上下端それぞれの低減距離
 //! `L1上`, `L1下` の平均値 `(L1上+L1下)/2` として入力する）。
 
-use crate::CheckResult;
+use crate::{CheckComponent, CheckKind, CheckResult};
 use squid_n_core::model::BrbAttr;
 
 /// BRB の断面検定（軸力・座屈長さの 2 項目）。
@@ -63,6 +63,12 @@ pub fn brb_check(
             "{}: |N|={:.4} N, Na={:.4} N, N/Na={:.4} / Lk={:.4} mm, 限界座屈長={:.4} mm, Lk/限界座屈長={:.4}",
             term_label, n_design.abs(), na, ratio_axial, lk, attr.critical_length, ratio_length
         ),
+        // 軸力検定・座屈長さ検定ともブレース軸材の負担能力に関する検定のため
+        // Axial にまとめる。
+        components: vec![CheckComponent {
+            kind: CheckKind::Axial,
+            ratio,
+        }],
     }
 }
 

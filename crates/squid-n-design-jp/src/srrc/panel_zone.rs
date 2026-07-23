@@ -10,7 +10,7 @@
 //! （SRC 規準）
 
 use crate::rc::joint::JointShape;
-use crate::CheckResult;
+use crate::{CheckComponent, CheckKind, CheckResult};
 
 /// SRC 造柱梁接合部（パネルゾーン）のせん断検定の入力。
 pub struct SrcPanelInput {
@@ -123,6 +123,10 @@ pub fn src_panel_zone_check(inp: &SrcPanelInput) -> CheckResult {
         ok,
         basis,
         detail,
+        components: vec![CheckComponent {
+            kind: CheckKind::Shear,
+            ratio,
+        }],
     }
 }
 

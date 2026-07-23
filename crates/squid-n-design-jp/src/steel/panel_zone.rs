@@ -13,7 +13,7 @@
 //! 崩れている箇所がある。S パネルゾーンの形状係数 κ は分数 2 項和の形に
 //! 再構成した（下記 [`s_panel_zone_check`] のドキュメント参照）。
 
-use crate::CheckResult;
+use crate::{CheckComponent, CheckKind, CheckResult};
 
 /// パネルゾーンの柱断面形状。
 pub enum PanelSection {
@@ -118,6 +118,10 @@ pub fn s_panel_zone_check(inp: &SPanelInput) -> CheckResult {
         ok,
         basis,
         detail,
+        components: vec![CheckComponent {
+            kind: CheckKind::Shear,
+            ratio,
+        }],
     }
 }
 

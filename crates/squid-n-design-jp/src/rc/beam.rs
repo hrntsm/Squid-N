@@ -8,7 +8,7 @@ use super::{
     rebar_allowable_tension, rebar_sigma_y, rect_axis_props_strong, seismic_design_shear,
     shear_alpha, shear_capacity_for, AxisProps,
 };
-use crate::{CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
+use crate::{CheckComponent, CheckKind, CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
 use squid_n_core::model::{Material, Section};
 use squid_n_core::section_shape::SectionShape;
 
@@ -221,11 +221,29 @@ pub(crate) fn beam_check(
         bond_detail,
     );
 
+    let mut components = vec![
+        CheckComponent {
+            kind: CheckKind::Bending,
+            ratio: ratio_m,
+        },
+        CheckComponent {
+            kind: CheckKind::Shear,
+            ratio: ratio_q,
+        },
+    ];
+    if bond.is_some() {
+        components.push(CheckComponent {
+            kind: CheckKind::Bond,
+            ratio: ratio_bond,
+        });
+    }
+
     CheckResult {
         ratio,
         ok: ratio <= 1.0,
         basis,
         detail,
+        components,
     }
 }
 
@@ -358,6 +376,41 @@ mod tests {
         assert!(result.basis.contains("13条"));
     }
 
+    /// components に曲げ・せん断（付着は ctx.length=0 のため省略）の内訳が
+    /// 入り、その最大値が ratio と一致することを確認する。
+    #[test]
+    fn test_beam_check_components_bending_and_shear_max_matches_ratio() {
+        let shape = rc_rect_shape(300.0, 600.0, 4, 19.0, 1, 40.0, 10.0, 100.0, 2);
+        let sec = make_section(shape);
+        let mat = make_material(24.0, "SD345");
+        let ctx = ctx_beam(LoadTerm::Long);
+        let forces = MemberForcesAt {
+            pos: 0.0,
+            n: 0.0,
+            qy: 20_000.0,
+            qz: 0.0,
+            my: 0.0,
+            mz: 30_000_000.0,
+        };
+        let design = crate::rc::RcDesign;
+        let result = design.check(&forces, &sec, &mat, &ctx);
+        assert!(!result.components.is_empty());
+        assert!(result
+            .components
+            .iter()
+            .any(|c| c.kind == crate::CheckKind::Bending));
+        assert!(result
+            .components
+            .iter()
+            .any(|c| c.kind == crate::CheckKind::Shear));
+        let max_component = result
+            .components
+            .iter()
+            .map(|c| c.ratio)
+            .fold(0.0_f64, f64::max);
+        assert_eq!(max_component, result.ratio);
+    }
+
     #[test]
     fn test_beam_check_high_strength_grade_reflected_in_detail() {
         let shape =
@@ -473,6 +526,17 @@ mod tests {
         let result = design.check(&forces, &sec, &mat, &ctx);
         assert!(result.detail.contains("ld="));
         assert!(result.detail.contains("付着検定比"));
+        // 付着検定が実施される（bond=Some）場合は components に Bond が含まれる。
+        assert!(result
+            .components
+            .iter()
+            .any(|c| c.kind == crate::CheckKind::Bond));
+        let max_component = result
+            .components
+            .iter()
+            .map(|c| c.ratio)
+            .fold(0.0_f64, f64::max);
+        assert_eq!(max_component, result.ratio);
     }
 
     #[test]

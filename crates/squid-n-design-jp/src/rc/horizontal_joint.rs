@@ -27,7 +27,7 @@
 //!   採用する近似）。M=0 位置が求まらない場合（全長同符号）は `Δl = L/2`
 //!   とする。
 
-use crate::CheckResult;
+use crate::{CheckComponent, CheckKind, CheckResult};
 use squid_n_core::ids::ElemId;
 use squid_n_core::model::Model;
 use squid_n_core::section_shape::SectionShape;
@@ -314,6 +314,10 @@ fn finish(state: &str, tau_xy: f64, tau_u: f64) -> CheckResult {
         ok: ratio <= 1.0,
         basis: format!("PCa 水平接合面（{state}状態）せん断検定"),
         detail: format!("τxy={tau_xy:.4} N/mm², τu={tau_u:.4} N/mm², ratio={ratio:.4}"),
+        components: vec![CheckComponent {
+            kind: CheckKind::Shear,
+            ratio,
+        }],
     }
 }
 

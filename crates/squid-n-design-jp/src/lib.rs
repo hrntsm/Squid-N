@@ -108,11 +108,51 @@ pub struct MemberForcesAt {
     pub mz: f64,
 }
 
+/// 検定式の種別（検定比の内訳表示用）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CheckKind {
+    /// 曲げ
+    Bending,
+    /// せん断
+    Shear,
+    /// 付着
+    Bond,
+    /// 軸力＋曲げの複合（組合せ応力）
+    AxialBending,
+    /// 軸力のみ（ブレース等）
+    Axial,
+    /// たわみ
+    Deflection,
+}
+
+impl CheckKind {
+    /// 表示用の日本語ラベル。
+    pub fn label(&self) -> &'static str {
+        match self {
+            CheckKind::Bending => "曲げ",
+            CheckKind::Shear => "せん断",
+            CheckKind::Bond => "付着",
+            CheckKind::AxialBending => "軸+曲げ",
+            CheckKind::Axial => "軸",
+            CheckKind::Deflection => "たわみ",
+        }
+    }
+}
+
+/// 1 検定式分の結果（検定比の内訳）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CheckComponent {
+    pub kind: CheckKind,
+    pub ratio: f64,
+}
+
 pub struct CheckResult {
     pub ratio: f64,
     pub ok: bool,
     pub basis: String,
     pub detail: String,
+    /// 式別の検定比内訳。空の場合は内訳情報なし（単一式の検定や退化ケース）。
+    pub components: Vec<CheckComponent>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -205,6 +205,19 @@ fn test_cft_pipe_biaxial_smoke() {
     let r = design.check(&forces, &sec, &mat, &ctx);
     assert!(r.ratio.is_finite() && r.ratio >= 0.0);
     assert!(r.basis.contains("円形"));
+
+    // components に AxialBending・Shear が入り、最大値が ratio と一致する。
+    assert_eq!(r.components.len(), 2);
+    assert!(r
+        .components
+        .iter()
+        .any(|c| c.kind == crate::CheckKind::AxialBending));
+    assert!(r
+        .components
+        .iter()
+        .any(|c| c.kind == crate::CheckKind::Shear));
+    let max_component = r.components.iter().map(|c| c.ratio).fold(0.0_f64, f64::max);
+    assert_eq!(max_component, r.ratio);
 }
 
 #[test]
@@ -268,6 +281,10 @@ fn test_cft_fc_missing_skip() {
     assert!(result.ok);
     assert_eq!(result.ratio, 0.0);
     assert!(result.basis.contains("Fc"));
+    assert!(
+        result.components.is_empty(),
+        "Fc 未設定の退化ケースは components が空のはず"
+    );
 }
 
 #[test]
@@ -293,6 +310,10 @@ fn test_cft_shape_mismatch_skip() {
     let result = design.check(&zero_forces(), &sec, &mat, &ctx);
     assert!(result.ok);
     assert!(result.basis.contains("断面形状不一致"));
+    assert!(
+        result.components.is_empty(),
+        "断面形状不一致の退化ケースは components が空のはず"
+    );
 }
 
 // ------------------------------------------------------------------

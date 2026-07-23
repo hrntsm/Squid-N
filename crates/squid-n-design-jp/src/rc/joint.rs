@@ -18,7 +18,7 @@
 //!   `max` を採用する（RC 規準本文の一般的な
 //!   `min` 解釈より有効幅を大きく＝許容せん断力を大きく見積もる点に注意）。
 
-use crate::CheckResult;
+use crate::{CheckComponent, CheckKind, CheckResult};
 
 /// 柱梁接合部の形状（取り付く梁の本数・配置による分類）。
 ///
@@ -146,6 +146,10 @@ pub fn rc_joint_shear_check(inp: &RcJointInput) -> CheckResult {
         ok,
         basis,
         detail,
+        components: vec![CheckComponent {
+            kind: CheckKind::Shear,
+            ratio,
+        }],
     }
 }
 

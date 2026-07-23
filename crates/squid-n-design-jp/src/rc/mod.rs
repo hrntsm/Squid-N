@@ -93,6 +93,7 @@ impl DesignCheck for RcDesign {
                 basis: "RC 検定: Fc 未設定".to_string(),
                 detail: "Material.fc が None/0 です。コンクリート強度を設定してください。"
                     .to_string(),
+                components: Vec::new(),
             };
         }
 
@@ -106,6 +107,7 @@ impl DesignCheck for RcDesign {
                     basis: "RC 検定: 配筋情報なし".to_string(),
                     detail: "Section.shape が RcRect/RcCircle ではないため検定をスキップしました。"
                         .to_string(),
+                    components: Vec::new(),
                 };
             }
         };

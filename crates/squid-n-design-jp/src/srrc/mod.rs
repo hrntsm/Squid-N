@@ -413,6 +413,7 @@ impl DesignCheck for SrcDesign {
                 ok: true,
                 basis: "SRC検定: Fc未設定".to_string(),
                 detail: "Material.fc が None/0 のため検定をスキップしました。".to_string(),
+                components: Vec::new(),
             };
         }
 
@@ -425,6 +426,7 @@ impl DesignCheck for SrcDesign {
                     basis: "SRC検定: 断面形状不一致".to_string(),
                     detail: "Section.shape が SrcRect ではないため検定をスキップしました。"
                         .to_string(),
+                    components: Vec::new(),
                 };
             }
         };

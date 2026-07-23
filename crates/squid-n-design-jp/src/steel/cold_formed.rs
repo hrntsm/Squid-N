@@ -14,7 +14,7 @@
 //! 分岐式をそのまま用いるが、退化域（|n|≧1 等）は安全側にクランプする処理を
 //! 追加している。
 
-use crate::CheckResult;
+use crate::{CheckComponent, CheckKind, CheckResult};
 
 /// 冷間成形角形鋼管柱の柱梁耐力比チェックの入力。
 pub struct ColdFormedInput {
@@ -97,6 +97,12 @@ pub fn cold_formed_column_ratio_check(inp: &ColdFormedInput) -> CheckResult {
         ok,
         basis,
         detail,
+        // 柱の軸力低減耐力νと梁の全塑性モーメント和の比較（柱梁耐力比）のため
+        // AxialBending（軸力＋曲げの複合）に分類する。
+        components: vec![CheckComponent {
+            kind: CheckKind::AxialBending,
+            ratio,
+        }],
     }
 }
 

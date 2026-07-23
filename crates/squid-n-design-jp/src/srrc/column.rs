@@ -16,7 +16,7 @@ use crate::rc::{
     rebar_allowable_tension, young_ratio_n,
 };
 use crate::steel::{steel_f_value_prefix, steel_fs, steel_ft};
-use crate::{CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
+use crate::{CheckComponent, CheckKind, CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
 use squid_n_core::model::Material;
 use squid_n_core::rc_capacity::{rc_column_mu_simple, RcCapacityInput};
 use squid_n_core::section_shape::RcRebar;
@@ -451,11 +451,23 @@ pub(crate) fn src_column_check(
         fc_prime
     );
 
+    let components = vec![
+        CheckComponent {
+            kind: CheckKind::AxialBending,
+            ratio: ratio_axial.max(ratio_biaxial),
+        },
+        CheckComponent {
+            kind: CheckKind::Shear,
+            ratio: shear_z.ratio.max(shear_y.ratio),
+        },
+    ];
+
     CheckResult {
         ratio,
         ok: ratio <= 1.0 && ratio.is_finite(),
         basis,
         detail,
+        components,
     }
 }
 
@@ -496,6 +508,40 @@ mod tests {
         let s_mo = sz_z * s_ft;
         // N=0 の MA は少なくとも鋼骨単体の sMo 以上であるはず（RC 分は正で加算）。
         assert!(ma_z >= s_mo * 0.99, "ma_z={ma_z}, s_mo={s_mo}");
+    }
+
+    /// components に AxialBending・Shear が入り、最大値が ratio と一致する。
+    #[test]
+    fn test_src_column_components_axial_bending_and_shear_max_matches_ratio() {
+        let shape = src_column_shape();
+        let sec = make_section(shape);
+        let mat = make_material(24.0, "SD345");
+        let ctx = ctx_column(LoadTerm::Long);
+        let forces = MemberForcesAt {
+            n: -500_000.0,
+            qy: 30_000.0,
+            qz: 20_000.0,
+            my: 5_000_000.0,
+            mz: 8_000_000.0,
+            ..zero_forces()
+        };
+        let design = crate::SrcDesign;
+        let result = design.check(&forces, &sec, &mat, &ctx);
+        assert_eq!(result.components.len(), 2);
+        assert!(result
+            .components
+            .iter()
+            .any(|c| c.kind == crate::CheckKind::AxialBending));
+        assert!(result
+            .components
+            .iter()
+            .any(|c| c.kind == crate::CheckKind::Shear));
+        let max_component = result
+            .components
+            .iter()
+            .map(|c| c.ratio)
+            .fold(0.0_f64, f64::max);
+        assert_eq!(max_component, result.ratio);
     }
 
     #[test]

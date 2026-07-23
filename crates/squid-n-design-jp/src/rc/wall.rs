@@ -7,7 +7,7 @@
 //!
 //! 準拠する規準: 日本建築学会「鉄筋コンクリート構造計算規準・同解説」18条
 
-use crate::CheckResult;
+use crate::{CheckComponent, CheckKind, CheckResult};
 
 /// 耐震壁の側柱（壁の両側または片側に取り付く柱）の諸元。
 pub struct WallSideColumn {
@@ -141,6 +141,10 @@ pub fn rc_wall_shear_check(inp: &RcWallInput) -> CheckResult {
         ok,
         basis,
         detail,
+        components: vec![CheckComponent {
+            kind: CheckKind::Shear,
+            ratio,
+        }],
     }
 }
 

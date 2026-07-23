@@ -2,7 +2,10 @@
 //! 鉄骨ブレースの許容応力度検定）。
 
 use crate::material_strength::{steel_fc, steel_ft};
-use crate::{effective_slenderness, CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
+use crate::{
+    effective_slenderness, CheckComponent, CheckKind, CheckResult, DesignCtx, LoadTerm,
+    MemberForcesAt,
+};
 use squid_n_core::model::Section;
 
 use super::{nonzero, safe_denom};
@@ -49,6 +52,10 @@ pub(crate) fn check_brace(
                 "σc={:.4} N/mm², fc={:.4} N/mm², λ={:.3}",
                 sigma_c, fc_val, lambda
             ),
+            components: vec![CheckComponent {
+                kind: CheckKind::Axial,
+                ratio,
+            }],
         }
     } else {
         // 引張: σt/ft（座屈を考慮しない単純検定）。
@@ -60,6 +67,10 @@ pub(crate) fn check_brace(
             ok: ratio <= 1.0,
             basis: format!("鋼構造設計規準 {} ブレース: 引張 σt/ft", term_label),
             detail: format!("σt={:.4} N/mm², ft={:.4} N/mm²", sigma_t, ft_val),
+            components: vec![CheckComponent {
+                kind: CheckKind::Axial,
+                ratio,
+            }],
         }
     }
 }

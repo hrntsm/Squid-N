@@ -9,7 +9,7 @@ use super::{
     rc_allow, rebar_allowable_tension, rebar_sigma_y, rect_axis_props_strong, rect_axis_props_weak,
     seismic_design_shear, shear_alpha, shear_capacity_for, AxisProps,
 };
-use crate::{CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
+use crate::{CheckComponent, CheckKind, CheckResult, DesignCtx, LoadTerm, MemberForcesAt};
 use squid_n_core::model::{Material, Section};
 use squid_n_core::section_shape::SectionShape;
 
@@ -147,11 +147,23 @@ pub(crate) fn column_check(
             axis.props.d
         );
 
+        let components = vec![
+            CheckComponent {
+                kind: CheckKind::AxialBending,
+                ratio: ratio_axial.max(ratio_moment),
+            },
+            CheckComponent {
+                kind: CheckKind::Shear,
+                ratio: ratio_qy.max(ratio_qz),
+            },
+        ];
+
         return CheckResult {
             ratio,
             ok: ratio <= 1.0,
             basis,
             detail,
+            components,
         };
     }
 
@@ -296,11 +308,23 @@ pub(crate) fn column_check(
         axis_y.props.pw
     );
 
+    let components = vec![
+        CheckComponent {
+            kind: CheckKind::AxialBending,
+            ratio: ratio_axial.max(ratio_moment),
+        },
+        CheckComponent {
+            kind: CheckKind::Shear,
+            ratio: ratio_qy.max(ratio_qz),
+        },
+    ];
+
     CheckResult {
         ratio,
         ok: ratio <= 1.0,
         basis,
         detail,
+        components,
     }
 }
 
@@ -462,5 +486,42 @@ mod tests {
             "mz 単独 0.3 割合のとき ratio ≒ 0.3 のはず: ratio={}",
             r.ratio
         );
+    }
+
+    /// 矩形柱: components に AxialBending・Shear が含まれ、その最大値が
+    /// ratio と一致することを確認する。
+    #[test]
+    fn test_column_check_components_axial_bending_and_shear_max_matches_ratio() {
+        let b = 400.0;
+        let d_full = 400.0;
+        let shape = rc_rect_shape(b, d_full, 8, 22.0, 2, 40.0, 10.0, 100.0, 2);
+        let sec = make_section(shape);
+        let mat = make_material(24.0, "SD345");
+        let ctx = ctx_column(LoadTerm::Long);
+        let forces = MemberForcesAt {
+            pos: 0.0,
+            n: -200_000.0,
+            qy: 50_000.0,
+            qz: 30_000.0,
+            my: 10.0e6,
+            mz: 20.0e6,
+        };
+        let design = crate::rc::RcDesign;
+        let result = design.check(&forces, &sec, &mat, &ctx);
+        assert_eq!(result.components.len(), 2);
+        assert!(result
+            .components
+            .iter()
+            .any(|c| c.kind == crate::CheckKind::AxialBending));
+        assert!(result
+            .components
+            .iter()
+            .any(|c| c.kind == crate::CheckKind::Shear));
+        let max_component = result
+            .components
+            .iter()
+            .map(|c| c.ratio)
+            .fold(0.0_f64, f64::max);
+        assert_eq!(max_component, result.ratio);
     }
 }

@@ -362,6 +362,10 @@ fn test_src_fc_missing_skip() {
     assert!(result.ok);
     assert_eq!(result.ratio, 0.0);
     assert!(result.basis.contains("Fc"));
+    assert!(
+        result.components.is_empty(),
+        "Fc 未設定の退化ケースは components が空のはず"
+    );
 }
 
 #[test]
@@ -387,6 +391,10 @@ fn test_src_shape_mismatch_skip() {
     let result = design.check(&zero_forces(), &sec, &mat, &ctx);
     assert!(result.ok);
     assert!(result.basis.contains("断面形状不一致"));
+    assert!(
+        result.components.is_empty(),
+        "断面形状不一致の退化ケースは components が空のはず"
+    );
 }
 
 // ------------------------------------------------------------------
