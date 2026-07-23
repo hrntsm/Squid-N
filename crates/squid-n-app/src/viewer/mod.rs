@@ -1119,8 +1119,21 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
     }
 
     // --- 応力図（N/Q/M）: 部材ローカルに沿って描画 ---
+    // 変形重ね（`disp` が Some）かつ内部たわみ表示が有効なとき、梁の張り出しは
+    // 変形後の Hermite 曲線を基準線に描く。判定に必要な変位と表示倍率を渡す。
     if matches!(mode, ViewMode::N | ViewMode::Q | ViewMode::M) {
-        diagram::draw_force_diagram(&painter, app, mode, &coords3, center3, &cam, scale, center);
+        diagram::draw_force_diagram(
+            &painter,
+            app,
+            mode,
+            &coords3,
+            disp.as_deref(),
+            deform_scale_actual,
+            center3,
+            &cam,
+            scale,
+            center,
+        );
     }
     if mode == ViewMode::Cmq {
         draw_cmq_diagram(&painter, app, &coords3, center3, &cam, scale, center);
@@ -1366,24 +1379,36 @@ fn beam_deformed_polyline(
     segments: usize,
 ) -> Vec<[f64; 3]> {
     let seg = segments.max(1);
-    let mut pts = Vec::with_capacity(seg + 1);
-    for k in 0..=seg {
-        let xi = k as f64 / seg as f64;
-        // 未倍率の Hermite 変位（グローバル並進）を評価し、表示倍率を掛けて
-        // 未変形材軸上の点へ加える。
-        let dg = beam_hermite_disp_at(p_i, p_j, d_i, d_j, ref_vector, xi);
-        let base = [
-            p_i[0] + (p_j[0] - p_i[0]) * xi,
-            p_i[1] + (p_j[1] - p_i[1]) * xi,
-            p_i[2] + (p_j[2] - p_i[2]) * xi,
-        ];
-        pts.push([
-            base[0] + dg[0] * scale,
-            base[1] + dg[1] * scale,
-            base[2] + dg[2] * scale,
-        ]);
-    }
-    pts
+    (0..=seg)
+        .map(|k| {
+            let xi = k as f64 / seg as f64;
+            beam_deformed_point_at(p_i, p_j, d_i, d_j, ref_vector, scale, xi)
+        })
+        .collect()
+}
+
+/// 梁要素の変形後曲線上の点を材軸パラメータ ξ∈[0,1] で返す。
+///
+/// 未変形材軸上の点 `p_i + (p_j−p_i)·ξ` に、端部 6 自由度からの Hermite 変位
+/// （[`beam_hermite_disp_at`]、無倍率）へ表示倍率 `scale` を掛けたものを加える。
+/// 曲線描画（[`beam_deformed_polyline`]）と、応力図（N/Q/M）の張り出しを梁の
+/// 変形曲線へ載せる処理（`diagram.rs`）とで共有し、両者の基準線を一致させる。
+/// ξ=0,1 では回転項が消え、端点は節点変位（＝節点マーカー位置）に一致する。
+fn beam_deformed_point_at(
+    p_i: [f64; 3],
+    p_j: [f64; 3],
+    d_i: [f64; 6],
+    d_j: [f64; 6],
+    ref_vector: [f64; 3],
+    scale: f64,
+    xi: f64,
+) -> [f64; 3] {
+    let dg = beam_hermite_disp_at(p_i, p_j, d_i, d_j, ref_vector, xi);
+    [
+        p_i[0] + (p_j[0] - p_i[0]) * xi + dg[0] * scale,
+        p_i[1] + (p_j[1] - p_i[1]) * xi + dg[1] * scale,
+        p_i[2] + (p_j[2] - p_i[2]) * xi + dg[2] * scale,
+    ]
 }
 
 /// 梁要素の Hermite 変位場を材軸パラメータ ξ∈[0,1] で評価し、未変形材軸上の点へ
@@ -2791,6 +2816,41 @@ mod tests {
         );
         // 端部は原位置（並進 0・回転のみ）
         assert!(poly[0][1].abs() < 1e-9 && poly[12][1].abs() < 1e-9);
+    }
+
+    #[test]
+    fn 梁変形後曲線の端点は節点変位に一致し中央は弦から外れる() {
+        // 応力図の基準線に使う beam_deformed_point_at の検証。端点（ξ=0,1）は節点
+        // 変位（scale 倍）に一致し、中央（ξ=0.5）は端部回転により弦（端点の線形
+        // 補間）から外れてたわむ。
+        let p_i = [0.0, 0.0, 0.0];
+        let p_j = [6000.0, 0.0, 0.0];
+        let d_i = [0.0, 0.0, 0.0, 0.0, 0.0, 0.01];
+        let d_j = [0.0, 0.0, 0.0, 0.0, 0.0, -0.01];
+        let scale = 2.0;
+        let a = beam_deformed_point_at(p_i, p_j, d_i, d_j, [0.0, 0.0, 1.0], scale, 0.0);
+        let b = beam_deformed_point_at(p_i, p_j, d_i, d_j, [0.0, 0.0, 1.0], scale, 1.0);
+        for k in 0..3 {
+            assert!(
+                (a[k] - (p_i[k] + scale * d_i[k])).abs() < 1e-6,
+                "端点i k={k}"
+            );
+            assert!(
+                (b[k] - (p_j[k] + scale * d_j[k])).abs() < 1e-6,
+                "端点j k={k}"
+            );
+        }
+        let mid = beam_deformed_point_at(p_i, p_j, d_i, d_j, [0.0, 0.0, 1.0], scale, 0.5);
+        let chord_mid = [
+            (a[0] + b[0]) * 0.5,
+            (a[1] + b[1]) * 0.5,
+            (a[2] + b[2]) * 0.5,
+        ];
+        let dev = ((mid[0] - chord_mid[0]).powi(2)
+            + (mid[1] - chord_mid[1]).powi(2)
+            + (mid[2] - chord_mid[2]).powi(2))
+        .sqrt();
+        assert!(dev > 1.0, "中央が弦から外れていない: dev={}", dev);
     }
 
     #[test]

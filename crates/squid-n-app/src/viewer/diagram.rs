@@ -22,7 +22,10 @@
 use crate::app::App;
 use crate::theme;
 
-use super::{diagram_offset_dir, member_len3, project, project_offset, CameraState, ViewMode};
+use super::{
+    beam_deformed_point_at, diagram_offset_dir, member_len3, project, project_offset, CameraState,
+    ViewMode,
+};
 
 /// 張り出しピークがこの px 未満の図形は描かない。60px 正規化に対して値が
 /// 相対的に極小の部材（ほぼ潰れた図形）は、輪郭の折り返し点で epaint のマイター
@@ -120,6 +123,8 @@ pub(super) fn draw_force_diagram(
     app: &App,
     mode: ViewMode,
     coords3: &[[f64; 3]],
+    disp: Option<&[[f64; 6]]>,
+    deform_scale: f64,
     center3: [f64; 3],
     cam: &CameraState,
     scale: f32,
@@ -182,7 +187,21 @@ pub(super) fn draw_force_diagram(
         if member_len3(p_i, p_j) < 1e-9 {
             continue; // ゼロ長部材（同一節点間）は材軸が定まらず図を描けない
         }
-        let ey = diagram_offset_dir(p_i, p_j, elem.local_axis.ref_vector);
+        let ref_vec = elem.local_axis.ref_vector;
+        let ey = diagram_offset_dir(p_i, p_j, ref_vec);
+        // 内部たわみ表示が有効な梁は、張り出しの基準線を変形後の Hermite 曲線に
+        // する（`disp` が Some＝変形重ね時のみ）。梁の線描画と同じ `beam_deformed_
+        // point_at` で評価するため、基準線が梁の描画曲線に厳密一致する。それ以外
+        // （梁以外・内部たわみ OFF・変形重ね無し）は変形後の節点間直線（弦）を
+        // 基準線にする（従来どおり）。
+        let curve_ends: Option<([f64; 6], [f64; 6])> =
+            if app.show_beam_interpolation && elem.kind == squid_n_core::model::ElementKind::Beam {
+                disp.and_then(|d| (n0 < d.len() && n1 < d.len()).then(|| (d[n0], d[n1])))
+            } else {
+                None
+            };
+        // 曲線評価に使う未変形材軸端点。
+        let (pu_i, pu_j) = (app.model.nodes[n0].coord, app.model.nodes[n1].coord);
         let p0 = {
             let p = project(p_i, center3, cam, scale, screen_center);
             egui::pos2(p[0], p[1])
@@ -206,13 +225,19 @@ pub(super) fn draw_force_diagram(
             continue;
         }
 
-        // (xi, val) → スクリーン座標。val=0 は材軸そのもの（オフセット無し）。
+        // (xi, val) → スクリーン座標。val=0 は基準線そのもの（オフセット無し）。
+        // 基準線は curve_ends があれば梁の変形後 Hermite 曲線、無ければ節点間直線。
         let to_screen = |xi: f64, val: f64| -> egui::Pos2 {
-            let base3 = [
-                p_i[0] + (p_j[0] - p_i[0]) * xi,
-                p_i[1] + (p_j[1] - p_i[1]) * xi,
-                p_i[2] + (p_j[2] - p_i[2]) * xi,
-            ];
+            let base3 = match curve_ends {
+                Some((di, dj)) => {
+                    beam_deformed_point_at(pu_i, pu_j, di, dj, ref_vec, deform_scale, xi)
+                }
+                None => [
+                    p_i[0] + (p_j[0] - p_i[0]) * xi,
+                    p_i[1] + (p_j[1] - p_i[1]) * xi,
+                    p_i[2] + (p_j[2] - p_i[2]) * xi,
+                ],
+            };
             if val == 0.0 {
                 let p = project(base3, center3, cam, scale, screen_center);
                 egui::pos2(p[0], p[1])
