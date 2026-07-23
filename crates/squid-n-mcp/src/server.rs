@@ -357,6 +357,7 @@ mod tests {
             }],
             materials: vec![Material {
                 concrete_class: Default::default(),
+                strength_factor: None,
                 id: MaterialId(0),
                 name: "SN400".into(),
                 young: 20000.0,
@@ -447,6 +448,7 @@ mod tests {
             }],
             materials: vec![Material {
                 concrete_class: Default::default(),
+                strength_factor: None,
                 id: MaterialId(0),
                 name: "steel".into(),
                 young: 205000.0,
