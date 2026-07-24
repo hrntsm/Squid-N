@@ -466,6 +466,34 @@ mod tests {
     }
 
     #[test]
+    fn test_default_combinations_matches_auto_combinations() {
+        // squid-n-core の default_combinations（新規モデルの既定）は、標準ケースの
+        // 並び（0:DL, 1:LL(架構用), 3:EX, 4:EY）に対する auto_combinations と
+        // 同じ係数構成（参照ケース・係数・順序）を持つ。表示名のみ直接的なケース名
+        // （DL・LL・EX・EY）にしているため、名前ではなく terms の一致を確認する。
+        let expected = auto_combinations(
+            LoadCaseId(0),
+            LoadCaseId(1),
+            Some(LoadCaseId(3)),
+            Some(LoadCaseId(4)),
+            None,
+        );
+        let actual = squid_n_core::model::default_combinations();
+        assert_eq!(actual.len(), expected.len());
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert_eq!(
+                a.terms, e.terms,
+                "default_combinations の係数構成が auto_combinations と一致していない"
+            );
+        }
+        // 表示名でも長短期の判別が正しく機能する（DL+LL は長期、地震4件は短期）。
+        assert!(!is_short_term_combo(&actual[0].name));
+        for c in &actual[1..] {
+            assert!(is_short_term_combo(&c.name), "{} は短期のはず", c.name);
+        }
+    }
+
+    #[test]
     fn test_standard_combinations_empty_optional_cases() {
         let input = ComboInput {
             dl: LoadCaseId(1),

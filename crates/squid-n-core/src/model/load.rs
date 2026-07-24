@@ -125,6 +125,47 @@ pub struct LoadCombination {
     pub terms: Vec<(LoadCaseId, f64)>,
 }
 
+/// 新規モデルにデフォルトで用意する標準荷重組合せ一式
+/// （長期 1 + 短期地震 4 の計 5 組合せ）。
+///
+/// [`default_load_cases`] が生成する標準ケースの並び
+/// （0:DL、1:LL(架構用)、2:LL(地震用)、3:EX、4:EY）を前提に、以下を生成する。
+/// 組合せ名は分かりやすさのため荷重ケースの直接的な名前（DL・LL・EX・EY）で表す
+/// （LL は架構用の積載 [`LL_FRAME_CASE_NAME`] の略）。
+///
+/// - 長期: `DL + LL`
+/// - 短期地震: `DL + LL + EX`／`DL + LL - EX`
+/// - 短期地震: `DL + LL + EY`／`DL + LL - EY`
+///
+/// 長期には架構用の積載（令85条1項の長期骨組解析用）を用いる。係数構成
+/// （参照ケース・係数・順序）は `squid_n_load::combo::auto_combinations` と同一で、
+/// 表示名のみ直接的なケース名にしている。長短期の判別は `is_short_term_combo` が
+/// 名前から行い、地震ケース名の "E" を含む短期4件が短期、`DL + LL` が長期となる。
+pub fn default_combinations() -> Vec<LoadCombination> {
+    // ID は default_load_cases() の並びに対応する。
+    let dl = LoadCaseId(0);
+    let ll = LoadCaseId(1);
+    let ex = LoadCaseId(3);
+    let ey = LoadCaseId(4);
+    // DL + LL に地震ケース case（係数 ±1.0）を加えた短期地震組合せ。
+    let seismic = |case: LoadCaseId, coef: f64, name: &str| LoadCombination {
+        name: name.to_string(),
+        terms: vec![(dl, 1.0), (ll, 1.0), (case, coef)],
+    };
+    vec![
+        // 長期: DL + LL
+        LoadCombination {
+            name: "DL + LL".into(),
+            terms: vec![(dl, 1.0), (ll, 1.0)],
+        },
+        // 短期地震: DL + LL ± EX / ± EY
+        seismic(ex, 1.0, "DL + LL + EX"),
+        seismic(ex, -1.0, "DL + LL - EX"),
+        seismic(ey, 1.0, "DL + LL + EY"),
+        seismic(ey, -1.0, "DL + LL - EY"),
+    ]
+}
+
 /// ダンパー装置の自重諸元（固定荷重）。
 /// 自重 = 装置重量 + 支持部断面積 ×（節点間距離 − 装置長さ）× 鋼材単位体積重量。
 /// 両端節点へ 1/2 ずつ伝達（鉛直配置は上下階へ、水平配置は同一階の両節点へ、
