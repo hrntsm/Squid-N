@@ -69,7 +69,11 @@ pub(super) fn ratio_for_filter(
 fn dominant_kind_of(components: &[CheckComponent]) -> Option<CheckKind> {
     components
         .iter()
-        .max_by(|a, b| a.ratio.partial_cmp(&b.ratio).unwrap())
+        .max_by(|a, b| {
+            a.ratio
+                .partial_cmp(&b.ratio)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .map(|c| c.kind)
 }
 
@@ -230,7 +234,7 @@ pub(super) fn build_tooltip_rows(positions: &[PositionCheck]) -> (Vec<CheckKind>
 
 /// 検定比図を描く。`pts` は `viewer_panel` で計算済みの節点スクリーン座標
 /// （`app.model.nodes` と同じ順序）。
-pub(super) fn draw_check_ratio(painter: &egui::Painter, app: &App, pts: &[[f32; 2]]) {
+pub(super) fn draw_check_ratio(painter: &egui::Painter, app: &App, pts: &[egui::Pos2]) {
     let Some(results) = &app.results else {
         draw_no_result_legend(painter);
         return;
@@ -277,7 +281,7 @@ pub(super) fn draw_check_ratio(painter: &egui::Painter, app: &App, pts: &[[f32; 
                 .iter()
                 .filter_map(|n| {
                     let idx = n.index();
-                    (idx < pts.len()).then(|| egui::pos2(pts[idx][0], pts[idx][1]))
+                    (idx < pts.len()).then(|| pts[idx])
                 })
                 .collect();
             if poly.len() == elem.nodes.len() {
@@ -299,8 +303,8 @@ pub(super) fn draw_check_ratio(painter: &egui::Painter, app: &App, pts: &[[f32; 
         if n0 >= pts.len() || n1 >= pts.len() {
             continue;
         }
-        let p0 = egui::pos2(pts[n0][0], pts[n0][1]);
-        let p1 = egui::pos2(pts[n1][0], pts[n1][1]);
+        let p0 = pts[n0];
+        let p1 = pts[n1];
         // NG 部材は太さで目立たせる
         let width = if ok { 4.0_f32 } else { 5.0_f32 };
         painter.line_segment([p0, p1], egui::Stroke::new(width, color));
@@ -353,7 +357,11 @@ pub(super) fn draw_check_ratio(painter: &egui::Painter, app: &App, pts: &[[f32; 
                     CheckOutcome::Checked(cr) => Some(cr),
                     CheckOutcome::Skipped { .. } => None,
                 })
-                .max_by(|a, b| a.ratio().partial_cmp(&b.ratio()).unwrap())
+                .max_by(|a, b| {
+                    a.ratio()
+                        .partial_cmp(&b.ratio())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .and_then(dominant_kind)
         } else {
             None
@@ -385,7 +393,7 @@ pub(super) fn draw_check_ratio(painter: &egui::Painter, app: &App, pts: &[[f32; 
         if idx >= pts.len() {
             continue;
         }
-        let p = egui::pos2(pts[idx][0], pts[idx][1]);
+        let p = pts[idx];
         let color = theme::status_color(ratio);
         painter.circle_filled(p, 5.0, color);
         painter.circle_stroke(p, 5.0, egui::Stroke::new(1.0_f32, theme::VIEW_BG));

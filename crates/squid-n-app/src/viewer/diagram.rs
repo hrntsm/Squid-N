@@ -22,17 +22,18 @@
 use crate::app::App;
 use crate::theme;
 
-use super::{diagram_offset_dir, member_len3, project, project_offset, CameraState, ViewMode};
+use super::{diagram_offset_dir, member_len3, BeamDeflection, Projector, ViewMode};
 
 /// 張り出しピークがこの px 未満の図形は描かない。60px 正規化に対して値が
 /// 相対的に極小の部材（ほぼ潰れた図形）は、輪郭の折り返し点で epaint のマイター
 /// 結合が発散し部材軸方向に画面外まで伸びるスパイク描画になるため、視認不能な
-/// 図形は端から描かずスキップする（CMQ 図の `MIN_DIAGRAM_PX` と同じ考え方）。
-const MIN_DIAGRAM_PX: f32 = 0.5;
+/// 図形は端から描かずスキップする。N/Q/M 図・CMQ 図で共有する。
+pub(super) const MIN_DIAGRAM_PX: f32 = 0.5;
 
 /// 輪郭の折れ線で、直前の点とのスクリーン距離がこの px 未満の連続点は間引く
 /// （ゼロ長セグメントも epaint のマイター結合発散の原因になるため）。
-const MIN_SEGMENT_PX: f32 = 0.25;
+/// N/Q/M 図・CMQ 図で共有する。
+pub(super) const MIN_SEGMENT_PX: f32 = 0.25;
 
 /// コンター表示時、各サンプル区間を細分する分割数（滑らかな色階調のため）。
 const CONTOUR_SUBDIV: usize = 8;
@@ -52,7 +53,7 @@ pub(crate) fn diagram_fill_polygons(samples: &[(f64, f64)], subdiv: usize) -> Ve
         return Vec::new();
     }
     let mut sorted = samples.to_vec();
-    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut polys = Vec::new();
     for w in sorted.windows(2) {
@@ -114,17 +115,16 @@ pub(crate) fn contour_color(t: f64, map: theme::ColorMap) -> egui::Color32 {
 }
 
 /// 部材ローカルに沿って N/Q/M 図を描く。
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_force_diagram(
     painter: &egui::Painter,
     app: &App,
     mode: ViewMode,
     coords3: &[[f64; 3]],
-    center3: [f64; 3],
-    cam: &CameraState,
-    scale: f32,
-    screen_center: [f32; 2],
+    disp: Option<&[[f64; 6]]>,
+    deform_scale: f64,
+    proj: &Projector,
 ) {
+    let scale = proj.scale();
     let force_idx = match mode {
         ViewMode::N => 0, // N
         ViewMode::Q => 1, // Qy
@@ -182,20 +182,36 @@ pub(super) fn draw_force_diagram(
         if member_len3(p_i, p_j) < 1e-9 {
             continue; // ゼロ長部材（同一節点間）は材軸が定まらず図を描けない
         }
-        let ey = diagram_offset_dir(p_i, p_j, elem.local_axis.ref_vector);
-        let p0 = {
-            let p = project(p_i, center3, cam, scale, screen_center);
-            egui::pos2(p[0], p[1])
-        };
-        let p1 = {
-            let p = project(p_j, center3, cam, scale, screen_center);
-            egui::pos2(p[0], p[1])
-        };
+        let ref_vec = elem.local_axis.ref_vector;
+        let ey = diagram_offset_dir(p_i, p_j, ref_vec);
+        // 内部たわみ表示が有効な梁は、張り出しの基準線を変形後の Hermite 曲線に
+        // する（`disp` が Some＝変形重ね時のみ）。梁の線描画と同じ `BeamDeflection`
+        // で評価するため、基準線が梁の描画曲線に厳密一致する。それ以外（梁以外・
+        // 内部たわみ OFF・変形重ね無し）は変形後の節点間直線（弦）を基準線にする
+        // （従来どおり）。未変形材軸端点から一度だけ前処理する。
+        let deflection: Option<BeamDeflection> =
+            if app.show_beam_interpolation && elem.kind == squid_n_core::model::ElementKind::Beam {
+                disp.and_then(|d| {
+                    (n0 < d.len() && n1 < d.len()).then(|| {
+                        BeamDeflection::new(
+                            app.model.nodes[n0].coord,
+                            app.model.nodes[n1].coord,
+                            d[n0],
+                            d[n1],
+                            ref_vec,
+                        )
+                    })
+                })
+            } else {
+                None
+            };
+        let p0 = proj.project(p_i);
+        let p1 = proj.project(p_j);
 
         // xi 昇順にソート（保険）
         let mut samples: Vec<(f64, f64)> =
             mf.at.iter().map(|(xi, f)| (*xi, f[force_idx])).collect();
-        samples.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        samples.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         if samples.len() < 2 {
             continue;
         }
@@ -206,26 +222,21 @@ pub(super) fn draw_force_diagram(
             continue;
         }
 
-        // (xi, val) → スクリーン座標。val=0 は材軸そのもの（オフセット無し）。
+        // (xi, val) → スクリーン座標。val=0 は基準線そのもの（オフセット無し）。
+        // 基準線は deflection があれば梁の変形後 Hermite 曲線、無ければ節点間直線。
         let to_screen = |xi: f64, val: f64| -> egui::Pos2 {
-            let base3 = [
-                p_i[0] + (p_j[0] - p_i[0]) * xi,
-                p_i[1] + (p_j[1] - p_i[1]) * xi,
-                p_i[2] + (p_j[2] - p_i[2]) * xi,
-            ];
+            let base3 = match &deflection {
+                Some(bd) => bd.point_at(xi, deform_scale),
+                None => [
+                    p_i[0] + (p_j[0] - p_i[0]) * xi,
+                    p_i[1] + (p_j[1] - p_i[1]) * xi,
+                    p_i[2] + (p_j[2] - p_i[2]) * xi,
+                ],
+            };
             if val == 0.0 {
-                let p = project(base3, center3, cam, scale, screen_center);
-                egui::pos2(p[0], p[1])
+                proj.project(base3)
             } else {
-                project_offset(
-                    base3,
-                    ey,
-                    -val * amp_world,
-                    center3,
-                    cam,
-                    scale,
-                    screen_center,
-                )
+                proj.project_offset(base3, ey, -val * amp_world)
             }
         };
 
