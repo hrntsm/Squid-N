@@ -219,8 +219,90 @@ impl CameraState {
     }
 }
 
-/// ワールド座標 `p` を投影する。`center3` はモデル中心（回転中心）、`scale` は px/世界長、
-/// `screen_center` は描画領域中心（px）。
+/// 3D→2D 投影の文脈（回転中心・カメラ・スケール・描画領域中心）を束ねる。
+///
+/// 多数の描画関数へ `(center3, cam, scale, screen_center)` を個別に引き回す代わりに、
+/// この 1 つの参照で受け渡し、投影数式の単一情報源とする（§3-2: ターンテーブル
+/// 回転＋正射影。ビュー軸は X=右・Y=上・Z=手前）。深度ソートや面陰影で回転後の
+/// カメラ空間ベクトルが要る箇所のため、`to_cam`（回転まで）と `cam_to_screen`
+/// （画面写像）に分けて公開する。
+#[derive(Clone, Copy)]
+pub(crate) struct Projector<'a> {
+    /// モデル中心（回転中心）。
+    center3: [f64; 3],
+    cam: &'a CameraState,
+    /// px/世界長。
+    scale: f32,
+    /// 描画領域中心（px）。
+    screen_center: [f32; 2],
+}
+
+impl<'a> Projector<'a> {
+    pub(crate) fn new(
+        center3: [f64; 3],
+        cam: &'a CameraState,
+        scale: f32,
+        screen_center: [f32; 2],
+    ) -> Self {
+        Self {
+            center3,
+            cam,
+            scale,
+            screen_center,
+        }
+    }
+
+    /// px/世界長。ワールド長 ⇔ 画面 px の換算に使う。
+    pub(crate) fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// モデル中心（回転中心）。グリッド範囲の算定などワールド基準の計算に使う。
+    pub(crate) fn center3(&self) -> [f64; 3] {
+        self.center3
+    }
+
+    /// ワールド座標を、回転中心基準でカメラ回転を掛けたカメラ空間ベクトルへ変換する
+    /// （r[0]=右, r[1]=上, r[2]=手前）。深度ソート・面陰影で中間ベクトルが要る。
+    pub(crate) fn cam_space(&self, p: [f64; 3]) -> [f32; 3] {
+        let v = [
+            (p[0] - self.center3[0]) as f32,
+            (p[1] - self.center3[1]) as f32,
+            (p[2] - self.center3[2]) as f32,
+        ];
+        q_rotate(self.cam.rot, v)
+    }
+
+    /// カメラ空間ベクトルをスクリーン座標へ写す（パン加算・スケール・画面 Y 反転）。
+    pub(crate) fn cam_to_screen(&self, r: [f32; 3]) -> egui::Pos2 {
+        egui::pos2(
+            self.screen_center[0] + self.cam.pan[0] + r[0] * self.scale,
+            self.screen_center[1] + self.cam.pan[1] - r[1] * self.scale,
+        )
+    }
+
+    /// ワールド座標 `p` をスクリーン座標へ投影する。
+    pub(crate) fn project(&self, p: [f64; 3]) -> egui::Pos2 {
+        self.cam_to_screen(self.cam_space(p))
+    }
+
+    /// `base3` から `dir3` 方向へ `off_world` だけ張り出した点を投影する。
+    pub(crate) fn project_offset(
+        &self,
+        base3: [f64; 3],
+        dir3: [f64; 3],
+        off_world: f64,
+    ) -> egui::Pos2 {
+        self.project([
+            base3[0] + dir3[0] * off_world,
+            base3[1] + dir3[1] * off_world,
+            base3[2] + dir3[2] * off_world,
+        ])
+    }
+}
+
+/// ワールド座標 `p` を投影する（`[f32; 2]` 版。M-N 相関曲面ビュー用の下位ラッパ）。
+/// 投影数式は [`Projector`] を単一情報源とする。
 pub(crate) fn project(
     p: [f64; 3],
     center3: [f64; 3],
@@ -228,16 +310,8 @@ pub(crate) fn project(
     scale: f32,
     screen_center: [f32; 2],
 ) -> [f32; 2] {
-    let v = [
-        (p[0] - center3[0]) as f32,
-        (p[1] - center3[1]) as f32,
-        (p[2] - center3[2]) as f32,
-    ];
-    let r = q_rotate(cam.rot, v);
-    [
-        screen_center[0] + cam.pan[0] + r[0] * scale,
-        screen_center[1] + cam.pan[1] - r[1] * scale,
-    ]
+    let pos = Projector::new(center3, cam, scale, screen_center).project(p);
+    [pos.x, pos.y]
 }
 
 /// 3D ベクトルの外積。
@@ -271,15 +345,11 @@ fn draw_arrow(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: 
 }
 
 /// 節点を中心に `axis` まわりの回転を示す円弧（全周）を描く。
-#[allow(clippy::too_many_arguments)]
 fn draw_rotation_arc(
     painter: &egui::Painter,
+    proj: &Projector,
     center_world: [f64; 3],
     axis: [f64; 3],
-    center3: [f64; 3],
-    cam: &CameraState,
-    scale: f32,
-    screen_center: [f32; 2],
     radius_world: f64,
     color: egui::Color32,
 ) {
@@ -314,8 +384,7 @@ fn draw_rotation_arc(
             center_world[1] + radius_world * (c * u[1] + s * v[1]),
             center_world[2] + radius_world * (c * u[2] + s * v[2]),
         ];
-        let p = project(pt, center3, cam, scale, screen_center);
-        let cur = egui::pos2(p[0], p[1]);
+        let cur = proj.project(pt);
         if let Some(p0) = prev {
             painter.line_segment([p0, cur], stroke);
         }
@@ -331,14 +400,10 @@ fn draw_rotation_arc(
 ///
 /// 現在は全体座標系（X/Y/Z）の軸方向に描画する。将来的に節点ごとに局所座標系を
 /// 導入した際は、この関数が参照する軸ベクトルを局所座標系の軸へ差し替えればよい。
-#[allow(clippy::too_many_arguments)]
 fn draw_support_symbol(
     painter: &egui::Painter,
+    proj: &Projector,
     node_coord: [f64; 3],
-    center3: [f64; 3],
-    cam: &CameraState,
-    scale: f32,
-    screen_center: [f32; 2],
     restraint: Dof6Mask,
     arrow_px: f32,
     arc_px: f32,
@@ -347,10 +412,9 @@ fn draw_support_symbol(
         return;
     }
     // スクリーン上で arrow_px / arc_px になるようワールド長を逆算
-    let arrow_world = arrow_px as f64 / scale as f64;
-    let arc_world = arc_px as f64 / scale as f64;
-    let p0 = project(node_coord, center3, cam, scale, screen_center);
-    let origin = egui::pos2(p0[0], p0[1]);
+    let arrow_world = arrow_px as f64 / proj.scale() as f64;
+    let arc_world = arc_px as f64 / proj.scale() as f64;
+    let origin = proj.project(node_coord);
 
     // 並進自由度: 固定方向へ軸色の矢印
     let translational: [(Dof, [f64; 3], egui::Color32); 3] = [
@@ -365,8 +429,7 @@ fn draw_support_symbol(
                 node_coord[1] + dir[1] * arrow_world,
                 node_coord[2] + dir[2] * arrow_world,
             ];
-            let pe = project(end, center3, cam, scale, screen_center);
-            draw_arrow(painter, origin, egui::pos2(pe[0], pe[1]), color);
+            draw_arrow(painter, origin, proj.project(end), color);
         }
     }
 
@@ -378,17 +441,7 @@ fn draw_support_symbol(
     ];
     for (dof, axis, color) in rotational {
         if restraint.is_fixed(dof) {
-            draw_rotation_arc(
-                painter,
-                node_coord,
-                axis,
-                center3,
-                cam,
-                scale,
-                screen_center,
-                arc_world,
-                color,
-            );
+            draw_rotation_arc(painter, proj, node_coord, axis, arc_world, color);
         }
     }
 }
@@ -713,9 +766,11 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
     };
     // 既定ズーム 3.0 でモデル対角が描画領域の約 80% に収まるよう基準化。
     let scale = fit * (cam.zoom / 3.0);
+    // 以降の描画で共有する投影文脈（カメラ確定後に 1 度だけ構築）。
+    let proj = Projector::new(center3, &cam, scale, center);
 
     // グリッド・軸（§3-2: 赤=X / 緑=Y / 青=Z）。モデルの背後に先に描く。
-    draw_grid_and_axes(&painter, rect, center3, &cam, scale, center);
+    draw_grid_and_axes(&painter, rect, &proj);
 
     // 節点座標（変形・モード時と、N/Q/M 図の変形重ね表示時は変位を加味）
     let disp = match mode {
@@ -794,10 +849,7 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
             p
         })
         .collect();
-    let pts: Vec<[f32; 2]> = coords3
-        .iter()
-        .map(|&p| project(p, center3, &cam, scale, center))
-        .collect();
+    let pts: Vec<egui::Pos2> = coords3.iter().map(|&p| proj.project(p)).collect();
 
     // --- クリック処理（ViewCube 上のクリックはスナップ済みのため除外） ---
     if response.clicked() && !cube_clicked {
@@ -937,8 +989,8 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
                     if n0 >= pts.len() || n1 >= pts.len() {
                         continue;
                     }
-                    let a = egui::pos2(pts[n0][0], pts[n0][1]);
-                    let b = egui::pos2(pts[n1][0], pts[n1][1]);
+                    let a = pts[n0];
+                    let b = pts[n1];
                     let d = dist_point_to_segment(click_pos, a, b);
                     if best.is_none_or(|(_, bd)| d < bd) {
                         best = Some((elem.id, d));
@@ -973,9 +1025,7 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
     // 節点・部材線より先に描き、線・シンボル類は上に重ねる（材軸が見えるように）。
     let mut solids_skipped = 0usize;
     if app.show_sections {
-        solids_skipped = solid::draw_section_solids(
-            &painter, &app.model, &coords3, center3, &cam, scale, center,
-        );
+        solids_skipped = solid::draw_section_solids(&painter, &app.model, &coords3, &proj);
     }
 
     // 節点（梁/壁作成モードで選択中の節点は強調表示）
@@ -1016,7 +1066,7 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
                 .iter()
                 .filter_map(|n| {
                     let idx = n.index();
-                    (idx < pts.len()).then(|| egui::pos2(pts[idx][0], pts[idx][1]))
+                    (idx < pts.len()).then(|| pts[idx])
                 })
                 .collect();
             if poly.len() == elem.nodes.len() {
@@ -1050,26 +1100,14 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
             if member_len3(p_i, p_j) > 1e-9 {
                 let poly3 = BeamDeflection::new(p_i, p_j, d[n0], d[n1], elem.local_axis.ref_vector)
                     .polyline(deform_scale_actual, DEFORM_CURVE_SEGMENTS);
-                let screen: Vec<egui::Pos2> = poly3
-                    .iter()
-                    .map(|&p| {
-                        let s = project(p, center3, &cam, scale, center);
-                        egui::pos2(s[0], s[1])
-                    })
-                    .collect();
+                let screen: Vec<egui::Pos2> = poly3.iter().map(|&p| proj.project(p)).collect();
                 painter.add(egui::Shape::line(screen, line_stroke));
                 continue;
             }
         }
 
         // 通常（未変形・その他要素・ゼロ長梁）は節点間を直線で結ぶ。
-        painter.line_segment(
-            [
-                egui::pos2(pts[n0][0], pts[n0][1]),
-                egui::pos2(pts[n1][0], pts[n1][1]),
-            ],
-            line_stroke,
-        );
+        painter.line_segment([pts[n0], pts[n1]], line_stroke);
     }
 
     // 二次部材（小梁・間柱）: 解析対象外だが実在部材なので実線で描く
@@ -1086,13 +1124,7 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
             let n0 = sm.nodes[0].index();
             let n1 = sm.nodes[1].index();
             if n0 < pts.len() && n1 < pts.len() {
-                painter.line_segment(
-                    [
-                        egui::pos2(pts[n0][0], pts[n0][1]),
-                        egui::pos2(pts[n1][0], pts[n1][1]),
-                    ],
-                    secondary_stroke,
-                );
+                painter.line_segment([pts[n0], pts[n1]], secondary_stroke);
             }
         }
     }
@@ -1122,14 +1154,11 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
             &coords3,
             disp.as_deref(),
             deform_scale_actual,
-            center3,
-            &cam,
-            scale,
-            center,
+            &proj,
         );
     }
     if mode == ViewMode::Cmq {
-        draw_cmq_diagram(&painter, app, &coords3, center3, &cam, scale, center);
+        draw_cmq_diagram(&painter, app, &coords3, &proj);
     }
     if mode == ViewMode::CheckRatio {
         check_ratio::draw_check_ratio(&painter, app, &pts);
@@ -1147,8 +1176,8 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
                     if n0 >= pts.len() || n1 >= pts.len() {
                         continue;
                     }
-                    let a = egui::pos2(pts[n0][0], pts[n0][1]);
-                    let b = egui::pos2(pts[n1][0], pts[n1][1]);
+                    let a = pts[n0];
+                    let b = pts[n1];
                     let d = dist_point_to_segment(hover_pos, a, b);
                     if best.is_none_or(|(_, bd)| d < bd) {
                         best = Some((elem.id, d));
@@ -1204,10 +1233,7 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
                 let n1 = elem.nodes[1].index();
                 if n0 < pts.len() && n1 < pts.len() {
                     painter.line_segment(
-                        [
-                            egui::pos2(pts[n0][0], pts[n0][1]),
-                            egui::pos2(pts[n1][0], pts[n1][1]),
-                        ],
+                        [pts[n0], pts[n1]],
                         egui::Stroke::new(4.0_f32, theme::PARETO_RED),
                     );
                 }
@@ -1231,14 +1257,14 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
             if mi >= pts.len() {
                 continue;
             }
-            let mp = egui::pos2(pts[mi][0], pts[mi][1]);
+            let mp = pts[mi];
             for sl in slaves {
                 let si = sl.index();
                 if si >= pts.len() {
                     continue;
                 }
                 painter.extend(egui::Shape::dashed_line(
-                    &[mp, egui::pos2(pts[si][0], pts[si][1])],
+                    &[mp, pts[si]],
                     egui::Stroke::new(1.0_f32, theme::translucent(theme::HILITE_PURPLE, 140)),
                     DASH,
                     GAP,
@@ -1308,11 +1334,8 @@ pub fn viewer_panel(ui: &mut egui::Ui, app: &mut App) {
         }
         draw_support_symbol(
             &painter,
+            &proj,
             coord,
-            center3,
-            &cam,
-            scale,
-            center,
             restraint,
             SUPPORT_ARROW_PX,
             SUPPORT_ARC_PX,
@@ -1445,30 +1468,6 @@ impl BeamDeflection {
             .map(|k| self.point_at(k as f64 / seg as f64, scale))
             .collect()
     }
-}
-
-/// 3D 位置 `base3` から `dir3` 方向へ `off_world` だけ張り出した点を投影する。
-fn project_offset(
-    base3: [f64; 3],
-    dir3: [f64; 3],
-    off_world: f64,
-    center3: [f64; 3],
-    cam: &CameraState,
-    scale: f32,
-    screen_center: [f32; 2],
-) -> egui::Pos2 {
-    let p = project(
-        [
-            base3[0] + dir3[0] * off_world,
-            base3[1] + dir3[1] * off_world,
-            base3[2] + dir3[2] * off_world,
-        ],
-        center3,
-        cam,
-        scale,
-        screen_center,
-    );
-    egui::pos2(p[0], p[1])
 }
 
 /// CMQ 図の描画対象となる主架構の大梁か（`ElementKind::Beam` かつ、実部材化された
@@ -1604,16 +1603,8 @@ fn paint_diagram_polygon(
 /// 描画ソースは `app.beam_loads`（スラブ・小梁の生の荷重分配）ではなく、主架構へ
 /// 変換後の部材荷重（[`group_member_loads_by_elem`]）。これにより大梁1本=1図形になり
 /// （小梁がとりつく大梁で図が分裂しない）、小梁・スラブは自然に描画対象から外れる。
-#[allow(clippy::too_many_arguments)]
-fn draw_cmq_diagram(
-    painter: &egui::Painter,
-    app: &App,
-    coords3: &[[f64; 3]],
-    center3: [f64; 3],
-    cam: &CameraState,
-    scale: f32,
-    screen_center: [f32; 2],
-) {
+fn draw_cmq_diagram(painter: &egui::Painter, app: &App, coords3: &[[f64; 3]], proj: &Projector) {
+    let scale = proj.scale();
     if app.beam_loads.is_empty() {
         // スラブ自体が無いのか、スラブはあるが床荷重（強度）が 0 なのかを区別して案内する。
         let msg = if app.model.slabs.is_empty() {
@@ -1693,14 +1684,8 @@ fn draw_cmq_diagram(
         let p_j = coords3[g.n1];
         let l = member_len3(p_i, p_j);
         let ey = diagram_offset_dir(p_i, p_j, g.ref_vec);
-        let p0 = {
-            let p = project(p_i, center3, cam, scale, screen_center);
-            egui::pos2(p[0], p[1])
-        };
-        let p1 = {
-            let p = project(p_j, center3, cam, scale, screen_center);
-            egui::pos2(p[0], p[1])
-        };
+        let p0 = proj.project(p_i);
+        let p1 = proj.project(p_j);
 
         match app.cmq_component {
             CmqComponent::C => {
@@ -1717,8 +1702,8 @@ fn draw_cmq_diagram(
                 // 保持されているため、j 端は符号反転して i 端と同じ側（+ey 側）に描く。
                 let c_poly = vec![
                     p0,
-                    project_offset(p_i, ey, c_i * c_amp, center3, cam, scale, screen_center),
-                    project_offset(p_j, ey, -c_j * c_amp, center3, cam, scale, screen_center),
+                    proj.project_offset(p_i, ey, c_i * c_amp),
+                    proj.project_offset(p_j, ey, -c_j * c_amp),
                     p1,
                 ];
                 // C 図（モーメント）= 通常データ（青）
@@ -1763,8 +1748,7 @@ fn draw_cmq_diagram(
                 const MIN_SEGMENT_PX: f32 = 0.25;
                 let mut last = p0;
                 for (val, base3) in samples {
-                    let pt =
-                        project_offset(base3, ey, -val * m_amp, center3, cam, scale, screen_center);
+                    let pt = proj.project_offset(base3, ey, -val * m_amp);
                     if (pt.x - last.x).hypot(pt.y - last.y) < MIN_SEGMENT_PX {
                         continue;
                     }
@@ -1790,8 +1774,8 @@ fn draw_cmq_diagram(
                 // Q 図（せん断）: 両端の合算 q_i, q_j を結ぶ折れ線ポリゴン（+ey 側に描画）
                 let q_poly = vec![
                     p0,
-                    project_offset(p_i, ey, q_i * q_amp, center3, cam, scale, screen_center),
-                    project_offset(p_j, ey, q_j * q_amp, center3, cam, scale, screen_center),
+                    proj.project_offset(p_i, ey, q_i * q_amp),
+                    proj.project_offset(p_j, ey, q_j * q_amp),
                     p1,
                 ];
                 // Q 図（せん断）= 良好系（緑）。C（青）と弁別する
@@ -1833,7 +1817,7 @@ fn draw_cmq_diagram(
 ///
 /// 節点座標は投影済み `pts` を使うため、変形図・モード形では変位に追従する。
 /// 節点削除等で陳腐化した参照（範囲外 id）を含むスラブ・小梁は描かない。
-fn draw_slabs_and_joists(painter: &egui::Painter, app: &App, pts: &[[f32; 2]]) {
+fn draw_slabs_and_joists(painter: &egui::Painter, app: &App, pts: &[egui::Pos2]) {
     /// 破線パターン（描画長 / 間隔, px）
     const DASH: f32 = 6.0;
     const GAP: f32 = 4.0;
@@ -1844,7 +1828,7 @@ fn draw_slabs_and_joists(painter: &egui::Painter, app: &App, pts: &[[f32; 2]]) {
             .iter()
             .filter_map(|n| {
                 let idx = n.index();
-                (idx < pts.len()).then(|| egui::pos2(pts[idx][0], pts[idx][1]))
+                (idx < pts.len()).then(|| pts[idx])
             })
             .collect();
         if poly.len() == slab.boundary.len() && poly.len() >= 3 {
@@ -1873,10 +1857,7 @@ fn draw_slabs_and_joists(painter: &egui::Painter, app: &App, pts: &[[f32; 2]]) {
                 continue;
             }
             painter.extend(egui::Shape::dashed_line(
-                &[
-                    egui::pos2(pts[i0][0], pts[i0][1]),
-                    egui::pos2(pts[i1][0], pts[i1][1]),
-                ],
+                &[pts[i0], pts[i1]],
                 egui::Stroke::new(1.5_f32, theme::GRAY_600),
                 DASH,
                 GAP,
@@ -2346,18 +2327,10 @@ fn model_bbox_size(model: &squid_n_core::model::Model) -> f64 {
 /// 1000 mm の倍数に切り上げて決めるため、モデルのバウンディングボックスに依存しない。
 /// 軸線は原点から両方向（正=濃色 / 負=淡色）へ伸ばし、原点位置を一目で判別できるようにする。
 /// 軸ラベルの値はワールド座標（実寸）を表示する。
-fn draw_grid_and_axes(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    center3: [f64; 3],
-    cam: &CameraState,
-    scale: f32,
-    screen_center: [f32; 2],
-) {
-    let proj = |p: [f64; 3]| {
-        let s = project(p, center3, cam, scale, screen_center);
-        egui::pos2(s[0], s[1])
-    };
+fn draw_grid_and_axes(painter: &egui::Painter, rect: egui::Rect, projector: &Projector) {
+    let center3 = projector.center3();
+    let scale = projector.scale();
+    let proj = |p: [f64; 3]| projector.project(p);
 
     /// グリッド間隔 [mm]（1 m）。
     const STEP: f64 = 1000.0;

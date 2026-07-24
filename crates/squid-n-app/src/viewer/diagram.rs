@@ -22,9 +22,7 @@
 use crate::app::App;
 use crate::theme;
 
-use super::{
-    diagram_offset_dir, member_len3, project, project_offset, BeamDeflection, CameraState, ViewMode,
-};
+use super::{diagram_offset_dir, member_len3, BeamDeflection, Projector, ViewMode};
 
 /// 張り出しピークがこの px 未満の図形は描かない。60px 正規化に対して値が
 /// 相対的に極小の部材（ほぼ潰れた図形）は、輪郭の折り返し点で epaint のマイター
@@ -116,7 +114,6 @@ pub(crate) fn contour_color(t: f64, map: theme::ColorMap) -> egui::Color32 {
 }
 
 /// 部材ローカルに沿って N/Q/M 図を描く。
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_force_diagram(
     painter: &egui::Painter,
     app: &App,
@@ -124,11 +121,9 @@ pub(super) fn draw_force_diagram(
     coords3: &[[f64; 3]],
     disp: Option<&[[f64; 6]]>,
     deform_scale: f64,
-    center3: [f64; 3],
-    cam: &CameraState,
-    scale: f32,
-    screen_center: [f32; 2],
+    proj: &Projector,
 ) {
+    let scale = proj.scale();
     let force_idx = match mode {
         ViewMode::N => 0, // N
         ViewMode::Q => 1, // Qy
@@ -209,14 +204,8 @@ pub(super) fn draw_force_diagram(
             } else {
                 None
             };
-        let p0 = {
-            let p = project(p_i, center3, cam, scale, screen_center);
-            egui::pos2(p[0], p[1])
-        };
-        let p1 = {
-            let p = project(p_j, center3, cam, scale, screen_center);
-            egui::pos2(p[0], p[1])
-        };
+        let p0 = proj.project(p_i);
+        let p1 = proj.project(p_j);
 
         // xi 昇順にソート（保険）
         let mut samples: Vec<(f64, f64)> =
@@ -244,18 +233,9 @@ pub(super) fn draw_force_diagram(
                 ],
             };
             if val == 0.0 {
-                let p = project(base3, center3, cam, scale, screen_center);
-                egui::pos2(p[0], p[1])
+                proj.project(base3)
             } else {
-                project_offset(
-                    base3,
-                    ey,
-                    -val * amp_world,
-                    center3,
-                    cam,
-                    scale,
-                    screen_center,
-                )
+                proj.project_offset(base3, ey, -val * amp_world)
             }
         };
 

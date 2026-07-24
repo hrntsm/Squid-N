@@ -15,7 +15,7 @@ use squid_n_core::model::{ElementKind, Model, Section};
 use squid_n_core::section_shape::SectionShape;
 use squid_n_element::transform::LocalFrame;
 
-use super::{q_rotate, CameraState};
+use super::Projector;
 
 /// 円形断面（鋼管・RC 円柱等）の輪郭分割数。
 const CIRCLE_SEGMENTS: usize = 20;
@@ -33,24 +33,6 @@ enum SolidPrim {
         pts: Vec<egui::Pos2>,
         color: egui::Color32,
     },
-}
-
-/// カメラ空間座標（r[0]=右, r[1]=上, r[2]=手前）。`project` と同じ回転。
-fn cam_space(p: [f64; 3], center3: [f64; 3], cam: &CameraState) -> [f32; 3] {
-    let v = [
-        (p[0] - center3[0]) as f32,
-        (p[1] - center3[1]) as f32,
-        (p[2] - center3[2]) as f32,
-    ];
-    q_rotate(cam.rot, v)
-}
-
-/// カメラ空間 → スクリーン座標。`project` の後半と同一の式。
-fn to_screen(r: [f32; 3], cam: &CameraState, scale: f32, screen_center: [f32; 2]) -> egui::Pos2 {
-    egui::pos2(
-        screen_center[0] + cam.pan[0] + r[0] * scale,
-        screen_center[1] + cam.pan[1] - r[1] * scale,
-    )
 }
 
 /// RGB を `shade`（0–1）倍して明度を落とす（アルファは保持）。
@@ -279,15 +261,11 @@ fn section_outline(sec: &Section) -> Option<Vec<[f64; 2]>> {
 /// `coords` は表示用の節点座標（変形図では変位を加味済み）で、
 /// `model.nodes` と同順であること。断面を描けなかった線材
 /// （断面未割当・形状情報なし）の本数を返す。
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_section_solids(
     painter: &egui::Painter,
     model: &Model,
     coords: &[[f64; 3]],
-    center3: [f64; 3],
-    cam: &CameraState,
-    scale: f32,
-    screen_center: [f32; 2],
+    proj: &Projector,
 ) -> usize {
     // (奥行き, 描画要素)。奥行きはカメラ空間 z（手前が正）の平均。
     let mut prims: Vec<(f32, SolidPrim)> = Vec::new();
@@ -324,7 +302,7 @@ pub(super) fn draw_section_solids(
                         p[1] + ey[1] * y + ez[1] * z,
                         p[2] + ey[2] * y + ez[2] * z,
                     ];
-                    cam_space(w, center3, cam)
+                    proj.cam_space(w)
                 })
                 .collect()
         };
@@ -343,10 +321,10 @@ pub(super) fn draw_section_solids(
                 depth,
                 SolidPrim::Quad {
                     pts: [
-                        to_screen(quad[0], cam, scale, screen_center),
-                        to_screen(quad[1], cam, scale, screen_center),
-                        to_screen(quad[2], cam, scale, screen_center),
-                        to_screen(quad[3], cam, scale, screen_center),
+                        proj.cam_to_screen(quad[0]),
+                        proj.cam_to_screen(quad[1]),
+                        proj.cam_to_screen(quad[2]),
+                        proj.cam_to_screen(quad[3]),
                     ],
                     fill,
                     stroke: shaded(base, shade * 0.6),
@@ -359,10 +337,7 @@ pub(super) fn draw_section_solids(
             prims.push((
                 depth,
                 SolidPrim::Outline {
-                    pts: ring
-                        .iter()
-                        .map(|&r| to_screen(r, cam, scale, screen_center))
-                        .collect(),
+                    pts: ring.iter().map(|&r| proj.cam_to_screen(r)).collect(),
                     color: shaded(base, 0.5),
                 },
             ));
